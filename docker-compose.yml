@@ -1,0 +1,289 @@
+version: '3.8'
+
+services:
+  # Database Services
+  postgres:
+    image: postgres:15-alpine
+    container_name: liquorpro-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: liquorpro
+      POSTGRES_USER: liquorpro
+      POSTGRES_PASSWORD: liquorpro_password
+      POSTGRES_MULTIPLE_EXTENSIONS: uuid-ossp,pg_trgm
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U liquorpro -d liquorpro"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: liquorpro-redis
+    restart: unless-stopped
+    command: redis-server --requirepass redis_password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Microservices
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: liquorpro-gateway
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      - APP_ENVIRONMENT=production
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=liquorpro
+      - DATABASE_PASSWORD=liquorpro_password
+      - DATABASE_NAME=liquorpro
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis_password
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  auth:
+    build:
+      context: .
+      dockerfile: Dockerfile.auth
+    container_name: liquorpro-auth
+    restart: unless-stopped
+    ports:
+      - "8091:8091"
+    environment:
+      - APP_ENVIRONMENT=production
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=liquorpro
+      - DATABASE_PASSWORD=liquorpro_password
+      - DATABASE_NAME=liquorpro
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis_password
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8091/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  sales:
+    build:
+      context: .
+      dockerfile: Dockerfile.sales
+    container_name: liquorpro-sales
+    restart: unless-stopped
+    ports:
+      - "8092:8092"
+    environment:
+      - APP_ENVIRONMENT=production
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=liquorpro
+      - DATABASE_PASSWORD=liquorpro_password
+      - DATABASE_NAME=liquorpro
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis_password
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8092/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  inventory:
+    build:
+      context: .
+      dockerfile: Dockerfile.inventory
+    container_name: liquorpro-inventory
+    restart: unless-stopped
+    ports:
+      - "8093:8093"
+    environment:
+      - APP_ENVIRONMENT=production
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=liquorpro
+      - DATABASE_PASSWORD=liquorpro_password
+      - DATABASE_NAME=liquorpro
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis_password
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8093/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  finance:
+    build:
+      context: .
+      dockerfile: Dockerfile.finance
+    container_name: liquorpro-finance
+    restart: unless-stopped
+    ports:
+      - "8094:8094"
+    environment:
+      - APP_ENVIRONMENT=production
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=liquorpro
+      - DATABASE_PASSWORD=liquorpro_password
+      - DATABASE_NAME=liquorpro
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis_password
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8094/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: liquorpro-frontend
+    restart: unless-stopped
+    ports:
+      - "8095:8095"
+    environment:
+      - APP_ENVIRONMENT=production
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=liquorpro
+      - DATABASE_PASSWORD=liquorpro_password
+      - DATABASE_NAME=liquorpro
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis_password
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+      - GATEWAY_URL=http://gateway:8090
+      - AUTH_SERVICE_URL=http://auth:8091
+      - SALES_SERVICE_URL=http://sales:8092
+      - INVENTORY_SERVICE_URL=http://inventory:8093
+      - FINANCE_SERVICE_URL=http://finance:8094
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8095/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring (Optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: liquorpro-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - liquorpro-network
+    profiles: ["monitoring"]
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: liquorpro-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - liquorpro-network
+    profiles: ["monitoring"]
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  liquorpro-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

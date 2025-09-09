@@ -1,0 +1,458 @@
+# Auth Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: liquorpro
+  labels:
+    app: auth
+    service: auth
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+        service: auth
+    spec:
+      containers:
+      - name: auth
+        image: liquorpro/auth:latest
+        ports:
+        - containerPort: 8091
+        env:
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: jwt-secret
+        envFrom:
+        - configMapRef:
+            name: liquorpro-config
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8091
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8091
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: liquorpro
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8091
+    targetPort: 8091
+  selector:
+    app: auth
+
+---
+# Sales Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sales
+  namespace: liquorpro
+  labels:
+    app: sales
+    service: sales
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sales
+  template:
+    metadata:
+      labels:
+        app: sales
+        service: sales
+    spec:
+      containers:
+      - name: sales
+        image: liquorpro/sales:latest
+        ports:
+        - containerPort: 8092
+        env:
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: jwt-secret
+        envFrom:
+        - configMapRef:
+            name: liquorpro-config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8092
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8092
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sales
+  namespace: liquorpro
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8092
+    targetPort: 8092
+  selector:
+    app: sales
+
+---
+# Inventory Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: liquorpro
+  labels:
+    app: inventory
+    service: inventory
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory
+  template:
+    metadata:
+      labels:
+        app: inventory
+        service: inventory
+    spec:
+      containers:
+      - name: inventory
+        image: liquorpro/inventory:latest
+        ports:
+        - containerPort: 8093
+        env:
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: jwt-secret
+        envFrom:
+        - configMapRef:
+            name: liquorpro-config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8093
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8093
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  namespace: liquorpro
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8093
+    targetPort: 8093
+  selector:
+    app: inventory
+
+---
+# Finance Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: finance
+  namespace: liquorpro
+  labels:
+    app: finance
+    service: finance
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: finance
+  template:
+    metadata:
+      labels:
+        app: finance
+        service: finance
+    spec:
+      containers:
+      - name: finance
+        image: liquorpro/finance:latest
+        ports:
+        - containerPort: 8094
+        env:
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: jwt-secret
+        envFrom:
+        - configMapRef:
+            name: liquorpro-config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8094
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8094
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: finance
+  namespace: liquorpro
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8094
+    targetPort: 8094
+  selector:
+    app: finance
+
+---
+# Frontend Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: liquorpro
+  labels:
+    app: frontend
+    service: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        service: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: liquorpro/frontend:latest
+        ports:
+        - containerPort: 8095
+        env:
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secrets
+              key: jwt-secret
+        envFrom:
+        - configMapRef:
+            name: liquorpro-config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8095
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8095
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: liquorpro
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8095
+    targetPort: 8095
+  selector:
+    app: frontend
+
+---
+# HPA for Sales Service (High traffic expected)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sales-hpa
+  namespace: liquorpro
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sales
+  minReplicas: 3
+  maxReplicas: 15
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+---
+# HPA for Frontend Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend-hpa
+  namespace: liquorpro
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70

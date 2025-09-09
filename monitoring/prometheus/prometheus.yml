@@ -1,0 +1,105 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # LiquorPro services metrics
+  - job_name: 'gateway'
+    static_configs:
+      - targets: ['gateway:9091']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: 'auth-service'
+    static_configs:
+      - targets: ['auth:9092']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: 'inventory-service'
+    static_configs:
+      - targets: ['inventory:9093']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: 'sales-service'
+    static_configs:
+      - targets: ['sales:9094']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: 'finance-service'
+    static_configs:
+      - targets: ['finance:9095']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # System metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 5s
+
+  # Database metrics
+  - job_name: 'postgres-exporter'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    scrape_interval: 10s
+
+  # Redis metrics
+  - job_name: 'redis-exporter'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 10s
+
+  # Nginx metrics (if nginx-prometheus-exporter is added)
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+    scrape_interval: 10s
+
+  # Custom business metrics endpoints
+  - job_name: 'business-metrics'
+    static_configs:
+      - targets: 
+        - 'gateway:8090'
+        - 'auth:8091'
+        - 'sales:8092'
+        - 'inventory:8093'
+        - 'finance:8094'
+    metrics_path: /metrics/business
+    scrape_interval: 30s
+
+# Recording rules for common queries
+recording_rules:
+  - name: liquorpro.rules
+    interval: 10s
+    rules:
+    - record: liquorpro:http_request_rate
+      expr: rate(http_requests_total[1m])
+    
+    - record: liquorpro:http_request_duration_p95
+      expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+    
+    - record: liquorpro:http_request_duration_p99
+      expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))
+    
+    - record: liquorpro:error_rate
+      expr: rate(http_requests_total{status_code=~"5.."}[1m]) / rate(http_requests_total[1m])
+    
+    - record: liquorpro:db_connection_utilization
+      expr: db_connections_active / db_connections_max * 100

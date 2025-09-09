@@ -1,0 +1,447 @@
+# Horizontal Pod Autoscaler for Gateway Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway-hpa
+  namespace: liquorpro-prod
+  labels:
+    app: gateway
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max
+
+---
+# Horizontal Pod Autoscaler for Auth Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: auth-hpa
+  namespace: liquorpro-prod
+  labels:
+    app: auth
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: auth
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+
+---
+# Horizontal Pod Autoscaler for Sales Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sales-hpa
+  namespace: liquorpro-prod
+  labels:
+    app: sales
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sales
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Pods
+    pods:
+      metric:
+        name: pending_sales_records
+      target:
+        type: AverageValue
+        averageValue: "5"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 33
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Percent
+        value: 200
+        periodSeconds: 15
+
+---
+# Horizontal Pod Autoscaler for Inventory Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inventory-hpa
+  namespace: liquorpro-prod
+  labels:
+    app: inventory
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inventory
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+
+---
+# Horizontal Pod Autoscaler for Finance Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: finance-hpa
+  namespace: liquorpro-prod
+  labels:
+    app: finance
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: finance
+  minReplicas: 1
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+
+---
+# Vertical Pod Autoscaler for Database (if VPA is enabled)
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: postgres-vpa
+  namespace: liquorpro-prod
+  labels:
+    app: postgres
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: postgres
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: postgres
+      minAllowed:
+        cpu: 100m
+        memory: 128Mi
+      maxAllowed:
+        cpu: 2
+        memory: 4Gi
+      controlledResources: ["cpu", "memory"]
+
+---
+# PodDisruptionBudget for Gateway
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway-pdb
+  namespace: liquorpro-prod
+  labels:
+    app: gateway
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gateway
+
+---
+# PodDisruptionBudget for Auth Service
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: auth-pdb
+  namespace: liquorpro-prod
+  labels:
+    app: auth
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: auth
+
+---
+# PodDisruptionBudget for Sales Service
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sales-pdb
+  namespace: liquorpro-prod
+  labels:
+    app: sales
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sales
+
+---
+# PodDisruptionBudget for Inventory Service
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inventory-pdb
+  namespace: liquorpro-prod
+  labels:
+    app: inventory
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: inventory
+
+---
+# Custom Metrics for Application-Specific Scaling
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: liquorpro-metrics
+  namespace: liquorpro-prod
+  labels:
+    app: liquorpro
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: liquorpro-service
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+# KEDA ScaledObject for Redis Queue-based Scaling
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: sales-queue-scaler
+  namespace: liquorpro-prod
+  labels:
+    app: sales
+    component: queue-scaling
+spec:
+  scaleTargetRef:
+    name: sales
+  pollingInterval: 15
+  cooldownPeriod: 60
+  idleReplicaCount: 1
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  triggers:
+  - type: redis-streams
+    metadata:
+      address: redis:6379
+      stream: sales_processing
+      consumerGroup: sales_workers
+      pendingEntriesCount: "5"
+      streamLength: "10"
+
+---
+# KEDA ScaledObject for HTTP Request-based Scaling
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: gateway-http-scaler
+  namespace: liquorpro-prod
+  labels:
+    app: gateway
+    component: http-scaling
+spec:
+  scaleTargetRef:
+    name: gateway
+  pollingInterval: 10
+  cooldownPeriod: 30
+  idleReplicaCount: 2
+  minReplicaCount: 2
+  maxReplicaCount: 15
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: http_requests_per_second
+      threshold: '100'
+      query: sum(rate(http_requests_total{job="gateway"}[1m]))
+
+---
+# NetworkPolicy to control traffic during scaling
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: liquorpro-network-policy
+  namespace: liquorpro-prod
+  labels:
+    app: liquorpro
+    component: security
+spec:
+  podSelector:
+    matchLabels:
+      app: liquorpro-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: nginx-ingress
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 9090
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53

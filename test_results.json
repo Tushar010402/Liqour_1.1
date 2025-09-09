@@ -1,0 +1,13 @@
+{
+  "tests": [
+    {
+      "name": "Gateway Health Check",
+      "status": "failed"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1
+  }
+}

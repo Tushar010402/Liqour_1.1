@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: liquorpro
+  labels:
+    name: liquorpro
+    app: liquorpro
+    version: "1.0.0"
+  annotations:
+    description: "LiquorPro - Modern Liquor Shop Management System"

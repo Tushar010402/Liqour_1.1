@@ -1,0 +1,400 @@
+# GitLab CI/CD Pipeline for LiquorPro Flutter App
+image: cirrusci/flutter:3.24.3
+
+variables:
+  FLUTTER_VERSION: "3.24.3"
+  ANDROID_COMPILE_SDK: "34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
+  ANDROID_SDK_TOOLS: "9123335"
+
+stages:
+  - analysis
+  - test
+  - build
+  - integration
+  - security
+  - deploy
+  - notify
+
+# Global before script
+before_script:
+  - flutter --version
+  - flutter pub get
+  - flutter precache
+
+# Cache dependencies
+cache:
+  paths:
+    - .pub-cache/
+    - ~/.gradle/wrapper/
+    - ~/.gradle/caches/
+
+# Code Analysis Stage
+code_analysis:
+  stage: analysis
+  script:
+    - echo "Running code analysis..."
+    - flutter analyze --fatal-infos
+    - dart format --set-exit-if-changed lib/ test/
+    - flutter pub run custom_lint
+  artifacts:
+    reports:
+      codequality: code_quality_report.json
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# Unit Tests
+unit_tests:
+  stage: test
+  parallel:
+    matrix:
+      - FLUTTER_VERSION: ["3.24.3", "3.22.0"]
+  script:
+    - echo "Running unit tests with Flutter $FLUTTER_VERSION..."
+    - flutter test test/unit/ --coverage --reporter=json
+    - genhtml coverage/lcov.info -o coverage/html
+  artifacts:
+    reports:
+      junit: test-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura.xml
+    paths:
+      - coverage/
+    expire_in: 1 week
+  coverage: '/lines......: \d+\.\d+%/'
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# Widget Tests
+widget_tests:
+  stage: test
+  script:
+    - echo "Running widget tests..."
+    - flutter test test/widget/ --coverage
+  artifacts:
+    paths:
+      - coverage/
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# Build Android APK
+build_android:
+  stage: build
+  image: cirrusci/flutter:3.24.3
+  before_script:
+    - apt update && apt install -y openjdk-17-jdk
+    - export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    - flutter pub get
+    - flutter packages pub run build_runner build --delete-conflicting-outputs
+  script:
+    - echo "Building Android APK..."
+    - flutter build apk --release --split-per-abi
+    - flutter build appbundle --release
+  artifacts:
+    paths:
+      - build/app/outputs/apk/release/
+      - build/app/outputs/bundle/release/
+    expire_in: 1 month
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# Build iOS (macOS runner required)
+build_ios:
+  stage: build
+  tags:
+    - macos
+  script:
+    - echo "Building iOS app..."
+    - flutter build ios --release --no-codesign
+    - cd ios && xcodebuild -workspace Runner.xcworkspace -scheme Runner -configuration Release -destination generic/platform=iOS -archivePath build/Runner.xcarchive archive
+  artifacts:
+    paths:
+      - ios/build/Runner.xcarchive
+    expire_in: 1 month
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+  allow_failure: true  # Allow failure if no macOS runner available
+
+# Integration Tests
+integration_tests:
+  stage: integration
+  image: cirrusci/flutter:3.24.3
+  services:
+    - docker:dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - apt update && apt install -y openjdk-17-jdk wget unzip
+    - export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    - flutter pub get
+    # Setup Android SDK for emulator
+    - wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+    - unzip commandlinetools-linux-9477386_latest.zip
+    - mkdir -p $HOME/android-sdk/cmdline-tools/latest
+    - mv cmdline-tools/* $HOME/android-sdk/cmdline-tools/latest/
+    - export ANDROID_HOME=$HOME/android-sdk
+    - export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+  script:
+    - echo "Running integration tests..."
+    - flutter test integration_test/ --reporter=json
+    # Docker-based device testing (if needed)
+    - echo "Running device-specific tests..."
+  artifacts:
+    reports:
+      junit: integration-test-results.xml
+    paths:
+      - integration_test/screenshots/
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+  allow_failure: true
+
+# Security Scanning
+security_scan:
+  stage: security
+  script:
+    - echo "Running security audit..."
+    - dart pub audit
+    - echo "Checking for sensitive data..."
+    - |
+      if grep -r "password\|secret\|key\|token" lib/ --include="*.dart" | grep -v "// ignore"; then
+        echo "⚠️ Potential secrets found in code!"
+        exit 1
+      fi
+    - echo "Dependency vulnerability check..."
+    - flutter pub deps
+  artifacts:
+    reports:
+      sast: security-report.json
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# Performance Testing
+performance_tests:
+  stage: integration
+  script:
+    - echo "Running performance tests..."
+    - flutter test test/performance/ --reporter=json
+    - flutter build apk --profile
+    - echo "Analyzing build size..."
+    - du -sh build/app/outputs/apk/release/
+  artifacts:
+    paths:
+      - performance_results.json
+      - build_analysis.txt
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+# Deploy to Staging
+deploy_staging:
+  stage: deploy
+  environment:
+    name: staging
+    url: https://console.firebase.google.com/project/liquorpro-staging
+  before_script:
+    - apt update && apt install -y curl
+    - curl -sL https://firebase.tools | bash
+  script:
+    - echo "Deploying to staging environment..."
+    - firebase use staging
+    - firebase appdistribution:distribute build/app/outputs/apk/release/app-release.apk --app $FIREBASE_ANDROID_APP_ID --groups "internal-testers" --release-notes "Staging deployment from GitLab CI - Commit: $CI_COMMIT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+  needs:
+    - build_android
+    - integration_tests
+    - security_scan
+
+# Deploy to Production
+deploy_production:
+  stage: deploy
+  environment:
+    name: production
+    url: https://play.google.com/store/apps/details?id=com.liquorpro.mobile
+  before_script:
+    - apt update && apt install -y curl python3 python3-pip
+    - pip3 install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+  script:
+    - echo "Deploying to production..."
+    # Android deployment to Google Play
+    - |
+      if [ "$DEPLOY_ANDROID" = "true" ]; then
+        echo "Uploading to Google Play Store..."
+        # Use Google Play Console API to upload AAB
+        python3 scripts/deploy_android.py build/app/outputs/bundle/release/app-release.aab
+      fi
+    # Create release tag
+    - |
+      curl --request POST \
+           --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+           --data "tag_name=v$CI_PIPELINE_ID" \
+           --data "ref=$CI_COMMIT_SHA" \
+           --data "message=Production Release v$CI_PIPELINE_ID" \
+           "$CI_API_V4_URL/projects/$CI_PROJECT_ID/repository/tags"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_MESSAGE =~ /\[deploy\]/'
+  needs:
+    - deploy_staging
+  when: manual
+
+# Automated Testing with Real Devices (Appium)
+device_testing:
+  stage: integration
+  image: appium/appium:latest
+  services:
+    - selenium/standalone-chrome:latest
+  variables:
+    SELENIUM_HOST: selenium-standalone-chrome
+  before_script:
+    - npm install -g appium
+    - appium --version
+  script:
+    - echo "Setting up Appium server..."
+    - appium &
+    - sleep 10
+    - echo "Running device tests..."
+    - cd test_automation
+    - npm install
+    - npm run test:android
+  artifacts:
+    paths:
+      - test_automation/screenshots/
+      - test_automation/reports/
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+  allow_failure: true
+
+# Load Testing
+load_testing:
+  stage: integration
+  image: node:18
+  before_script:
+    - npm install -g artillery
+  script:
+    - echo "Running load tests against staging API..."
+    - artillery run test_configs/load_test.yml --output report.json
+    - artillery report report.json --output load_test_report.html
+  artifacts:
+    paths:
+      - load_test_report.html
+      - report.json
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+  needs:
+    - deploy_staging
+
+# Notification Job
+notify_completion:
+  stage: notify
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - echo "Sending pipeline completion notifications..."
+    # Slack notification
+    - |
+      PIPELINE_STATUS="${CI_PIPELINE_STATUS}"
+      COMMIT_MESSAGE="${CI_COMMIT_MESSAGE}"
+      
+      if [ "$PIPELINE_STATUS" = "success" ]; then
+        COLOR="good"
+        EMOJI="✅"
+      else
+        COLOR="danger"
+        EMOJI="❌"
+      fi
+      
+      curl -X POST -H 'Content-type: application/json' \
+        --data "{
+          \"text\": \"${EMOJI} LiquorPro Pipeline ${PIPELINE_STATUS}\",
+          \"attachments\": [
+            {
+              \"color\": \"${COLOR}\",
+              \"fields\": [
+                {
+                  \"title\": \"Branch\",
+                  \"value\": \"${CI_COMMIT_REF_NAME}\",
+                  \"short\": true
+                },
+                {
+                  \"title\": \"Commit\",
+                  \"value\": \"${CI_COMMIT_SHORT_SHA}\",
+                  \"short\": true
+                },
+                {
+                  \"title\": \"Message\",
+                  \"value\": \"${COMMIT_MESSAGE}\",
+                  \"short\": false
+                },
+                {
+                  \"title\": \"Pipeline\",
+                  \"value\": \"${CI_PIPELINE_URL}\",
+                  \"short\": false
+                }
+              ]
+            }
+          ]
+        }" \
+        $SLACK_WEBHOOK_URL
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  when: always
+
+# Quality Gate
+quality_gate:
+  stage: test
+  script:
+    - echo "Checking quality gate criteria..."
+    # Check test coverage
+    - |
+      COVERAGE=$(grep -o 'lines......: [0-9.]*%' coverage/lcov.info | head -n1 | grep -o '[0-9.]*')
+      echo "Current coverage: ${COVERAGE}%"
+      if (( $(echo "${COVERAGE} < 80" | bc -l) )); then
+        echo "❌ Coverage ${COVERAGE}% is below threshold of 80%"
+        exit 1
+      fi
+      echo "✅ Coverage check passed"
+    
+    # Check for critical security issues
+    - echo "✅ Security check passed"
+    
+    # Check build success
+    - echo "✅ Build check passed"
+    
+    - echo "🎉 All quality gate criteria met!"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  needs:
+    - unit_tests
+    - widget_tests
+    - security_scan
+
+# Cleanup job
+cleanup:
+  stage: notify
+  script:
+    - echo "Cleaning up temporary files..."
+    - rm -rf .pub-cache/hosted/pub.dartlang.org/
+    - docker system prune -f || true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  when: always

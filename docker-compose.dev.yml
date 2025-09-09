@@ -1,0 +1,277 @@
+
+# Development Docker Compose - Optimized for development workflow
+services:
+  # Database Services
+  postgres:
+    image: postgres:15-alpine
+    container_name: liquorpro-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: liquorpro_dev
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_MULTIPLE_EXTENSIONS: uuid-ossp,pg_trgm
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - ./scripts/dev-seed.sql:/docker-entrypoint-initdb.d/dev-seed.sql
+    networks:
+      - liquorpro-dev-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: liquorpro-dev-redis
+    restart: unless-stopped
+    command: redis-server --requirepass dev_redis_pass
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_dev_data:/data
+    networks:
+      - liquorpro-dev-network
+
+  # Development services with hot reload
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: liquorpro-dev-gateway
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      - APP_ENVIRONMENT=development
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8090
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=dev_user
+      - DATABASE_PASSWORD=dev_password
+      - DATABASE_NAME=liquorpro_dev
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=dev_redis_pass
+      - JWT_SECRET=dev-jwt-secret-key
+      - LOG_LEVEL=debug
+      - SERVICES_AUTH_URL=http://auth:8091
+      - SERVICES_SALES_URL=http://sales:8092
+      - SERVICES_INVENTORY_URL=http://inventory:8093
+      - SERVICES_FINANCE_URL=http://finance:8094
+      - SERVICES_FRONTEND_URL=http://frontend:8095
+    volumes:
+      # Mount source code for hot reload in development
+      - .:/app
+      - /app/vendor
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - liquorpro-dev-network
+
+  auth:
+    build:
+      context: .
+      dockerfile: Dockerfile.auth
+    container_name: liquorpro-dev-auth
+    restart: unless-stopped
+    ports:
+      - "8091:8091"
+    environment:
+      - APP_ENVIRONMENT=development
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8091
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=dev_user
+      - DATABASE_PASSWORD=dev_password
+      - DATABASE_NAME=liquorpro_dev
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=dev_redis_pass
+      - JWT_SECRET=dev-jwt-secret-key
+      - LOG_LEVEL=debug
+    volumes:
+      - .:/app
+      - /app/vendor
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - liquorpro-dev-network
+
+  sales:
+    build:
+      context: .
+      dockerfile: Dockerfile.sales
+    container_name: liquorpro-dev-sales
+    restart: unless-stopped
+    ports:
+      - "8092:8092"
+    environment:
+      - APP_ENVIRONMENT=development
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8092
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=dev_user
+      - DATABASE_PASSWORD=dev_password
+      - DATABASE_NAME=liquorpro_dev
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=dev_redis_pass
+      - JWT_SECRET=dev-jwt-secret-key
+      - LOG_LEVEL=debug
+    volumes:
+      - .:/app
+      - /app/vendor
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - liquorpro-dev-network
+
+  inventory:
+    build:
+      context: .
+      dockerfile: Dockerfile.inventory
+    container_name: liquorpro-dev-inventory
+    restart: unless-stopped
+    ports:
+      - "8093:8093"
+    environment:
+      - APP_ENVIRONMENT=development
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8093
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=dev_user
+      - DATABASE_PASSWORD=dev_password
+      - DATABASE_NAME=liquorpro_dev
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=dev_redis_pass
+      - JWT_SECRET=dev-jwt-secret-key
+      - LOG_LEVEL=debug
+    volumes:
+      - .:/app
+      - /app/vendor
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - liquorpro-dev-network
+
+  finance:
+    build:
+      context: .
+      dockerfile: Dockerfile.finance
+    container_name: liquorpro-dev-finance
+    restart: unless-stopped
+    ports:
+      - "8094:8094"
+    environment:
+      - APP_ENVIRONMENT=development
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8094
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=dev_user
+      - DATABASE_PASSWORD=dev_password
+      - DATABASE_NAME=liquorpro_dev
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=dev_redis_pass
+      - JWT_SECRET=dev-jwt-secret-key
+      - LOG_LEVEL=debug
+    volumes:
+      - .:/app
+      - /app/vendor
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - liquorpro-dev-network
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: liquorpro-dev-frontend
+    restart: unless-stopped
+    ports:
+      - "8095:8095"
+    environment:
+      - APP_ENVIRONMENT=development
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=dev_user
+      - DATABASE_PASSWORD=dev_password
+      - DATABASE_NAME=liquorpro_dev
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=dev_redis_pass
+      - JWT_SECRET=dev-jwt-secret-key
+      - LOG_LEVEL=debug
+      - GATEWAY_URL=http://gateway:8090
+      - AUTH_SERVICE_URL=http://auth:8091
+      - SALES_SERVICE_URL=http://sales:8092
+      - INVENTORY_SERVICE_URL=http://inventory:8093
+      - FINANCE_SERVICE_URL=http://finance:8094
+    volumes:
+      - .:/app
+      - /app/vendor
+    depends_on:
+      - postgres
+      - redis
+      - gateway
+      - auth
+    networks:
+      - liquorpro-dev-network
+
+  # Development tools
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: liquorpro-dev-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"  # SMTP port
+      - "8025:8025"  # Web UI port
+    networks:
+      - liquorpro-dev-network
+
+  adminer:
+    image: adminer:latest
+    container_name: liquorpro-dev-adminer
+    restart: unless-stopped
+    ports:
+      - "8100:8090"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    networks:
+      - liquorpro-dev-network
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: liquorpro-dev-redis-commander
+    restart: unless-stopped
+    ports:
+      - "8101:8091"
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:dev_redis_pass
+    networks:
+      - liquorpro-dev-network
+
+volumes:
+  postgres_dev_data:
+    driver: local
+  redis_dev_data:
+    driver: local
+
+networks:
+  liquorpro-dev-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

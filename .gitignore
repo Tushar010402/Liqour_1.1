@@ -1,0 +1,289 @@
+# LiquorPro - Git Ignore File
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+build/
+dist/
+*.test
+*.prof
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.staging
+config/config.yaml
+config/config.yml
+!config/config.example.yaml
+!config/config.example.yml
+
+# Logs
+logs/
+*.log
+log/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Coverage files
+coverage.out
+coverage.html
+*.cover
+
+# Profiling files
+*.cpu
+*.mem
+
+# Local data directories
+data/
+postgres_data/
+redis_data/
+
+# Keys and certificates
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Configuration overrides
+config/local.yaml
+config/local.yml
+config/development.yaml
+config/production.yaml
+
+# Node modules (if any frontend build tools are used)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python files (if any Python tools are used)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Kubernetes secrets
+k8s/secrets-actual.yaml
+k8s/*-secret.yaml
+k8s/production/
+
+# Docker volumes
+postgres_data/
+redis_data/
+grafana_data/
+prometheus_data/
+
+# Migration files with sensitive data
+migrations/data/
+seeds/production/
+
+# Local testing
+test_results/
+benchmark_results/
+
+# Documentation builds
+docs/build/
+docs/_build/
+
+# Terraform files (if using for infrastructure)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Local scripts
+scripts/local/
+scripts/production/
+!scripts/local/.gitkeep
+!scripts/production/.gitkeep
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Local development overrides
+docker-compose.override.yml
+docker-compose.local.yml
+
+# JetBrains IDEs
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Vim
+*.swp
+*.swo
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Local environment variables
+.envrc
+
+# Air (hot reload) temporary files
+.air/
+tmp-air/
+
+# GoLand
+.idea/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Local databases
+*.db-journal
+
+# Go vendor directory
+vendor/
+
+# Go sum files (included in version control)
+# go.sum is typically included, but if you want to exclude it:
+# go.sum
+
+# Delve debugger
+__debug_bin
+
+# Output directory
+output/
+
+# Temporary build files
+.build/
+
+# Local configuration
+local.yaml
+local.yml
+
+# Platform-specific ignores
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# Logs and runtime files
+pids
+*.pid
+*.seed
+*.pid.lock
+.lock-wscript
+
+# Runtime data
+pids/
+logs/
+results/
+
+# Instrumentation and profiling
+lib-cov/
+coverage/
+.nyc_output/
+.grunt/
+.sass-cache/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Serverless directories
+.serverless
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# End of LiquorPro gitignore

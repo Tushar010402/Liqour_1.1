@@ -1,0 +1,50 @@
+# Copy this file to .github/workflows/go-backend-ci-cd.yml
+name: Go Backend CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths-ignore: ['Flutter_App/**']
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore: ['Flutter_App/**']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    - name: Run tests
+      env:
+        DATABASE_URL: postgres://postgres:testpass@localhost:5432/testdb?sslmode=disable
+      run: go test -v ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [auth, finance, gateway, inventory, sales]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    - name: Build service
+      run: go build -o bin/${{ matrix.service }} ./cmd/${{ matrix.service }}

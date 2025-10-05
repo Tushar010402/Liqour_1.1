@@ -30,15 +30,15 @@ func NewSalesService(db *database.DB, cache *cache.Cache) *SalesService {
 
 // SaleRequest represents sale creation/update request
 type SaleRequest struct {
-	SaleDate      time.Time        `json:"sale_date" binding:"required"`
-	ShopID        uuid.UUID        `json:"shop_id" binding:"required"`
-	SalesmanID    *uuid.UUID       `json:"salesman_id"`
-	CustomerName  string           `json:"customer_name"`
-	CustomerPhone string           `json:"customer_phone"`
-	PaymentMethod string           `json:"payment_method" binding:"required"`
-	PaymentStatus string           `json:"payment_status"`
-	PaidAmount    float64          `json:"paid_amount" binding:"min=0"`
-	Notes         string           `json:"notes"`
+	SaleDate      time.Time         `json:"sale_date" binding:"required"`
+	ShopID        uuid.UUID         `json:"shop_id" binding:"required"`
+	SalesmanID    *uuid.UUID        `json:"salesman_id"`
+	CustomerName  string            `json:"customer_name"`
+	CustomerPhone string            `json:"customer_phone"`
+	PaymentMethod string            `json:"payment_method" binding:"required"`
+	PaymentStatus string            `json:"payment_status"`
+	PaidAmount    float64           `json:"paid_amount" binding:"min=0"`
+	Notes         string            `json:"notes"`
 	Items         []SaleItemRequest `json:"items" binding:"required,min=1"`
 }
 
@@ -53,32 +53,32 @@ type SaleItemRequest struct {
 
 // SaleResponse represents sale in responses
 type SaleResponse struct {
-	ID            uuid.UUID         `json:"id"`
-	SaleNumber    string            `json:"sale_number"`
-	SaleDate      time.Time         `json:"sale_date"`
-	ShopID        uuid.UUID         `json:"shop_id"`
-	ShopName      string            `json:"shop_name"`
-	SalesmanID    *uuid.UUID        `json:"salesman_id"`
-	SalesmanName  string            `json:"salesman_name"`
-	CustomerName  string            `json:"customer_name"`
-	CustomerPhone string            `json:"customer_phone"`
-	SubTotal      float64           `json:"sub_total"`
-	DiscountAmount float64          `json:"discount_amount"`
-	TaxAmount     float64           `json:"tax_amount"`
-	TotalAmount   float64           `json:"total_amount"`
-	PaidAmount    float64           `json:"paid_amount"`
-	DueAmount     float64           `json:"due_amount"`
-	PaymentMethod string            `json:"payment_method"`
-	PaymentStatus string            `json:"payment_status"`
-	Status        string            `json:"status"`
-	ApprovedAt    *time.Time        `json:"approved_at"`
-	ApprovedByName string           `json:"approved_by_name"`
-	CreatedByName string            `json:"created_by_name"`
-	Notes         string            `json:"notes"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	Items         []SaleItemResponse `json:"items"`
-	TotalItems    int               `json:"total_items"`
+	ID             uuid.UUID          `json:"id"`
+	SaleNumber     string             `json:"sale_number"`
+	SaleDate       time.Time          `json:"sale_date"`
+	ShopID         uuid.UUID          `json:"shop_id"`
+	ShopName       string             `json:"shop_name"`
+	SalesmanID     *uuid.UUID         `json:"salesman_id"`
+	SalesmanName   string             `json:"salesman_name"`
+	CustomerName   string             `json:"customer_name"`
+	CustomerPhone  string             `json:"customer_phone"`
+	SubTotal       float64            `json:"sub_total"`
+	DiscountAmount float64            `json:"discount_amount"`
+	TaxAmount      float64            `json:"tax_amount"`
+	TotalAmount    float64            `json:"total_amount"`
+	PaidAmount     float64            `json:"paid_amount"`
+	DueAmount      float64            `json:"due_amount"`
+	PaymentMethod  string             `json:"payment_method"`
+	PaymentStatus  string             `json:"payment_status"`
+	Status         string             `json:"status"`
+	ApprovedAt     *time.Time         `json:"approved_at"`
+	ApprovedByName string             `json:"approved_by_name"`
+	CreatedByName  string             `json:"created_by_name"`
+	Notes          string             `json:"notes"`
+	CreatedAt      time.Time          `json:"created_at"`
+	UpdatedAt      time.Time          `json:"updated_at"`
+	Items          []SaleItemResponse `json:"items"`
+	TotalItems     int                `json:"total_items"`
 }
 
 // SaleItemResponse represents sale item in responses
@@ -107,7 +107,7 @@ func (s *SalesService) CreateSale(ctx context.Context, req SaleRequest, tenantID
 	// Verify salesman if provided
 	if req.SalesmanID != nil {
 		var salesman models.Salesman
-		if err := s.db.Where("id = ? AND tenant_id = ? AND shop_id = ?", 
+		if err := s.db.Where("id = ? AND tenant_id = ? AND shop_id = ?",
 			*req.SalesmanID, tenantID, req.ShopID).First(&salesman).Error; err != nil {
 			return nil, errors.New("salesman not found or doesn't belong to this shop")
 		}
@@ -153,7 +153,7 @@ func (s *SalesService) CreateSale(ctx context.Context, req SaleRequest, tenantID
 
 		// Create sale
 		sale = &models.Sale{
-			TenantModel:    models.TenantModel{TenantID: tenantID},
+			TenantModel:    models.TenantModel{TenantID: &tenantID},
 			SaleNumber:     utils.GenerateSaleNumber(),
 			SaleDate:       req.SaleDate,
 			ShopID:         req.ShopID,
@@ -181,7 +181,7 @@ func (s *SalesService) CreateSale(ctx context.Context, req SaleRequest, tenantID
 			totalPrice := (float64(itemReq.Quantity) * itemReq.UnitPrice) - itemReq.DiscountAmount
 
 			item := models.SaleItem{
-				TenantModel:    models.TenantModel{TenantID: tenantID},
+				TenantModel:    models.TenantModel{TenantID: &tenantID},
 				SaleID:         sale.ID,
 				ProductID:      itemReq.ProductID,
 				Quantity:       itemReq.Quantity,
@@ -199,7 +199,7 @@ func (s *SalesService) CreateSale(ctx context.Context, req SaleRequest, tenantID
 		// Create payment record if amount paid
 		if req.PaidAmount > 0 {
 			payment := models.SalePayment{
-				TenantModel:   models.TenantModel{TenantID: tenantID},
+				TenantModel:   models.TenantModel{TenantID: &tenantID},
 				SaleID:        sale.ID,
 				Amount:        req.PaidAmount,
 				PaymentMethod: req.PaymentMethod,
@@ -294,7 +294,7 @@ func (s *SalesService) GetSales(ctx context.Context, tenantID uuid.UUID, filters
 // GetSaleByID returns sale by ID
 func (s *SalesService) GetSaleByID(ctx context.Context, saleID, tenantID uuid.UUID) (*SaleResponse, error) {
 	var sale models.Sale
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", saleID, tenantID).
 		Preload("Shop").
 		Preload("Salesman").
@@ -304,7 +304,7 @@ func (s *SalesService) GetSaleByID(ctx context.Context, saleID, tenantID uuid.UU
 		Preload("Items.Product.Category").
 		Preload("Payments").
 		First(&sale).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("sale not found")
@@ -318,7 +318,7 @@ func (s *SalesService) GetSaleByID(ctx context.Context, saleID, tenantID uuid.UU
 // ApproveSale approves a sale
 func (s *SalesService) ApproveSale(ctx context.Context, saleID, tenantID, approvedByID uuid.UUID) (*SaleResponse, error) {
 	var sale models.Sale
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", saleID, tenantID).First(&sale).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -354,7 +354,7 @@ func (s *SalesService) ApproveSale(ctx context.Context, saleID, tenantID, approv
 // RejectSale rejects a sale
 func (s *SalesService) RejectSale(ctx context.Context, saleID, tenantID, rejectedByID uuid.UUID, reason string) error {
 	var sale models.Sale
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", saleID, tenantID).First(&sale).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -467,27 +467,27 @@ type SalesListResponse struct {
 // mapSaleToResponse converts model to response format
 func (s *SalesService) mapSaleToResponse(sale *models.Sale) *SaleResponse {
 	response := &SaleResponse{
-		ID:            sale.ID,
-		SaleNumber:    sale.SaleNumber,
-		SaleDate:      sale.SaleDate,
-		ShopID:        sale.ShopID,
-		SalesmanID:    sale.SalesmanID,
-		CustomerName:  sale.CustomerName,
-		CustomerPhone: sale.CustomerPhone,
-		SubTotal:      sale.SubTotal,
+		ID:             sale.ID,
+		SaleNumber:     sale.SaleNumber,
+		SaleDate:       sale.SaleDate,
+		ShopID:         sale.ShopID,
+		SalesmanID:     sale.SalesmanID,
+		CustomerName:   sale.CustomerName,
+		CustomerPhone:  sale.CustomerPhone,
+		SubTotal:       sale.SubTotal,
 		DiscountAmount: sale.DiscountAmount,
-		TaxAmount:     sale.TaxAmount,
-		TotalAmount:   sale.TotalAmount,
-		PaidAmount:    sale.PaidAmount,
-		DueAmount:     sale.DueAmount,
-		PaymentMethod: sale.PaymentMethod,
-		PaymentStatus: sale.PaymentStatus,
-		Status:        sale.Status,
-		ApprovedAt:    sale.ApprovedAt,
-		Notes:         sale.Notes,
-		CreatedAt:     sale.CreatedAt,
-		UpdatedAt:     sale.UpdatedAt,
-		TotalItems:    len(sale.Items),
+		TaxAmount:      sale.TaxAmount,
+		TotalAmount:    sale.TotalAmount,
+		PaidAmount:     sale.PaidAmount,
+		DueAmount:      sale.DueAmount,
+		PaymentMethod:  sale.PaymentMethod,
+		PaymentStatus:  sale.PaymentStatus,
+		Status:         sale.Status,
+		ApprovedAt:     sale.ApprovedAt,
+		Notes:          sale.Notes,
+		CreatedAt:      sale.CreatedAt,
+		UpdatedAt:      sale.UpdatedAt,
+		TotalItems:     len(sale.Items),
 	}
 
 	// Add shop info
@@ -528,11 +528,11 @@ func (s *SalesService) mapSaleToResponse(sale *models.Sale) *SaleResponse {
 			if item.Product != nil {
 				response.Items[i].ProductName = item.Product.Name
 				response.Items[i].Size = item.Product.Size
-				
+
 				if item.Product.Brand != nil {
 					response.Items[i].BrandName = item.Product.Brand.Name
 				}
-				
+
 				if item.Product.Category != nil {
 					response.Items[i].CategoryName = item.Product.Category.Name
 				}
@@ -550,7 +550,7 @@ func (s *SalesService) clearSalesCache(ctx context.Context, tenantID, shopID uui
 		fmt.Sprintf("uncollected_sales:%s", shopID.String()),
 		fmt.Sprintf("sales_summary:%s:%s", shopID.String(), time.Now().Format("2006-01-02")),
 	}
-	
+
 	for _, key := range cacheKeys {
 		s.cache.Delete(ctx, key)
 	}

@@ -25,41 +25,41 @@ func NewVendorService(db *database.DB, cache *cache.Cache) *VendorService {
 }
 
 type VendorRequest struct {
-	Name            string  `json:"name" binding:"required,max=255"`
-	ContactPerson   string  `json:"contact_person"`
-	Email           string  `json:"email"`
-	Phone           string  `json:"phone"`
-	Address         string  `json:"address"`
-	City            string  `json:"city"`
-	State           string  `json:"state"`
-	Country         string  `json:"country"`
-	PostalCode      string  `json:"postal_code"`
-	TaxID           string  `json:"tax_id"`
-	CreditLimit     float64 `json:"credit_limit"`
-	PaymentTerms    string  `json:"payment_terms"`
-	IsActive        *bool   `json:"is_active"`
+	Name          string  `json:"name" binding:"required,max=255"`
+	ContactPerson string  `json:"contact_person"`
+	Email         string  `json:"email"`
+	Phone         string  `json:"phone"`
+	Address       string  `json:"address"`
+	City          string  `json:"city"`
+	State         string  `json:"state"`
+	Country       string  `json:"country"`
+	PostalCode    string  `json:"postal_code"`
+	TaxID         string  `json:"tax_id"`
+	CreditLimit   float64 `json:"credit_limit"`
+	PaymentTerms  string  `json:"payment_terms"`
+	IsActive      *bool   `json:"is_active"`
 }
 
 type VendorResponse struct {
-	ID              uuid.UUID                    `json:"id"`
-	Name            string                       `json:"name"`
-	ContactPerson   string                       `json:"contact_person"`
-	Email           string                       `json:"email"`
-	Phone           string                       `json:"phone"`
-	Address         string                       `json:"address"`
-	City            string                       `json:"city"`
-	State           string                       `json:"state"`
-	Country         string                       `json:"country"`
-	PostalCode      string                       `json:"postal_code"`
-	TaxID           string                       `json:"tax_id"`
-	CreditLimit     float64                      `json:"credit_limit"`
-	PaymentTerms    string                       `json:"payment_terms"`
-	IsActive        bool                         `json:"is_active"`
-	TotalPurchases  float64                      `json:"total_purchases"`
-	OutstandingBalance float64                   `json:"outstanding_balance"`
-	BankAccounts    []VendorBankAccountResponse  `json:"bank_accounts"`
-	CreatedAt       time.Time                    `json:"created_at"`
-	UpdatedAt       time.Time                    `json:"updated_at"`
+	ID                 uuid.UUID                   `json:"id"`
+	Name               string                      `json:"name"`
+	ContactPerson      string                      `json:"contact_person"`
+	Email              string                      `json:"email"`
+	Phone              string                      `json:"phone"`
+	Address            string                      `json:"address"`
+	City               string                      `json:"city"`
+	State              string                      `json:"state"`
+	Country            string                      `json:"country"`
+	PostalCode         string                      `json:"postal_code"`
+	TaxID              string                      `json:"tax_id"`
+	CreditLimit        float64                     `json:"credit_limit"`
+	PaymentTerms       string                      `json:"payment_terms"`
+	IsActive           bool                        `json:"is_active"`
+	TotalPurchases     float64                     `json:"total_purchases"`
+	OutstandingBalance float64                     `json:"outstanding_balance"`
+	BankAccounts       []VendorBankAccountResponse `json:"bank_accounts"`
+	CreatedAt          time.Time                   `json:"created_at"`
+	UpdatedAt          time.Time                   `json:"updated_at"`
 }
 
 type VendorBankAccountRequest struct {
@@ -122,7 +122,7 @@ func (s *VendorService) CreateVendor(ctx context.Context, req VendorRequest, ten
 	vendor := models.Vendor{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		Name:          req.Name,
 		ContactPerson: req.ContactPerson,
@@ -152,8 +152,13 @@ func (s *VendorService) CreateVendor(ctx context.Context, req VendorRequest, ten
 }
 
 func (s *VendorService) GetVendors(ctx context.Context, tenantID uuid.UUID, includeInactive bool) ([]VendorResponse, error) {
-	cacheKey := fmt.Sprintf("vendors:tenant:%s:inactive:%t", tenantID.String(), includeInactive)
-	
+	// Handle cache key for saas_admin (system-wide access)
+	tenantKeyPart := "all"
+	if tenantID != uuid.Nil {
+		tenantKeyPart = tenantID.String()
+	}
+	cacheKey := fmt.Sprintf("vendors:tenant:%s:inactive:%t", tenantKeyPart, includeInactive)
+
 	// Try to get from cache
 	var cachedVendors []VendorResponse
 	if err := s.cache.Get(ctx, cacheKey, &cachedVendors); err == nil {
@@ -161,8 +166,12 @@ func (s *VendorService) GetVendors(ctx context.Context, tenantID uuid.UUID, incl
 	}
 
 	var vendors []models.Vendor
-	query := s.db.DB.Where("tenant_id = ?", tenantID)
-	
+	// Build query - if tenantID is uuid.Nil (saas_admin), don't filter by tenant
+	query := s.db.DB
+	if tenantID != uuid.Nil {
+		query = query.Where("tenant_id = ?", tenantID)
+	}
+
 	if !includeInactive {
 		query = query.Where("is_active = ?", true)
 	}
@@ -327,7 +336,7 @@ func (s *VendorService) AddVendorBankAccount(ctx context.Context, vendorID uuid.
 	bankAccount := models.VendorBankAccount{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		VendorID:      vendorID,
 		BankName:      req.BankName,
@@ -373,7 +382,7 @@ func (s *VendorService) CreateVendorTransaction(ctx context.Context, req VendorT
 	transaction := models.VendorTransaction{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		VendorID:        req.VendorID,
 		TransactionType: req.TransactionType,
@@ -490,4 +499,160 @@ func (s *VendorService) buildVendorResponse(
 	}
 
 	return response
+}
+
+// Advanced Financial Reports
+type VendorAgingBucket struct {
+	Period string  `json:"period"`
+	Amount float64 `json:"amount"`
+	Count  int     `json:"count"`
+}
+
+type VendorAgingEntry struct {
+	VendorID   uuid.UUID           `json:"vendor_id"`
+	VendorName string              `json:"vendor_name"`
+	Total      float64             `json:"total"`
+	Buckets    []VendorAgingBucket `json:"buckets"`
+}
+
+type VendorAgingReport struct {
+	Vendors   []VendorAgingEntry `json:"vendors"`
+	Summary   map[string]float64 `json:"summary"`
+	TotalOwed float64            `json:"total_owed"`
+}
+
+func (s *VendorService) GetVendorAgingReport(ctx context.Context, tenantID uuid.UUID, asOfDate time.Time) (*VendorAgingReport, error) {
+	// For now, create a mock report with realistic data structure
+	// In production, this would calculate actual aging from vendor transactions
+	mockVendors := []VendorAgingEntry{
+		{
+			VendorID:   uuid.New(),
+			VendorName: "Premium Liquor Distributors",
+			Total:      15000.00,
+			Buckets: []VendorAgingBucket{
+				{Period: "0-30 days", Amount: 8000.00, Count: 5},
+				{Period: "31-60 days", Amount: 4000.00, Count: 2},
+				{Period: "61-90 days", Amount: 2000.00, Count: 1},
+				{Period: "90+ days", Amount: 1000.00, Count: 1},
+			},
+		},
+		{
+			VendorID:   uuid.New(),
+			VendorName: "Wholesale Wine Company",
+			Total:      8500.00,
+			Buckets: []VendorAgingBucket{
+				{Period: "0-30 days", Amount: 6000.00, Count: 3},
+				{Period: "31-60 days", Amount: 2500.00, Count: 2},
+				{Period: "61-90 days", Amount: 0, Count: 0},
+				{Period: "90+ days", Amount: 0, Count: 0},
+			},
+		},
+	}
+
+	summary := map[string]float64{
+		"0-30 days":  14000.00,
+		"31-60 days": 6500.00,
+		"61-90 days": 2000.00,
+		"90+ days":   1000.00,
+	}
+
+	return &VendorAgingReport{
+		Vendors:   mockVendors,
+		Summary:   summary,
+		TotalOwed: 23500.00,
+	}, nil
+}
+
+type BalanceSheetAssets struct {
+	CurrentAssets struct {
+		Cash               float64 `json:"cash"`
+		AccountsReceivable float64 `json:"accounts_receivable"`
+		Inventory          float64 `json:"inventory"`
+		OtherCurrentAssets float64 `json:"other_current_assets"`
+		Total              float64 `json:"total"`
+	} `json:"current_assets"`
+	FixedAssets struct {
+		Equipment  float64 `json:"equipment"`
+		Furniture  float64 `json:"furniture"`
+		OtherFixed float64 `json:"other_fixed"`
+		Total      float64 `json:"total"`
+	} `json:"fixed_assets"`
+	TotalAssets float64 `json:"total_assets"`
+}
+
+type BalanceSheetLiabilities struct {
+	CurrentLiabilities struct {
+		AccountsPayable         float64 `json:"accounts_payable"`
+		AccruedLiabilities      float64 `json:"accrued_liabilities"`
+		ShortTermDebt           float64 `json:"short_term_debt"`
+		OtherCurrentLiabilities float64 `json:"other_current_liabilities"`
+		Total                   float64 `json:"total"`
+	} `json:"current_liabilities"`
+	LongTermLiabilities struct {
+		LongTermDebt  float64 `json:"long_term_debt"`
+		OtherLongTerm float64 `json:"other_long_term"`
+		Total         float64 `json:"total"`
+	} `json:"long_term_liabilities"`
+	TotalLiabilities float64 `json:"total_liabilities"`
+}
+
+type BalanceSheetEquity struct {
+	OwnersEquity     float64 `json:"owners_equity"`
+	RetainedEarnings float64 `json:"retained_earnings"`
+	Total            float64 `json:"total"`
+}
+
+type BalanceSheetReport struct {
+	Assets      BalanceSheetAssets      `json:"assets"`
+	Liabilities BalanceSheetLiabilities `json:"liabilities"`
+	Equity      BalanceSheetEquity      `json:"equity"`
+}
+
+func (s *VendorService) GetBalanceSheetReport(ctx context.Context, tenantID uuid.UUID, asOfDate time.Time) (*BalanceSheetReport, error) {
+	// Mock balance sheet data - in production, this would calculate from actual financial data
+	report := &BalanceSheetReport{}
+
+	// Assets
+	report.Assets.CurrentAssets.Cash = 25000.00
+	report.Assets.CurrentAssets.AccountsReceivable = 18000.00
+	report.Assets.CurrentAssets.Inventory = 120000.00
+	report.Assets.CurrentAssets.OtherCurrentAssets = 5000.00
+	report.Assets.CurrentAssets.Total = report.Assets.CurrentAssets.Cash +
+		report.Assets.CurrentAssets.AccountsReceivable +
+		report.Assets.CurrentAssets.Inventory +
+		report.Assets.CurrentAssets.OtherCurrentAssets
+
+	report.Assets.FixedAssets.Equipment = 45000.00
+	report.Assets.FixedAssets.Furniture = 15000.00
+	report.Assets.FixedAssets.OtherFixed = 8000.00
+	report.Assets.FixedAssets.Total = report.Assets.FixedAssets.Equipment +
+		report.Assets.FixedAssets.Furniture +
+		report.Assets.FixedAssets.OtherFixed
+
+	report.Assets.TotalAssets = report.Assets.CurrentAssets.Total + report.Assets.FixedAssets.Total
+
+	// Liabilities
+	report.Liabilities.CurrentLiabilities.AccountsPayable = 23500.00
+	report.Liabilities.CurrentLiabilities.AccruedLiabilities = 8000.00
+	report.Liabilities.CurrentLiabilities.ShortTermDebt = 15000.00
+	report.Liabilities.CurrentLiabilities.OtherCurrentLiabilities = 2500.00
+	report.Liabilities.CurrentLiabilities.Total = report.Liabilities.CurrentLiabilities.AccountsPayable +
+		report.Liabilities.CurrentLiabilities.AccruedLiabilities +
+		report.Liabilities.CurrentLiabilities.ShortTermDebt +
+		report.Liabilities.CurrentLiabilities.OtherCurrentLiabilities
+
+	report.Liabilities.LongTermLiabilities.LongTermDebt = 35000.00
+	report.Liabilities.LongTermLiabilities.OtherLongTerm = 5000.00
+	report.Liabilities.LongTermLiabilities.Total = report.Liabilities.LongTermLiabilities.LongTermDebt +
+		report.Liabilities.LongTermLiabilities.OtherLongTerm
+
+	report.Liabilities.TotalLiabilities = report.Liabilities.CurrentLiabilities.Total +
+		report.Liabilities.LongTermLiabilities.Total
+
+	// Equity
+	report.Equity.OwnersEquity = 100000.00
+	report.Equity.RetainedEarnings = report.Assets.TotalAssets - report.Liabilities.TotalLiabilities - report.Equity.OwnersEquity
+	report.Equity.Total = report.Equity.OwnersEquity + report.Equity.RetainedEarnings
+
+	return report, nil
 }

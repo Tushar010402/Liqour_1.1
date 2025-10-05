@@ -28,7 +28,7 @@ type Config struct {
 // Initialize sets up the logger based on environment
 func Initialize(cfg Config) error {
 	var config zap.Config
-	
+
 	if cfg.Environment == "production" {
 		config = zap.NewProductionConfig()
 		config.EncoderConfig.TimeKey = "timestamp"
@@ -37,7 +37,7 @@ func Initialize(cfg Config) error {
 		config = zap.NewDevelopmentConfig()
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	}
-	
+
 	// Set log level
 	switch cfg.Level {
 	case "debug":
@@ -51,7 +51,7 @@ func Initialize(cfg Config) error {
 	default:
 		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	}
-	
+
 	// Build logger
 	var err error
 	Logger, err = config.Build(
@@ -63,11 +63,11 @@ func Initialize(cfg Config) error {
 			zap.Int("pid", os.Getpid()),
 		),
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to initialize logger: %w", err)
 	}
-	
+
 	Sugar = Logger.Sugar()
 	return nil
 }
@@ -77,22 +77,22 @@ func WithContext(ctx context.Context) *zap.Logger {
 	if Logger == nil {
 		return zap.NewNop()
 	}
-	
+
 	logger := Logger
-	
+
 	// Add common context fields
 	if requestID := ctx.Value("request_id"); requestID != nil {
 		logger = logger.With(zap.String("request_id", requestID.(string)))
 	}
-	
+
 	if userID := ctx.Value("user_id"); userID != nil {
 		logger = logger.With(zap.String("user_id", userID.(string)))
 	}
-	
+
 	if tenantID := ctx.Value("tenant_id"); tenantID != nil {
 		logger = logger.With(zap.String("tenant_id", tenantID.(string)))
 	}
-	
+
 	return logger
 }
 
@@ -101,29 +101,29 @@ func WithGinContext(c *gin.Context) *zap.Logger {
 	if Logger == nil {
 		return zap.NewNop()
 	}
-	
+
 	logger := Logger.With(
 		zap.String("method", c.Request.Method),
 		zap.String("path", c.Request.URL.Path),
 		zap.String("client_ip", c.ClientIP()),
 	)
-	
+
 	if requestID := c.GetString("request_id"); requestID != "" {
 		logger = logger.With(zap.String("request_id", requestID))
 	}
-	
+
 	if userID := c.GetString("user_id"); userID != "" {
 		logger = logger.With(zap.String("user_id", userID))
 	}
-	
+
 	if tenantID := c.GetString("tenant_id"); tenantID != "" {
 		logger = logger.With(zap.String("tenant_id", tenantID))
 	}
-	
+
 	if role := c.GetString("role"); role != "" {
 		logger = logger.With(zap.String("role", role))
 	}
-	
+
 	return logger
 }
 
@@ -132,33 +132,35 @@ func LogRequest(c *gin.Context) {
 	start := time.Now()
 	path := c.Request.URL.Path
 	raw := c.Request.URL.RawQuery
-	
+
 	// Process request
 	c.Next()
-	
+
 	// Log after request is processed
 	latency := time.Since(start)
 	clientIP := c.ClientIP()
 	method := c.Request.Method
 	statusCode := c.Writer.Status()
 	errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
-	
+
 	if raw != "" {
 		path = path + "?" + raw
 	}
-	
+
 	logger := WithGinContext(c)
-	
+
 	fields := []zap.Field{
 		zap.Int("status", statusCode),
+		zap.String("method", method),
+		zap.String("client_ip", clientIP),
 		zap.Duration("latency", latency),
 		zap.String("user_agent", c.Request.UserAgent()),
 	}
-	
+
 	if errorMessage != "" {
 		fields = append(fields, zap.String("error", errorMessage))
 	}
-	
+
 	// Log based on status code
 	switch {
 	case statusCode >= 500:
@@ -177,7 +179,7 @@ func LogDatabaseQuery(query string, duration time.Duration, rowsAffected int64) 
 	if Logger == nil {
 		return
 	}
-	
+
 	Logger.Debug("Database query",
 		zap.String("query", query),
 		zap.Duration("duration", duration),
@@ -190,7 +192,7 @@ func LogServiceCall(service string, method string, url string, statusCode int, d
 	if Logger == nil {
 		return
 	}
-	
+
 	fields := []zap.Field{
 		zap.String("service", service),
 		zap.String("method", method),
@@ -198,7 +200,7 @@ func LogServiceCall(service string, method string, url string, statusCode int, d
 		zap.Int("status_code", statusCode),
 		zap.Duration("duration", duration),
 	}
-	
+
 	if statusCode >= 500 {
 		Logger.Error("Service call failed", fields...)
 	} else if statusCode >= 400 {
@@ -213,13 +215,13 @@ func LogCriticalOperation(operation string, details map[string]interface{}, succ
 	if Logger == nil {
 		return
 	}
-	
+
 	fields := []zap.Field{
 		zap.String("operation", operation),
 		zap.Bool("success", success),
 		zap.Any("details", details),
 	}
-	
+
 	if success {
 		Logger.Info("Critical operation completed", fields...)
 	} else {
@@ -232,7 +234,7 @@ func LogMoneyCollection(collectionID string, action string, approved bool, deadl
 	if Logger == nil {
 		return
 	}
-	
+
 	Logger.Info("Money collection action",
 		zap.String("collection_id", collectionID),
 		zap.String("action", action),
@@ -247,7 +249,7 @@ func LogAudit(userID string, tenantID string, action string, resource string, re
 	if Logger == nil {
 		return
 	}
-	
+
 	Logger.Info("Audit event",
 		zap.String("user_id", userID),
 		zap.String("tenant_id", tenantID),
@@ -264,7 +266,7 @@ func LogSecurity(event string, userID string, ip string, details map[string]inte
 	if Logger == nil {
 		return
 	}
-	
+
 	Logger.Warn("Security event",
 		zap.String("event", event),
 		zap.String("user_id", userID),

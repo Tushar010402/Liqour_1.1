@@ -30,69 +30,69 @@ func NewDailySalesService(db *database.DB, cache *cache.Cache) *DailySalesServic
 
 // DailySalesRecordRequest represents daily sales record creation/update request
 type DailySalesRecordRequest struct {
-	RecordDate       time.Time              `json:"record_date" binding:"required"`
-	ShopID           uuid.UUID              `json:"shop_id" binding:"required"`
-	SalesmanID       *uuid.UUID             `json:"salesman_id"`
-	TotalSalesAmount float64                `json:"total_sales_amount" binding:"required,gt=0"`
-	TotalCashAmount  float64                `json:"total_cash_amount"`
-	TotalCardAmount  float64                `json:"total_card_amount"`
-	TotalUpiAmount   float64                `json:"total_upi_amount"`
-	TotalCreditAmount float64               `json:"total_credit_amount"`
-	Notes            string                 `json:"notes"`
-	Items            []DailySalesItemRequest `json:"items" binding:"required,min=1"`
-}
-
-// DailySalesItemRequest represents individual product sales within daily record
-type DailySalesItemRequest struct {
-	ProductID     uuid.UUID `json:"product_id" binding:"required"`
-	Quantity      int       `json:"quantity" binding:"required,gt=0"`
-	UnitPrice     float64   `json:"unit_price" binding:"required,gt=0"`
-	TotalAmount   float64   `json:"total_amount" binding:"required,gt=0"`
-	CashAmount    float64   `json:"cash_amount"`
-	CardAmount    float64   `json:"card_amount"`
-	UpiAmount     float64   `json:"upi_amount"`
-	CreditAmount  float64   `json:"credit_amount"`
-}
-
-// DailySalesRecordResponse represents daily sales record in responses
-type DailySalesRecordResponse struct {
-	ID                uuid.UUID               `json:"id"`
-	RecordDate        time.Time               `json:"record_date"`
-	ShopID            uuid.UUID               `json:"shop_id"`
-	ShopName          string                  `json:"shop_name"`
+	RecordDate        time.Time               `json:"record_date" binding:"required"`
+	ShopID            uuid.UUID               `json:"shop_id" binding:"required"`
 	SalesmanID        *uuid.UUID              `json:"salesman_id"`
-	SalesmanName      string                  `json:"salesman_name"`
-	TotalSalesAmount  float64                 `json:"total_sales_amount"`
+	TotalSalesAmount  float64                 `json:"total_sales_amount" binding:"required,gt=0"`
 	TotalCashAmount   float64                 `json:"total_cash_amount"`
 	TotalCardAmount   float64                 `json:"total_card_amount"`
 	TotalUpiAmount    float64                 `json:"total_upi_amount"`
 	TotalCreditAmount float64                 `json:"total_credit_amount"`
-	Status            string                  `json:"status"`
-	ApprovedAt        *time.Time              `json:"approved_at"`
-	ApprovedByName    string                  `json:"approved_by_name"`
-	CreatedByName     string                  `json:"created_by_name"`
 	Notes             string                  `json:"notes"`
-	CreatedAt         time.Time               `json:"created_at"`
-	UpdatedAt         time.Time               `json:"updated_at"`
+	Items             []DailySalesItemRequest `json:"items" binding:"required,min=1"`
+}
+
+// DailySalesItemRequest represents individual product sales within daily record
+type DailySalesItemRequest struct {
+	ProductID    uuid.UUID `json:"product_id" binding:"required"`
+	Quantity     int       `json:"quantity" binding:"required,gt=0"`
+	UnitPrice    float64   `json:"unit_price" binding:"required,gt=0"`
+	TotalAmount  float64   `json:"total_amount" binding:"required,gt=0"`
+	CashAmount   float64   `json:"cash_amount"`
+	CardAmount   float64   `json:"card_amount"`
+	UpiAmount    float64   `json:"upi_amount"`
+	CreditAmount float64   `json:"credit_amount"`
+}
+
+// DailySalesRecordResponse represents daily sales record in responses
+type DailySalesRecordResponse struct {
+	ID                uuid.UUID                `json:"id"`
+	RecordDate        time.Time                `json:"record_date"`
+	ShopID            uuid.UUID                `json:"shop_id"`
+	ShopName          string                   `json:"shop_name"`
+	SalesmanID        *uuid.UUID               `json:"salesman_id"`
+	SalesmanName      string                   `json:"salesman_name"`
+	TotalSalesAmount  float64                  `json:"total_sales_amount"`
+	TotalCashAmount   float64                  `json:"total_cash_amount"`
+	TotalCardAmount   float64                  `json:"total_card_amount"`
+	TotalUpiAmount    float64                  `json:"total_upi_amount"`
+	TotalCreditAmount float64                  `json:"total_credit_amount"`
+	Status            string                   `json:"status"`
+	ApprovedAt        *time.Time               `json:"approved_at"`
+	ApprovedByName    string                   `json:"approved_by_name"`
+	CreatedByName     string                   `json:"created_by_name"`
+	Notes             string                   `json:"notes"`
+	CreatedAt         time.Time                `json:"created_at"`
+	UpdatedAt         time.Time                `json:"updated_at"`
 	Items             []DailySalesItemResponse `json:"items"`
-	TotalItems        int                     `json:"total_items"`
+	TotalItems        int                      `json:"total_items"`
 }
 
 // DailySalesItemResponse represents daily sales item in responses
 type DailySalesItemResponse struct {
-	ID            uuid.UUID `json:"id"`
-	ProductID     uuid.UUID `json:"product_id"`
-	ProductName   string    `json:"product_name"`
-	BrandName     string    `json:"brand_name"`
-	CategoryName  string    `json:"category_name"`
-	Size          string    `json:"size"`
-	Quantity      int       `json:"quantity"`
-	UnitPrice     float64   `json:"unit_price"`
-	TotalAmount   float64   `json:"total_amount"`
-	CashAmount    float64   `json:"cash_amount"`
-	CardAmount    float64   `json:"card_amount"`
-	UpiAmount     float64   `json:"upi_amount"`
-	CreditAmount  float64   `json:"credit_amount"`
+	ID           uuid.UUID `json:"id"`
+	ProductID    uuid.UUID `json:"product_id"`
+	ProductName  string    `json:"product_name"`
+	BrandName    string    `json:"brand_name"`
+	CategoryName string    `json:"category_name"`
+	Size         string    `json:"size"`
+	Quantity     int       `json:"quantity"`
+	UnitPrice    float64   `json:"unit_price"`
+	TotalAmount  float64   `json:"total_amount"`
+	CashAmount   float64   `json:"cash_amount"`
+	CardAmount   float64   `json:"card_amount"`
+	UpiAmount    float64   `json:"upi_amount"`
+	CreditAmount float64   `json:"credit_amount"`
 }
 
 // CreateDailySalesRecord creates a new daily sales record with bulk items
@@ -105,7 +105,7 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 
 	// Check if record already exists for this date and shop
 	var existingRecord models.DailySalesRecord
-	if err := s.db.Where("record_date = ? AND shop_id = ? AND tenant_id = ?", 
+	if err := s.db.Where("record_date = ? AND shop_id = ? AND tenant_id = ?",
 		utils.StartOfDay(req.RecordDate), req.ShopID, tenantID).First(&existingRecord).Error; err == nil {
 		return nil, errors.New("daily sales record already exists for this date and shop")
 	}
@@ -119,7 +119,7 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 	// Verify salesman if provided
 	if req.SalesmanID != nil {
 		var salesman models.Salesman
-		if err := s.db.Where("id = ? AND tenant_id = ? AND shop_id = ?", 
+		if err := s.db.Where("id = ? AND tenant_id = ? AND shop_id = ?",
 			*req.SalesmanID, tenantID, req.ShopID).First(&salesman).Error; err != nil {
 			return nil, errors.New("salesman not found or doesn't belong to this shop")
 		}
@@ -130,7 +130,7 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		// Create daily sales record
 		record = &models.DailySalesRecord{
-			TenantModel:       models.TenantModel{TenantID: tenantID},
+			TenantModel:       models.TenantModel{TenantID: &tenantID},
 			RecordDate:        utils.StartOfDay(req.RecordDate),
 			ShopID:            req.ShopID,
 			SalesmanID:        req.SalesmanID,
@@ -165,7 +165,7 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 
 			// Create item
 			item := models.DailySalesItem{
-				TenantModel:        models.TenantModel{TenantID: tenantID},
+				TenantModel:        models.TenantModel{TenantID: &tenantID},
 				DailySalesRecordID: record.ID,
 				ProductID:          itemReq.ProductID,
 				Quantity:           itemReq.Quantity,
@@ -268,7 +268,7 @@ func (s *DailySalesService) GetDailySalesRecords(ctx context.Context, tenantID u
 // GetDailySalesRecordByID returns daily sales record by ID
 func (s *DailySalesService) GetDailySalesRecordByID(ctx context.Context, recordID, tenantID uuid.UUID) (*DailySalesRecordResponse, error) {
 	var record models.DailySalesRecord
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
 		Preload("Shop").
 		Preload("Salesman").
@@ -277,7 +277,7 @@ func (s *DailySalesService) GetDailySalesRecordByID(ctx context.Context, recordI
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category").
 		First(&record).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("daily sales record not found")
@@ -291,7 +291,7 @@ func (s *DailySalesService) GetDailySalesRecordByID(ctx context.Context, recordI
 // UpdateDailySalesRecord updates existing daily sales record
 func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID, tenantID uuid.UUID, req DailySalesRecordRequest) (*DailySalesRecordResponse, error) {
 	var record models.DailySalesRecord
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -349,7 +349,7 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 
 			// Create new item
 			item := models.DailySalesItem{
-				TenantModel:        models.TenantModel{TenantID: tenantID},
+				TenantModel:        models.TenantModel{TenantID: &tenantID},
 				DailySalesRecordID: recordID,
 				ProductID:          itemReq.ProductID,
 				Quantity:           itemReq.Quantity,
@@ -390,7 +390,7 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 // ApproveDailySalesRecord approves a daily sales record
 func (s *DailySalesService) ApproveDailySalesRecord(ctx context.Context, recordID, tenantID, approvedByID uuid.UUID) (*DailySalesRecordResponse, error) {
 	var record models.DailySalesRecord
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -426,7 +426,7 @@ func (s *DailySalesService) ApproveDailySalesRecord(ctx context.Context, recordI
 // RejectDailySalesRecord rejects a daily sales record
 func (s *DailySalesService) RejectDailySalesRecord(ctx context.Context, recordID, tenantID, rejectedByID uuid.UUID, reason string) error {
 	var record models.DailySalesRecord
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -541,11 +541,11 @@ func (s *DailySalesService) mapDailySalesRecordToResponse(record *models.DailySa
 			if item.Product != nil {
 				response.Items[i].ProductName = item.Product.Name
 				response.Items[i].Size = item.Product.Size
-				
+
 				if item.Product.Brand != nil {
 					response.Items[i].BrandName = item.Product.Brand.Name
 				}
-				
+
 				if item.Product.Category != nil {
 					response.Items[i].CategoryName = item.Product.Category.Name
 				}
@@ -563,7 +563,7 @@ func (s *DailySalesService) clearDailySalesCache(ctx context.Context, tenantID, 
 		fmt.Sprintf(cache.DailySalesKey, shopID.String(), time.Now().Format("2006-01-02")),
 		fmt.Sprintf(cache.PendingApprovalsKey, tenantID.String()),
 	}
-	
+
 	for _, key := range cacheKeys {
 		s.cache.Delete(ctx, key)
 	}

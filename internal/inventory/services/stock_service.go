@@ -11,6 +11,7 @@ import (
 	"github.com/liquorpro/go-backend/pkg/shared/database"
 	"github.com/liquorpro/go-backend/pkg/shared/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // StockService handles stock management operations
@@ -29,20 +30,20 @@ func NewStockService(db *database.DB, cache *cache.Cache) *StockService {
 
 // StockAdjustmentRequest represents stock adjustment request
 type StockAdjustmentRequest struct {
-	ShopID       uuid.UUID `json:"shop_id" binding:"required"`
-	ProductID    uuid.UUID `json:"product_id" binding:"required"`
-	Quantity     int       `json:"quantity" binding:"required"`
-	AdjustmentType string  `json:"adjustment_type" binding:"required"` // add, remove, set
-	Reason       string    `json:"reason" binding:"required"`
-	Notes        string    `json:"notes"`
+	ShopID         uuid.UUID `json:"shop_id" binding:"required"`
+	ProductID      uuid.UUID `json:"product_id" binding:"required"`
+	Quantity       int       `json:"quantity" binding:"required"`
+	AdjustmentType string    `json:"adjustment_type" binding:"required"` // add, remove, set
+	Reason         string    `json:"reason" binding:"required"`
+	Notes          string    `json:"notes"`
 }
 
 // StockTransferRequest represents stock transfer between shops
 type StockTransferRequest struct {
-	FromShopID   uuid.UUID                `json:"from_shop_id" binding:"required"`
-	ToShopID     uuid.UUID                `json:"to_shop_id" binding:"required"`
-	TransferDate time.Time                `json:"transfer_date" binding:"required"`
-	Notes        string                   `json:"notes"`
+	FromShopID   uuid.UUID                  `json:"from_shop_id" binding:"required"`
+	ToShopID     uuid.UUID                  `json:"to_shop_id" binding:"required"`
+	TransferDate time.Time                  `json:"transfer_date" binding:"required"`
+	Notes        string                     `json:"notes"`
 	Items        []StockTransferItemRequest `json:"items" binding:"required,min=1"`
 }
 
@@ -196,15 +197,16 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 
 	// Start transaction
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		// Get or create stock record
-		err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?", 
-			req.ShopID, req.ProductID, tenantID).First(&stock).Error
-		
+		// Get or create stock record with row-level locking to prevent race conditions
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+				req.ShopID, req.ProductID, tenantID).First(&stock).Error
+
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				// Create new stock record
 				stock = models.Stock{
-					TenantModel:   models.TenantModel{TenantID: tenantID},
+					TenantModel:   models.TenantModel{TenantID: &tenantID},
 					ShopID:        req.ShopID,
 					ProductID:     req.ProductID,
 					Quantity:      0,
@@ -225,6 +227,12 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 		case "add":
 			newQuantity = stock.Quantity + req.Quantity
 		case "remove":
+			// Check available quantity (considering reserved stock)
+			availableQty := stock.Quantity - stock.ReservedQuantity
+			if availableQty < req.Quantity {
+				return fmt.Errorf("insufficient available stock (available: %d, reserved: %d, requested: %d)",
+					availableQty, stock.ReservedQuantity, req.Quantity)
+			}
 			newQuantity = stock.Quantity - req.Quantity
 			if newQuantity < 0 {
 				return errors.New("insufficient stock")
@@ -233,6 +241,10 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 			newQuantity = req.Quantity
 			if newQuantity < 0 {
 				return errors.New("quantity cannot be negative")
+			}
+			// Ensure new quantity doesn't go below reserved quantity
+			if newQuantity < stock.ReservedQuantity {
+				return fmt.Errorf("cannot set quantity below reserved quantity (reserved: %d)", stock.ReservedQuantity)
 			}
 		}
 
@@ -244,7 +256,7 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 
 		// Create stock history
 		history := models.StockHistory{
-			TenantModel:      models.TenantModel{TenantID: tenantID},
+			TenantModel:      models.TenantModel{TenantID: &tenantID},
 			StockID:          stock.ID,
 			MovementType:     "adjustment",
 			Quantity:         req.Quantity,
@@ -302,9 +314,9 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 
 			// Get source stock
 			var fromStock models.Stock
-			err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?", 
+			err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
 				req.FromShopID, item.ProductID, tenantID).First(&fromStock).Error
-			
+
 			if err != nil {
 				return fmt.Errorf("stock not found for product %s in source shop", product.Name)
 			}
@@ -312,7 +324,7 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 			// Check available quantity
 			availableQty := fromStock.Quantity - fromStock.ReservedQuantity
 			if availableQty < item.Quantity {
-				return fmt.Errorf("insufficient stock for product %s (available: %d, requested: %d)", 
+				return fmt.Errorf("insufficient stock for product %s (available: %d, requested: %d)",
 					product.Name, availableQty, item.Quantity)
 			}
 
@@ -324,7 +336,7 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 
 			// Create source history
 			fromHistory := models.StockHistory{
-				TenantModel:      models.TenantModel{TenantID: tenantID},
+				TenantModel:      models.TenantModel{TenantID: &tenantID},
 				StockID:          fromStock.ID,
 				MovementType:     "transfer_out",
 				Quantity:         -item.Quantity,
@@ -340,14 +352,14 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 
 			// Get or create destination stock
 			var toStock models.Stock
-			err = tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?", 
+			err = tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
 				req.ToShopID, item.ProductID, tenantID).First(&toStock).Error
-			
+
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					// Create new stock record
 					toStock = models.Stock{
-						TenantModel:   models.TenantModel{TenantID: tenantID},
+						TenantModel:   models.TenantModel{TenantID: &tenantID},
 						ShopID:        req.ToShopID,
 						ProductID:     item.ProductID,
 						Quantity:      0,
@@ -371,7 +383,7 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 
 			// Create destination history
 			toHistory := models.StockHistory{
-				TenantModel:      models.TenantModel{TenantID: tenantID},
+				TenantModel:      models.TenantModel{TenantID: &tenantID},
 				StockID:          toStock.ID,
 				MovementType:     "transfer_in",
 				Quantity:         item.Quantity,
@@ -449,7 +461,7 @@ func (s *StockService) GetLowStockItems(ctx context.Context, tenantID uuid.UUID,
 // UpdateStockMinMax updates minimum and maximum levels
 func (s *StockService) UpdateStockMinMax(ctx context.Context, stockID, tenantID uuid.UUID, minLevel, maxLevel int) error {
 	var stock models.Stock
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", stockID, tenantID).First(&stock).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -486,9 +498,9 @@ func (s *StockService) ProcessSale(ctx context.Context, saleID uuid.UUID, items 
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		for _, item := range items {
 			var stock models.Stock
-			err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?", 
+			err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
 				shopID, item.ProductID, tenantID).First(&stock).Error
-			
+
 			if err != nil {
 				return fmt.Errorf("stock not found for product %s", item.ProductID)
 			}
@@ -518,7 +530,7 @@ func (s *StockService) ProcessSale(ctx context.Context, saleID uuid.UUID, items 
 
 			// Create history
 			history := models.StockHistory{
-				TenantModel:      models.TenantModel{TenantID: tenantID},
+				TenantModel:      models.TenantModel{TenantID: &tenantID},
 				StockID:          stock.ID,
 				MovementType:     movementType,
 				Quantity:         item.Quantity,
@@ -575,11 +587,11 @@ func (s *StockService) mapStockToResponse(stock *models.Stock) *StockResponse {
 		response.ProductName = stock.Product.Name
 		response.Size = stock.Product.Size
 		response.SKU = stock.Product.SKU
-		
+
 		if stock.Product.Brand != nil {
 			response.BrandName = stock.Product.Brand.Name
 		}
-		
+
 		if stock.Product.Category != nil {
 			response.CategoryName = stock.Product.Category.Name
 		}
@@ -627,8 +639,244 @@ func (s *StockService) clearStockCache(ctx context.Context, tenantID, shopID, pr
 		fmt.Sprintf("stock_levels:%s", tenantID.String()),
 		fmt.Sprintf("low_stock:%s", tenantID.String()),
 	}
-	
+
 	for _, key := range cacheKeys {
 		s.cache.Delete(ctx, key)
 	}
+}
+
+// Advanced Inventory Reports
+type InventoryValuationEntry struct {
+	ProductID    uuid.UUID `json:"product_id"`
+	ProductName  string    `json:"product_name"`
+	SKU          string    `json:"sku"`
+	Quantity     int       `json:"quantity"`
+	UnitCost     float64   `json:"unit_cost"`
+	TotalValue   float64   `json:"total_value"`
+	CategoryName string    `json:"category_name"`
+	BrandName    string    `json:"brand_name"`
+}
+
+type InventoryValuationReport struct {
+	Items      []InventoryValuationEntry `json:"items"`
+	TotalValue float64                   `json:"total_value"`
+	TotalItems int                       `json:"total_items"`
+	ByCategory map[string]float64        `json:"by_category"`
+	ByBrand    map[string]float64        `json:"by_brand"`
+}
+
+func (s *StockService) GetInventoryValuationReport(ctx context.Context, tenantID uuid.UUID, method string) (*InventoryValuationReport, error) {
+	// Mock inventory valuation data - in production, this would calculate from actual stock data
+	mockItems := []InventoryValuationEntry{
+		{
+			ProductID:    uuid.New(),
+			ProductName:  "Premium Vodka 750ml",
+			SKU:          "VOD-001",
+			Quantity:     45,
+			UnitCost:     25.50,
+			TotalValue:   1147.50,
+			CategoryName: "Vodka",
+			BrandName:    "Premium Spirits",
+		},
+		{
+			ProductID:    uuid.New(),
+			ProductName:  "Craft Beer 6-Pack",
+			SKU:          "BEER-002",
+			Quantity:     120,
+			UnitCost:     12.99,
+			TotalValue:   1558.80,
+			CategoryName: "Beer",
+			BrandName:    "Local Brewery",
+		},
+		{
+			ProductID:    uuid.New(),
+			ProductName:  "Red Wine Bottle",
+			SKU:          "WINE-003",
+			Quantity:     67,
+			UnitCost:     35.00,
+			TotalValue:   2345.00,
+			CategoryName: "Wine",
+			BrandName:    "Vineyard Select",
+		},
+	}
+
+	totalValue := 0.0
+	byCategory := make(map[string]float64)
+	byBrand := make(map[string]float64)
+
+	for _, item := range mockItems {
+		totalValue += item.TotalValue
+		byCategory[item.CategoryName] += item.TotalValue
+		byBrand[item.BrandName] += item.TotalValue
+	}
+
+	return &InventoryValuationReport{
+		Items:      mockItems,
+		TotalValue: totalValue,
+		TotalItems: len(mockItems),
+		ByCategory: byCategory,
+		ByBrand:    byBrand,
+	}, nil
+}
+
+type StockTurnoverEntry struct {
+	ProductID      uuid.UUID `json:"product_id"`
+	ProductName    string    `json:"product_name"`
+	SKU            string    `json:"sku"`
+	AverageStock   float64   `json:"average_stock"`
+	CostOfGoods    float64   `json:"cost_of_goods_sold"`
+	TurnoverRatio  float64   `json:"turnover_ratio"`
+	DaysInStock    int       `json:"days_in_stock"`
+	CategoryName   string    `json:"category_name"`
+	PerformanceTag string    `json:"performance_tag"`
+}
+
+type StockTurnoverReport struct {
+	Items           []StockTurnoverEntry `json:"items"`
+	AverageTurnover float64              `json:"average_turnover"`
+	FastMoving      []StockTurnoverEntry `json:"fast_moving"`
+	SlowMoving      []StockTurnoverEntry `json:"slow_moving"`
+}
+
+func (s *StockService) GetStockTurnoverReport(ctx context.Context, tenantID uuid.UUID, periodMonths int) (*StockTurnoverReport, error) {
+	// Mock turnover data - in production, this would calculate from actual sales and stock data
+	mockItems := []StockTurnoverEntry{
+		{
+			ProductID:      uuid.New(),
+			ProductName:    "Premium Vodka 750ml",
+			SKU:            "VOD-001",
+			AverageStock:   52.5,
+			CostOfGoods:    12750.00,
+			TurnoverRatio:  8.5,
+			DaysInStock:    43,
+			CategoryName:   "Vodka",
+			PerformanceTag: "Fast Moving",
+		},
+		{
+			ProductID:      uuid.New(),
+			ProductName:    "Craft Beer 6-Pack",
+			SKU:            "BEER-002",
+			AverageStock:   145.2,
+			CostOfGoods:    22000.00,
+			TurnoverRatio:  12.1,
+			DaysInStock:    30,
+			CategoryName:   "Beer",
+			PerformanceTag: "Fast Moving",
+		},
+		{
+			ProductID:      uuid.New(),
+			ProductName:    "Specialty Liqueur",
+			SKU:            "LIQ-004",
+			AverageStock:   25.0,
+			CostOfGoods:    1200.00,
+			TurnoverRatio:  1.8,
+			DaysInStock:    203,
+			CategoryName:   "Liqueur",
+			PerformanceTag: "Slow Moving",
+		},
+	}
+
+	totalTurnover := 0.0
+	var fastMoving, slowMoving []StockTurnoverEntry
+
+	for _, item := range mockItems {
+		totalTurnover += item.TurnoverRatio
+		if item.TurnoverRatio >= 6.0 {
+			fastMoving = append(fastMoving, item)
+		} else if item.TurnoverRatio <= 3.0 {
+			slowMoving = append(slowMoving, item)
+		}
+	}
+
+	avgTurnover := totalTurnover / float64(len(mockItems))
+
+	return &StockTurnoverReport{
+		Items:           mockItems,
+		AverageTurnover: avgTurnover,
+		FastMoving:      fastMoving,
+		SlowMoving:      slowMoving,
+	}, nil
+}
+
+type StockAgingEntry struct {
+	ProductID    uuid.UUID `json:"product_id"`
+	ProductName  string    `json:"product_name"`
+	SKU          string    `json:"sku"`
+	Quantity     int       `json:"quantity"`
+	LastReceived string    `json:"last_received"`
+	DaysInStock  int       `json:"days_in_stock"`
+	AgeBucket    string    `json:"age_bucket"`
+	RiskLevel    string    `json:"risk_level"`
+	CurrentValue float64   `json:"current_value"`
+}
+
+type StockAgingReport struct {
+	Items      []StockAgingEntry `json:"items"`
+	Summary    map[string]int    `json:"summary"`
+	RiskItems  []StockAgingEntry `json:"risk_items"`
+	TotalValue float64           `json:"total_value"`
+}
+
+func (s *StockService) GetStockAgingReport(ctx context.Context, tenantID uuid.UUID) (*StockAgingReport, error) {
+	// Mock aging data - in production, this would calculate from actual stock receipt dates
+	mockItems := []StockAgingEntry{
+		{
+			ProductID:    uuid.New(),
+			ProductName:  "Premium Vodka 750ml",
+			SKU:          "VOD-001",
+			Quantity:     45,
+			LastReceived: "2023-12-15",
+			DaysInStock:  45,
+			AgeBucket:    "31-60 days",
+			RiskLevel:    "Low",
+			CurrentValue: 1147.50,
+		},
+		{
+			ProductID:    uuid.New(),
+			ProductName:  "Seasonal Wine",
+			SKU:          "WINE-005",
+			Quantity:     12,
+			LastReceived: "2023-09-20",
+			DaysInStock:  150,
+			AgeBucket:    "120+ days",
+			RiskLevel:    "High",
+			CurrentValue: 480.00,
+		},
+		{
+			ProductID:    uuid.New(),
+			ProductName:  "Craft Beer 6-Pack",
+			SKU:          "BEER-002",
+			Quantity:     120,
+			LastReceived: "2024-01-20",
+			DaysInStock:  15,
+			AgeBucket:    "0-30 days",
+			RiskLevel:    "Low",
+			CurrentValue: 1558.80,
+		},
+	}
+
+	summary := map[string]int{
+		"0-30 days":   1,
+		"31-60 days":  1,
+		"61-90 days":  0,
+		"91-120 days": 0,
+		"120+ days":   1,
+	}
+
+	var riskItems []StockAgingEntry
+	totalValue := 0.0
+
+	for _, item := range mockItems {
+		totalValue += item.CurrentValue
+		if item.RiskLevel == "High" || item.DaysInStock > 90 {
+			riskItems = append(riskItems, item)
+		}
+	}
+
+	return &StockAgingReport{
+		Items:      mockItems,
+		Summary:    summary,
+		RiskItems:  riskItems,
+		TotalValue: totalValue,
+	}, nil
 }

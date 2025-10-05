@@ -627,23 +627,35 @@ func (h *SalesHandlers) GetDashboardSummary(c *gin.Context) {
 
 // Helper methods
 
-
 func (h *SalesHandlers) getTenantAndUserID(c *gin.Context) (tenantID, userID uuid.UUID, err error) {
 	tenantIDStr := c.GetString("tenant_id")
 	userIDStr := c.GetString("user_id")
+	userRole := c.GetString("role")
 
-	if tenantIDStr == "" || userIDStr == "" {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("tenant ID or user ID not found in context")
-	}
-
-	tenantID, err = uuid.Parse(tenantIDStr)
-	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid tenant ID")
+	// User ID is always required
+	if userIDStr == "" {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("user ID not found in context")
 	}
 
 	userID, err = uuid.Parse(userIDStr)
 	if err != nil {
 		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid user ID")
+	}
+
+	// For saas_admin users, tenant_id can be empty (they have system-wide access)
+	if userRole == "saas_admin" {
+		// Return uuid.Nil for tenant_id to indicate no tenant restriction
+		return uuid.Nil, userID, nil
+	}
+
+	// For all other users, tenant_id is required
+	if tenantIDStr == "" {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("tenant ID not found in context")
+	}
+
+	tenantID, err = uuid.Parse(tenantIDStr)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid tenant ID")
 	}
 
 	return tenantID, userID, nil

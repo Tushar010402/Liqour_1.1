@@ -35,24 +35,24 @@ type MoneyCollectionRequest struct {
 }
 
 type MoneyCollectionResponse struct {
-	ID              uuid.UUID  `json:"id"`
-	ExecutiveID     uuid.UUID  `json:"executive_id"`
-	ExecutiveName   string     `json:"executive_name"`
-	ShopID          uuid.UUID  `json:"shop_id"`
-	ShopName        string     `json:"shop_name"`
-	Amount          float64    `json:"amount"`
-	Status          string     `json:"status"`
-	Notes           string     `json:"notes"`
-	CollectedAt     time.Time  `json:"collected_at"`
-	ApprovedAt      *time.Time `json:"approved_at"`
-	ApprovedBy      *uuid.UUID `json:"approved_by"`
-	ApproverName    string     `json:"approver_name,omitempty"`
-	DeadlineAt      time.Time  `json:"deadline_at"`
-	IsOverdue       bool       `json:"is_overdue"`
-	MinutesRemaining int       `json:"minutes_remaining"`
-	CreatedBy       uuid.UUID  `json:"created_by"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID               uuid.UUID  `json:"id"`
+	ExecutiveID      uuid.UUID  `json:"executive_id"`
+	ExecutiveName    string     `json:"executive_name"`
+	ShopID           uuid.UUID  `json:"shop_id"`
+	ShopName         string     `json:"shop_name"`
+	Amount           float64    `json:"amount"`
+	Status           string     `json:"status"`
+	Notes            string     `json:"notes"`
+	CollectedAt      time.Time  `json:"collected_at"`
+	ApprovedAt       *time.Time `json:"approved_at"`
+	ApprovedBy       *uuid.UUID `json:"approved_by"`
+	ApproverName     string     `json:"approver_name,omitempty"`
+	DeadlineAt       time.Time  `json:"deadline_at"`
+	IsOverdue        bool       `json:"is_overdue"`
+	MinutesRemaining int        `json:"minutes_remaining"`
+	CreatedBy        uuid.UUID  `json:"created_by"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 type AssistantManagerExpenseRequest struct {
@@ -73,7 +73,7 @@ type AssistantManagerExpenseResponse struct {
 	ShopID        uuid.UUID  `json:"shop_id"`
 	ShopName      string     `json:"shop_name"`
 	Amount        float64    `json:"amount"`
-	Description   string    `json:"description"`
+	Description   string     `json:"description"`
 	ExpenseDate   time.Time  `json:"expense_date"`
 	ReceiptNo     string     `json:"receipt_no"`
 	PaymentMethod string     `json:"payment_method"`
@@ -88,41 +88,41 @@ type AssistantManagerExpenseResponse struct {
 }
 
 type AssistantManagerFinanceRequest struct {
-	ExecutiveID           uuid.UUID `json:"executive_id" binding:"required"`
-	ShopID                uuid.UUID `json:"shop_id" binding:"required"`
-	TotalSalesAmount      float64   `json:"total_sales_amount" binding:"required,gte=0"`
-	CashCollected         float64   `json:"cash_collected" binding:"required,gte=0"`
-	CardCollected         float64   `json:"card_collected" binding:"required,gte=0"`
-	UpiCollected          float64   `json:"upi_collected" binding:"required,gte=0"`
-	CreditCollected       float64   `json:"credit_collected" binding:"required,gte=0"`
-	TotalExpenses         float64   `json:"total_expenses" binding:"required,gte=0"`
-	NetAmountToDeposit    float64   `json:"net_amount_to_deposit"`
-	Notes                 string    `json:"notes"`
-	FinanceDate           time.Time `json:"finance_date" binding:"required"`
+	ExecutiveID        uuid.UUID `json:"executive_id" binding:"required"`
+	ShopID             uuid.UUID `json:"shop_id" binding:"required"`
+	TotalSalesAmount   float64   `json:"total_sales_amount" binding:"required,gte=0"`
+	CashCollected      float64   `json:"cash_collected" binding:"required,gte=0"`
+	CardCollected      float64   `json:"card_collected" binding:"required,gte=0"`
+	UpiCollected       float64   `json:"upi_collected" binding:"required,gte=0"`
+	CreditCollected    float64   `json:"credit_collected" binding:"required,gte=0"`
+	TotalExpenses      float64   `json:"total_expenses" binding:"required,gte=0"`
+	NetAmountToDeposit float64   `json:"net_amount_to_deposit"`
+	Notes              string    `json:"notes"`
+	FinanceDate        time.Time `json:"finance_date" binding:"required"`
 }
 
 type AssistantManagerFinanceResponse struct {
-	ID                    uuid.UUID  `json:"id"`
-	ExecutiveID           uuid.UUID  `json:"executive_id"`
-	ExecutiveName         string     `json:"executive_name"`
-	ShopID                uuid.UUID  `json:"shop_id"`
-	ShopName              string     `json:"shop_name"`
-	TotalSalesAmount      float64    `json:"total_sales_amount"`
-	CashCollected         float64    `json:"cash_collected"`
-	CardCollected         float64    `json:"card_collected"`
-	UpiCollected          float64    `json:"upi_collected"`
-	CreditCollected       float64    `json:"credit_collected"`
-	TotalExpenses         float64    `json:"total_expenses"`
-	NetAmountToDeposit    float64    `json:"net_amount_to_deposit"`
-	Notes                 string     `json:"notes"`
-	FinanceDate           time.Time  `json:"finance_date"`
-	Status                string     `json:"status"`
-	ApprovedAt            *time.Time `json:"approved_at"`
-	ApprovedBy            *uuid.UUID `json:"approved_by"`
-	ApproverName          string     `json:"approver_name,omitempty"`
-	CreatedBy             uuid.UUID  `json:"created_by"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	ID                 uuid.UUID  `json:"id"`
+	ExecutiveID        uuid.UUID  `json:"executive_id"`
+	ExecutiveName      string     `json:"executive_name"`
+	ShopID             uuid.UUID  `json:"shop_id"`
+	ShopName           string     `json:"shop_name"`
+	TotalSalesAmount   float64    `json:"total_sales_amount"`
+	CashCollected      float64    `json:"cash_collected"`
+	CardCollected      float64    `json:"card_collected"`
+	UpiCollected       float64    `json:"upi_collected"`
+	CreditCollected    float64    `json:"credit_collected"`
+	TotalExpenses      float64    `json:"total_expenses"`
+	NetAmountToDeposit float64    `json:"net_amount_to_deposit"`
+	Notes              string     `json:"notes"`
+	FinanceDate        time.Time  `json:"finance_date"`
+	Status             string     `json:"status"`
+	ApprovedAt         *time.Time `json:"approved_at"`
+	ApprovedBy         *uuid.UUID `json:"approved_by"`
+	ApproverName       string     `json:"approver_name,omitempty"`
+	CreatedBy          uuid.UUID  `json:"created_by"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // Money Collection Operations (Critical: 15-minute approval deadline)
@@ -151,7 +151,7 @@ func (s *AssistantManagerService) CreateMoneyCollection(ctx context.Context, req
 	collection := models.AssistantManagerMoneyCollection{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		ExecutiveID: req.ExecutiveID,
 		ShopID:      req.ShopID,
@@ -178,8 +178,12 @@ func (s *AssistantManagerService) GetMoneyCollections(ctx context.Context, tenan
 	var collections []models.AssistantManagerMoneyCollection
 	var total int64
 
-	query := s.db.DB.Where("tenant_id = ?", tenantID)
-	
+	// Build query - if tenantID is uuid.Nil (saas_admin), don't filter by tenant
+	query := s.db.DB
+	if tenantID != uuid.Nil {
+		query = query.Where("tenant_id = ?", tenantID)
+	}
+
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -329,7 +333,7 @@ func (s *AssistantManagerService) CreateAssistantManagerExpense(ctx context.Cont
 	expense := models.AssistantManagerExpense{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		CategoryID:    req.CategoryID,
 		ShopID:        req.ShopID,
@@ -380,7 +384,7 @@ func (s *AssistantManagerService) CreateAssistantManagerFinance(ctx context.Cont
 	finance := models.AssistantManagerFinance{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		ExecutiveID:        req.ExecutiveID,
 		ShopID:             req.ShopID,
@@ -407,11 +411,11 @@ func (s *AssistantManagerService) CreateAssistantManagerFinance(ctx context.Cont
 // Mark overdue collections automatically
 func (s *AssistantManagerService) MarkOverdueCollections(ctx context.Context, tenantID uuid.UUID) error {
 	now := time.Now()
-	
+
 	result := s.db.DB.Model(&models.AssistantManagerMoneyCollection{}).
 		Where("tenant_id = ? AND status = 'pending' AND deadline_at < ?", tenantID, now).
 		Update("status", "overdue")
-	
+
 	if result.Error != nil {
 		return fmt.Errorf("failed to mark overdue collections: %w", result.Error)
 	}

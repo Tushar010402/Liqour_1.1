@@ -50,10 +50,9 @@ func main() {
 	}
 	defer db.Close()
 
-	// Run migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
+	// Skip migrations in Gateway - handled by individual services
+	// Gateway only needs database connection for auth middleware
+	log.Println("Skipping migrations - handled by individual microservices")
 
 	// Initialize cache
 	cacheConfig := cache.Config{

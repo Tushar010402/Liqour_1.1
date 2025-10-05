@@ -93,7 +93,7 @@ func (h *AnalyticsHandler) GetRevenueChart(c *gin.Context) {
 	// Parse chart parameters
 	chartType := c.DefaultQuery("type", "daily") // daily, weekly, monthly
 	period := c.DefaultQuery("period", "30")     // number of days/weeks/months
-	
+
 	var startDate, endDate time.Time
 	now := time.Now()
 
@@ -132,12 +132,12 @@ func (h *AnalyticsHandler) GetRevenueChart(c *gin.Context) {
 
 	// Format response for charting
 	chartData := gin.H{
-		"type":         chartType,
-		"period":       period,
-		"start_date":   startDate.Format("2006-01-02"),
-		"end_date":     endDate.Format("2006-01-02"),
+		"type":          chartType,
+		"period":        period,
+		"start_date":    startDate.Format("2006-01-02"),
+		"end_date":      endDate.Format("2006-01-02"),
 		"total_revenue": analytics.TotalRevenue,
-		"data_points":  analytics.DailyRevenue,
+		"data_points":   analytics.DailyRevenue,
 	}
 
 	c.JSON(http.StatusOK, chartData)
@@ -145,7 +145,7 @@ func (h *AnalyticsHandler) GetRevenueChart(c *gin.Context) {
 
 func (h *AnalyticsHandler) GetSubscriptionChart(c *gin.Context) {
 	chartType := c.DefaultQuery("type", "status") // status, plans, billing_cycle
-	
+
 	metrics, err := h.analyticsService.GetSubscriptionMetrics(c.Request.Context(), "current")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -157,10 +157,10 @@ func (h *AnalyticsHandler) GetSubscriptionChart(c *gin.Context) {
 	switch chartType {
 	case "status":
 		chartData = gin.H{
-			"type":   "pie",
-			"title":  "Subscriptions by Status",
-			"data":   metrics.StatusDistribution,
-			"total":  metrics.TotalSubscriptions,
+			"type":  "pie",
+			"title": "Subscriptions by Status",
+			"data":  metrics.StatusDistribution,
+			"total": metrics.TotalSubscriptions,
 		}
 	case "plans":
 		planData := make(map[string]interface{})
@@ -168,17 +168,17 @@ func (h *AnalyticsHandler) GetSubscriptionChart(c *gin.Context) {
 			planData[plan.PlanName] = plan.Subscriptions
 		}
 		chartData = gin.H{
-			"type":   "bar",
-			"title":  "Subscriptions by Plan",
-			"data":   planData,
-			"total":  metrics.TotalSubscriptions,
+			"type":  "bar",
+			"title": "Subscriptions by Plan",
+			"data":  planData,
+			"total": metrics.TotalSubscriptions,
 		}
 	case "billing_cycle":
 		chartData = gin.H{
-			"type":   "pie",
-			"title":  "Subscriptions by Billing Cycle",
-			"data":   metrics.BillingCycleBreakdown,
-			"total":  metrics.TotalSubscriptions,
+			"type":  "pie",
+			"title": "Subscriptions by Billing Cycle",
+			"data":  metrics.BillingCycleBreakdown,
+			"total": metrics.TotalSubscriptions,
 		}
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid chart type"})
@@ -190,7 +190,7 @@ func (h *AnalyticsHandler) GetSubscriptionChart(c *gin.Context) {
 
 func (h *AnalyticsHandler) GetTenantChart(c *gin.Context) {
 	chartType := c.DefaultQuery("type", "usage") // usage, plans
-	
+
 	metrics, err := h.analyticsService.GetTenantMetrics(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -246,7 +246,7 @@ func (h *AnalyticsHandler) GetGrowthMetrics(c *gin.Context) {
 
 		// Calculate growth rates (simplified)
 		growthData[period] = gin.H{
-			"subscriptions": metrics.TotalSubscriptions,
+			"subscriptions":    metrics.TotalSubscriptions,
 			"conversion_rates": metrics.ConversionRates,
 		}
 	}
@@ -298,8 +298,8 @@ func (h *AnalyticsHandler) GetTopPerformers(c *gin.Context) {
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"category":     "tenants",
-			"top_tenants":  metrics.TopTenants,
+			"category":      "tenants",
+			"top_tenants":   metrics.TopTenants,
 			"total_tenants": metrics.TotalTenants,
 		})
 

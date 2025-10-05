@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-	"go.uber.org/zap"
-	
-	"github.com/liquorpro/pkg/monitoring"
+
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 )
 
 // ConnectionConfig holds database connection configuration
@@ -22,13 +22,13 @@ type ConnectionConfig struct {
 	Password string `yaml:"password" json:"password"`
 	DBName   string `yaml:"dbname" json:"dbname"`
 	SSLMode  string `yaml:"sslmode" json:"sslmode"`
-	
+
 	// Connection Pool Settings
 	MaxOpenConns    int           `yaml:"max_open_conns" json:"max_open_conns"`
 	MaxIdleConns    int           `yaml:"max_idle_conns" json:"max_idle_conns"`
 	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime" json:"conn_max_lifetime"`
 	ConnMaxIdleTime time.Duration `yaml:"conn_max_idle_time" json:"conn_max_idle_time"`
-	
+
 	// Performance Settings
 	SlowThreshold time.Duration `yaml:"slow_threshold" json:"slow_threshold"`
 	LogLevel      string        `yaml:"log_level" json:"log_level"`
@@ -36,10 +36,10 @@ type ConnectionConfig struct {
 
 // DatabaseManager manages database connections with monitoring
 type DatabaseManager struct {
-	config     ConnectionConfig
-	db         *gorm.DB
-	sqlDB      *sql.DB
-	logger     *zap.Logger
+	config      ConnectionConfig
+	db          *gorm.DB
+	sqlDB       *sql.DB
+	logger      *zap.Logger
 	serviceName string
 }
 
@@ -50,11 +50,11 @@ func NewDatabaseManager(config ConnectionConfig, serviceName string, logger *zap
 		logger:      logger,
 		serviceName: serviceName,
 	}
-	
+
 	if err := dm.connect(); err != nil {
 		return nil, err
 	}
-	
+
 	return dm, nil
 }
 
@@ -69,7 +69,7 @@ func (dm *DatabaseManager) connect() error {
 		dm.config.DBName,
 		dm.config.SSLMode,
 	)
-	
+
 	// Configure GORM logger
 	gormLogger := logger.New(
 		&gormLogWriter{logger: dm.logger},
@@ -80,7 +80,7 @@ func (dm *DatabaseManager) connect() error {
 			Colorful:                  false,
 		},
 	)
-	
+
 	// Open connection with GORM
 	var err error
 	dm.db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
@@ -91,31 +91,31 @@ func (dm *DatabaseManager) connect() error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
-	
+
 	// Get underlying sql.DB for connection pool configuration
 	dm.sqlDB, err = dm.db.DB()
 	if err != nil {
 		return fmt.Errorf("failed to get underlying sql.DB: %w", err)
 	}
-	
+
 	// Configure connection pool
 	dm.configureConnectionPool()
-	
+
 	// Test connection
 	if err := dm.sqlDB.Ping(); err != nil {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
-	
+
 	dm.logger.Info("Database connected successfully",
 		zap.String("service", dm.serviceName),
 		zap.String("host", dm.config.Host),
 		zap.Int("port", dm.config.Port),
 		zap.String("database", dm.config.DBName),
 	)
-	
+
 	// Start monitoring goroutine
 	go dm.monitorConnections()
-	
+
 	return nil
 }
 
@@ -134,13 +134,13 @@ func (dm *DatabaseManager) configureConnectionPool() {
 	if dm.config.ConnMaxIdleTime == 0 {
 		dm.config.ConnMaxIdleTime = 30 * time.Minute
 	}
-	
+
 	// Apply connection pool settings
 	dm.sqlDB.SetMaxOpenConns(dm.config.MaxOpenConns)
 	dm.sqlDB.SetMaxIdleConns(dm.config.MaxIdleConns)
 	dm.sqlDB.SetConnMaxLifetime(dm.config.ConnMaxLifetime)
 	dm.sqlDB.SetConnMaxIdleTime(dm.config.ConnMaxIdleTime)
-	
+
 	dm.logger.Info("Database connection pool configured",
 		zap.Int("max_open_conns", dm.config.MaxOpenConns),
 		zap.Int("max_idle_conns", dm.config.MaxIdleConns),
@@ -171,7 +171,7 @@ func (dm *DatabaseManager) Close() error {
 func (dm *DatabaseManager) HealthCheck(ctx context.Context) error {
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	
+
 	return dm.sqlDB.PingContext(ctxWithTimeout)
 }
 
@@ -184,13 +184,13 @@ func (dm *DatabaseManager) GetStats() sql.DBStats {
 func (dm *DatabaseManager) monitorConnections() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		stats := dm.sqlDB.Stats()
-		
+
 		// Update Prometheus metrics
 		monitoring.SetDBConnections(dm.serviceName, "postgresql", float64(stats.OpenConnections))
-		
+
 		// Log connection statistics periodically
 		if stats.OpenConnections > dm.config.MaxOpenConns*8/10 { // 80% threshold
 			dm.logger.Warn("High database connection usage",
@@ -201,7 +201,7 @@ func (dm *DatabaseManager) monitorConnections() {
 				zap.Int("in_use_connections", stats.InUse),
 			)
 		}
-		
+
 		// Log detailed stats every 5 minutes
 		if time.Now().Minute()%5 == 0 {
 			dm.logger.Debug("Database connection stats",
@@ -223,18 +223,18 @@ func (dm *DatabaseManager) monitorConnections() {
 // ExecuteWithMetrics executes a database operation with monitoring
 func (dm *DatabaseManager) ExecuteWithMetrics(operation string, fn func(*gorm.DB) error) error {
 	start := time.Now()
-	
+
 	err := fn(dm.db)
-	
+
 	duration := time.Since(start)
 	status := "success"
 	if err != nil {
 		status = "error"
 	}
-	
+
 	// Record metrics
 	monitoring.RecordDBQuery(dm.serviceName, operation, status, duration)
-	
+
 	return err
 }
 
@@ -278,7 +278,7 @@ func NewReadReplica(masterConfig ConnectionConfig, replicaConfigs []ConnectionCo
 	if err != nil {
 		return nil, fmt.Errorf("failed to create master connection: %w", err)
 	}
-	
+
 	// Create replica connections
 	replicas := make([]*DatabaseManager, len(replicaConfigs))
 	for i, config := range replicaConfigs {
@@ -293,7 +293,7 @@ func NewReadReplica(masterConfig ConnectionConfig, replicaConfigs []ConnectionCo
 		}
 		replicas[i] = replica
 	}
-	
+
 	return &ReadReplica{
 		manager:  master,
 		replicas: replicas,
@@ -311,11 +311,11 @@ func (rr *ReadReplica) GetReadDB() *gorm.DB {
 	if len(rr.replicas) == 0 {
 		return rr.manager.GetDB() // Fallback to master
 	}
-	
+
 	// Simple round-robin selection
 	db := rr.replicas[rr.currentIdx].GetDB()
 	rr.currentIdx = (rr.currentIdx + 1) % len(rr.replicas)
-	
+
 	return db
 }
 
@@ -325,16 +325,16 @@ func (rr *ReadReplica) Close() error {
 	if err := rr.manager.Close(); err != nil {
 		rr.logger.Error("Failed to close master connection", zap.Error(err))
 	}
-	
+
 	// Close replicas
 	for i, replica := range rr.replicas {
 		if err := replica.Close(); err != nil {
-			rr.logger.Error("Failed to close replica connection", 
-				zap.Int("replica", i), 
+			rr.logger.Error("Failed to close replica connection",
+				zap.Int("replica", i),
 				zap.Error(err))
 		}
 	}
-	
+
 	return nil
 }
 

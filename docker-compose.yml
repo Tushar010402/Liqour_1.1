@@ -15,7 +15,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/
     networks:
       - liquorpro-network
     healthcheck:
@@ -51,7 +51,7 @@ services:
     ports:
       - "8090:8090"
     environment:
-      - APP_ENVIRONMENT=production
+      - APP_ENVIRONMENT=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=liquorpro
@@ -61,6 +61,10 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis_password
       - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+      - SERVICES_AUTH_URL=http://auth:8091
+      - SERVICES_SALES_URL=http://sales:8092
+      - SERVICES_INVENTORY_URL=http://inventory:8093
+      - SERVICES_FINANCE_URL=http://finance:8094
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,7 +87,7 @@ services:
     ports:
       - "8091:8091"
     environment:
-      - APP_ENVIRONMENT=production
+      - APP_ENVIRONMENT=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=liquorpro
@@ -115,7 +119,7 @@ services:
     ports:
       - "8092:8092"
     environment:
-      - APP_ENVIRONMENT=production
+      - APP_ENVIRONMENT=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=liquorpro
@@ -147,7 +151,7 @@ services:
     ports:
       - "8093:8093"
     environment:
-      - APP_ENVIRONMENT=production
+      - APP_ENVIRONMENT=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=liquorpro
@@ -179,7 +183,7 @@ services:
     ports:
       - "8094:8094"
     environment:
-      - APP_ENVIRONMENT=production
+      - APP_ENVIRONMENT=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=liquorpro
@@ -202,16 +206,16 @@ services:
       timeout: 10s
       retries: 3
 
-  frontend:
+  saas:
     build:
       context: .
-      dockerfile: Dockerfile.frontend
-    container_name: liquorpro-frontend
+      dockerfile: Dockerfile.saas
+    container_name: liquorpro-saas
     restart: unless-stopped
     ports:
       - "8095:8095"
     environment:
-      - APP_ENVIRONMENT=production
+      - APP_ENVIRONMENT=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=liquorpro
@@ -221,19 +225,10 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis_password
       - JWT_SECRET=your-super-secret-jwt-key-change-in-production
-      - GATEWAY_URL=http://gateway:8090
-      - AUTH_SERVICE_URL=http://auth:8091
-      - SALES_SERVICE_URL=http://sales:8092
-      - INVENTORY_SERVICE_URL=http://inventory:8093
-      - FINANCE_SERVICE_URL=http://finance:8094
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      gateway:
-        condition: service_healthy
-      auth:
         condition: service_healthy
     networks:
       - liquorpro-network

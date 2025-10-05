@@ -1,0 +1,170 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saas
+  namespace: liquorpro
+  labels:
+    app: saas
+    tier: service
+    version: v1
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: saas
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: saas
+        tier: service
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8095"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: saas
+        image: liquorpro/saas:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8095
+          name: http
+          protocol: TCP
+        env:
+        - name: APP_ENVIRONMENT
+          value: "production"
+        - name: DATABASE_HOST
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: DATABASE_HOST
+        - name: DATABASE_PORT
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: DATABASE_PORT
+        - name: DATABASE_USER
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: DATABASE_USER
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: DATABASE_PASSWORD
+        - name: DATABASE_NAME
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: DATABASE_NAME
+        - name: REDIS_HOST
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: REDIS_PASSWORD
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: JWT_SECRET
+        - name: KAFKA_BROKERS
+          valueFrom:
+            secretKeyRef:
+              name: liquorpro-secret
+              key: KAFKA_BROKERS
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8095
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8095
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        fsGroup: 1000
+      serviceAccountName: liquorpro-sa
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: saas
+  namespace: liquorpro
+  labels:
+    app: saas
+    tier: service
+spec:
+  ports:
+  - port: 8095
+    targetPort: 8095
+    name: http
+    protocol: TCP
+  selector:
+    app: saas
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: saas-hpa
+  namespace: liquorpro
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: saas
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

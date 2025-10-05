@@ -117,7 +117,6 @@ run: build
 	./build/sales &
 	./build/inventory &
 	./build/finance &
-	./build/frontend &
 	@echo "All services started. Use 'make stop' to stop them."
 
 run-gateway: build
@@ -140,9 +139,6 @@ run-finance: build
 	@echo "💳 Running Finance Service..."
 	./build/finance
 
-run-frontend: build
-	@echo "🌐 Running Frontend Service..."
-	./build/frontend
 
 stop:
 	@echo "🛑 Stopping local services..."
@@ -151,7 +147,6 @@ stop:
 	pkill -f "./build/sales" || true
 	pkill -f "./build/inventory" || true
 	pkill -f "./build/finance" || true
-	pkill -f "./build/frontend" || true
 
 # Docker Commands
 docker:

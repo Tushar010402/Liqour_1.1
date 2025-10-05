@@ -8,10 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/ext"
+	"github.com/opentracing/opentracing-go/log"
 	"github.com/uber/jaeger-client-go"
 	"github.com/uber/jaeger-client-go/config"
-	"github.com/uber/jaeger-client-go/log"
-	"github.com/uber/jaeger-client-go/metrics"
 	"go.uber.org/zap"
 )
 
@@ -34,12 +33,10 @@ func InitTracing(serviceName string, jaegerEndpoint string) error {
 	}
 
 	jLogger := jaegerLogger{logger: zap.L()}
-	jMetricsFactory := metrics.NullFactory
 
 	var err error
 	tracer, closer, err = cfg.NewTracer(
 		config.Logger(jLogger),
-		config.Metrics(jMetricsFactory),
 	)
 	if err != nil {
 		return err
@@ -61,7 +58,7 @@ func CloseTracing() error {
 func TracingMiddleware(serviceName string) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		spanCtx, _ := tracer.Extract(opentracing.HTTPHeaders, opentracing.HTTPHeadersCarrier(c.Request.Header))
-		
+
 		span := tracer.StartSpan(
 			c.Request.Method+" "+c.FullPath(),
 			ext.RPCServerOption(spanCtx),
@@ -77,7 +74,7 @@ func TracingMiddleware(serviceName string) gin.HandlerFunc {
 		span.SetTag("service.name", serviceName)
 		span.SetTag("http.path", c.FullPath())
 		span.SetTag("user_agent", c.Request.UserAgent())
-		
+
 		// Extract user context if available
 		if userID := c.GetString("user_id"); userID != "" {
 			span.SetTag("user.id", userID)
@@ -128,7 +125,7 @@ func LogError(span opentracing.Span, err error) {
 	if err != nil {
 		ext.Error.Set(span, true)
 		span.LogFields(
-			opentracing.LogError(err),
+			log.Error(err),
 		)
 	}
 }

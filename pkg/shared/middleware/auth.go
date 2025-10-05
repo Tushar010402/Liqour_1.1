@@ -91,6 +91,14 @@ func AuthMiddleware(jwtConfig config.JWTConfig, cacheClient *cache.Cache) gin.Ha
 func TenantMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID := c.GetString("tenant_id")
+		userRole := c.GetString("role")
+
+		// Allow Super Users (saas_admin) to access resources without tenant restrictions
+		if userRole == "saas_admin" {
+			c.Next()
+			return
+		}
+
 		if tenantID == "" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Tenant ID required"})
 			c.Abort()

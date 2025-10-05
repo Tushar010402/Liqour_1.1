@@ -14,6 +14,7 @@ import (
 	"github.com/liquorpro/go-backend/internal/inventory/handlers"
 	"github.com/liquorpro/go-backend/internal/inventory/routes"
 	"github.com/liquorpro/go-backend/internal/inventory/services"
+	exciseRoutes "github.com/liquorpro/go-backend/internal/excise/routes"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
@@ -70,13 +71,21 @@ func main() {
 	stockService := services.NewStockService(db, redisCache)
 	purchaseService := services.NewPurchaseService(db, redisCache)
 	categoryService := services.NewCategoryService(db, redisCache)
+	tenantBrandService := services.NewTenantBrandService(db, redisCache, cfg)
+	brandOnboardingService := services.NewBrandOnboardingService(db.DB, cfg, nil) // logger will be added
+	enhancedProductService := services.NewEnhancedProductService(db, redisCache)
 
 	// Initialize handlers
+	brandOnboardingHandler := handlers.NewBrandOnboardingHandler(brandOnboardingService)
+	brandCreationHandler := handlers.NewBrandCreationHandler(enhancedProductService)
 	inventoryHandlers := handlers.NewInventoryHandlers(
 		productService,
 		stockService,
 		purchaseService,
 		categoryService,
+		tenantBrandService,
+		brandOnboardingHandler,
+		brandCreationHandler,
 	)
 
 	// Create router
@@ -88,8 +97,12 @@ func main() {
 	router.Use(middleware.RequestIDMiddleware())
 	router.Use(middleware.CORSMiddleware())
 
-	// Setup routes
-	routes.SetupRoutes(router, cfg, redisCache, inventoryHandlers)
+	// Setup routes (using protected routes for gateway-style deployment)
+	routes.SetupProtectedRoutes(router, cfg, redisCache, inventoryHandlers)
+
+	// Setup excise compliance routes with authentication (UP Excise integration)
+	exciseRoutes.SetupExciseRoutes(router, db.DB, cfg.JWT, redisCache)
+	log.Println("UP Excise compliance routes registered with authentication")
 
 	// Start server
 	srv := &http.Server{

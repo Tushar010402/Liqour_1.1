@@ -24,18 +24,18 @@ func NewCategoryService(db *database.DB, cache *cache.Cache) *CategoryService {
 }
 
 type CategoryRequest struct {
-	Name        string  `json:"name" binding:"required,max=255"`
-	Description string  `json:"description"`
-	IsActive    *bool   `json:"is_active"`
+	Name        string `json:"name" binding:"required,max=255"`
+	Description string `json:"description"`
+	IsActive    *bool  `json:"is_active"`
 }
 
 type CategoryResponse struct {
-	ID          uuid.UUID           `json:"id"`
-	Name        string              `json:"name"`
-	Description string              `json:"description"`
-	IsActive    bool                `json:"is_active"`
+	ID           uuid.UUID          `json:"id"`
+	Name         string             `json:"name"`
+	Description  string             `json:"description"`
+	IsActive     bool               `json:"is_active"`
 	ProductCount int64              `json:"product_count"`
-	Children    []CategoryResponse  `json:"children,omitempty"`
+	Children     []CategoryResponse `json:"children,omitempty"`
 }
 
 type BrandRequest struct {
@@ -73,7 +73,7 @@ func (s *CategoryService) CreateCategory(ctx context.Context, req CategoryReques
 	category := models.Category{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		Name:        req.Name,
 		Description: req.Description,
@@ -93,7 +93,7 @@ func (s *CategoryService) CreateCategory(ctx context.Context, req CategoryReques
 
 func (s *CategoryService) GetCategories(ctx context.Context, tenantID uuid.UUID, includeInactive bool) ([]CategoryResponse, error) {
 	cacheKey := fmt.Sprintf("categories:tenant:%s:inactive:%t", tenantID.String(), includeInactive)
-	
+
 	// Try to get from cache
 	var cachedCategories []CategoryResponse
 	if err := s.cache.Get(ctx, cacheKey, &cachedCategories); err == nil {
@@ -102,7 +102,7 @@ func (s *CategoryService) GetCategories(ctx context.Context, tenantID uuid.UUID,
 
 	var categories []models.Category
 	query := s.db.Where("tenant_id = ?", tenantID)
-	
+
 	if !includeInactive {
 		query = query.Where("is_active = ?", true)
 	}
@@ -257,7 +257,7 @@ func (s *CategoryService) CreateBrand(ctx context.Context, req BrandRequest, ten
 	brand := models.Brand{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		Name:        req.Name,
 		Description: req.Description,
@@ -277,7 +277,7 @@ func (s *CategoryService) CreateBrand(ctx context.Context, req BrandRequest, ten
 
 func (s *CategoryService) GetBrands(ctx context.Context, tenantID uuid.UUID, includeInactive bool) ([]BrandResponse, error) {
 	cacheKey := fmt.Sprintf("brands:tenant:%s:inactive:%t", tenantID.String(), includeInactive)
-	
+
 	// Try to get from cache
 	var cachedBrands []BrandResponse
 	if err := s.cache.Get(ctx, cacheKey, &cachedBrands); err == nil {
@@ -286,7 +286,7 @@ func (s *CategoryService) GetBrands(ctx context.Context, tenantID uuid.UUID, inc
 
 	var brands []models.Brand
 	query := s.db.Where("tenant_id = ?", tenantID)
-	
+
 	if !includeInactive {
 		query = query.Where("is_active = ?", true)
 	}

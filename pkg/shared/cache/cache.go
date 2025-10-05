@@ -192,16 +192,16 @@ var (
 
 // Common cache keys and patterns
 const (
-	UserSessionKey     = "session:user:%s"
-	TenantKey         = "tenant:%s"
-	ProductKey        = "product:%s"
-	StockKey          = "stock:%s:%s" // shop:product
-	DailySalesKey     = "daily_sales:%s:%s" // shop:date
+	UserSessionKey      = "session:user:%s"
+	TenantKey           = "tenant:%s"
+	ProductKey          = "product:%s"
+	StockKey            = "stock:%s:%s"          // shop:product
+	DailySalesKey       = "daily_sales:%s:%s"    // shop:date
 	PendingApprovalsKey = "pending_approvals:%s" // user_id
-	
+
 	// Cache durations
-	DefaultTTL       = 1 * time.Hour
-	SessionTTL       = 24 * time.Hour
-	ShortTTL         = 15 * time.Minute
-	LongTTL          = 24 * time.Hour
+	DefaultTTL = 1 * time.Hour
+	SessionTTL = 24 * time.Hour
+	ShortTTL   = 15 * time.Minute
+	LongTTL    = 24 * time.Hour
 )

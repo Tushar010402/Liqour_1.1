@@ -1,0 +1,55 @@
+# SaaS Service Dockerfile
+FROM golang:1.23-alpine AS builder
+
+# Install git and build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the SaaS service
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=mod -ldflags="-w -s" -o saas ./cmd/saas
+
+# Final stage
+FROM alpine:latest
+
+# Install ca-certificates
+RUN apk --no-cache add ca-certificates tzdata
+
+# Create app user
+RUN addgroup -g 1001 -S appuser && \
+    adduser -u 1001 -S appuser -G appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy binary from builder stage
+COPY --from=builder /app/saas .
+
+# Copy config files if they exist
+COPY --from=builder /app/config ./config
+
+# Change ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 8095
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --quiet --tries=1 --spider http://localhost:8095/health || exit 1
+
+# Run the service
+CMD ["./saas"]

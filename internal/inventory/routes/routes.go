@@ -64,6 +64,27 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inv
 		brands.GET("/:id", inventoryHandlers.GetBrandByID)
 		brands.PUT("/:id", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.UpdateBrand)
 		brands.DELETE("/:id", middleware.RoleMiddleware("admin"), inventoryHandlers.DeleteBrand)
+
+		// SaaS Brand Integration
+		brands.GET("/saas/available", inventoryHandlers.GetAvailableBrands)
+		brands.GET("/saas/tenant", inventoryHandlers.GetTenantBrands)
+		brands.POST("/saas/select", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.SelectBrandsFromCatalog)
+		brands.POST("/saas/customize", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.CustomizeBrandVariant)
+		brands.POST("/saas/import-as-products", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.ImportBrandsAsProducts)
+
+		// Legacy compatibility endpoints
+		brands.GET("/available", inventoryHandlers.GetAvailableBrands)
+		brands.GET("/my-brands", inventoryHandlers.GetTenantBrands)
+		brands.POST("/create-product", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.CreateProductFromBrand)
+		brands.GET("/products", inventoryHandlers.GetProductsFromBrands)
+		brands.POST("/sync-pricing", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.SyncBrandPricing)
+	}
+
+	// Product Catalog Routes (Templates for stock creation)
+	catalog := api.Group("/catalog")
+	{
+		catalog.GET("/product-templates", inventoryHandlers.GetProductTemplates)
+		catalog.GET("/subcategories", inventoryHandlers.GetSubcategories)
 	}
 
 	// Reports Routes (Read-only analytics)
@@ -71,16 +92,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inv
 	{
 		reports.GET("/low-stock", inventoryHandlers.GetStocks) // Uses query param low_stock=true
 		reports.GET("/stock-movements", inventoryHandlers.GetStockMovements)
-		// TODO: Add more specialized reports
-		reports.GET("/valuation", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Inventory valuation report not implemented yet"})
-		})
-		reports.GET("/turnover", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Stock turnover report not implemented yet"})
-		})
-		reports.GET("/aging", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Stock aging report not implemented yet"})
-		})
+		// Advanced Inventory Reports
+		reports.GET("/valuation", inventoryHandlers.GetInventoryValuationReport)
+		reports.GET("/turnover", inventoryHandlers.GetStockTurnoverReport)
+		reports.GET("/aging", inventoryHandlers.GetStockAgingReport)
 	}
 }
 
@@ -106,6 +121,11 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	// Product Routes
 	router.GET("/products", inventoryHandlers.GetProducts)
 	router.POST("/products", inventoryHandlers.CreateProduct)
+
+	// Product-specific routes (before :id to avoid conflicts)
+	router.PUT("/products/:id/pricing", inventoryHandlers.UpdateProductPricing)
+
+	// Standard product CRUD routes
 	router.GET("/products/:id", inventoryHandlers.GetProductByID)
 	router.PUT("/products/:id", inventoryHandlers.UpdateProduct)
 	router.DELETE("/products/:id", inventoryHandlers.DeleteProduct)
@@ -132,9 +152,47 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	// Brand Routes
 	router.GET("/brands", inventoryHandlers.GetBrands)
 	router.POST("/brands", inventoryHandlers.CreateBrand)
+
+	// Enhanced Brand Creation Routes (Tenant Custom Brands with Variants)
+	// Place these BEFORE the :id routes to avoid conflicts
+	router.POST("/brands/with-variants", inventoryHandlers.CreateBrandWithVariants)
+	router.GET("/brands/products/grouped", inventoryHandlers.GetProductsGroupedByBrand)
+
+	// Standard brand CRUD routes (with :id parameter)
 	router.GET("/brands/:id", inventoryHandlers.GetBrandByID)
 	router.PUT("/brands/:id", inventoryHandlers.UpdateBrand)
 	router.DELETE("/brands/:id", inventoryHandlers.DeleteBrand)
+	router.GET("/brands/:id/check-duplicate", inventoryHandlers.CheckDuplicateProduct)
+	router.GET("/brands/:id/products", inventoryHandlers.GetProductsByBrand)
+
+	// Pricing utilities
+	router.POST("/pricing/calculate-up-duty", inventoryHandlers.CalculateUPDuty)
+
+	// SaaS Brand Onboarding (new architecture - service-to-service communication)
+	// Using /api/inventory prefix to match Flutter app expectations
+	router.GET("/api/inventory/saas-brands/available", inventoryHandlers.GetAvailableBrandTemplates)
+	router.POST("/api/inventory/saas-brands/onboard", inventoryHandlers.OnboardBrands)
+	router.GET("/api/inventory/saas-brands/onboarded", inventoryHandlers.GetOnboardedBrands)
+	router.PUT("/api/inventory/saas-brands/onboarded/:id", inventoryHandlers.UpdateOnboardedBrand)
+	router.GET("/api/inventory/brands/custom", inventoryHandlers.GetCustomBrands)
+
+	// Legacy SaaS Brand Integration (keeping for backward compatibility)
+	router.GET("/brands/saas/available", inventoryHandlers.GetAvailableBrands)
+	router.GET("/brands/saas/tenant", inventoryHandlers.GetTenantBrands)
+	router.POST("/brands/saas/select", inventoryHandlers.SelectBrandsFromCatalog)
+	router.POST("/brands/saas/customize", inventoryHandlers.CustomizeBrandVariant)
+	router.POST("/brands/saas/import-as-products", inventoryHandlers.ImportBrandsAsProducts)
+
+	// Legacy compatibility endpoints
+	router.GET("/brands/available", inventoryHandlers.GetAvailableBrands)
+	router.GET("/brands/my-brands", inventoryHandlers.GetTenantBrands)
+	router.POST("/brands/create-product", inventoryHandlers.CreateProductFromBrand)
+	router.GET("/brands/products", inventoryHandlers.GetProductsFromBrands)
+	router.POST("/brands/sync-pricing", inventoryHandlers.SyncBrandPricing)
+
+	// Product Catalog Routes
+	router.GET("/api/catalog/product-templates", inventoryHandlers.GetProductTemplates)
+	router.GET("/api/catalog/subcategories", inventoryHandlers.GetSubcategories)
 
 	// Reports Routes
 	router.GET("/reports/low-stock", inventoryHandlers.GetStocks)

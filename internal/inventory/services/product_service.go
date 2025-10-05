@@ -30,18 +30,18 @@ func NewProductService(db *database.DB, cache *cache.Cache) *ProductService {
 
 // ProductRequest represents product creation/update request
 type ProductRequest struct {
-	Name           string  `json:"name" binding:"required"`
+	Name           string    `json:"name" binding:"required"`
 	CategoryID     uuid.UUID `json:"category_id" binding:"required"`
 	BrandID        uuid.UUID `json:"brand_id" binding:"required"`
-	Size           string  `json:"size" binding:"required"`
-	AlcoholContent float64 `json:"alcohol_content"`
-	Description    string  `json:"description"`
-	Barcode        string  `json:"barcode"`
-	SKU            string  `json:"sku"`
-	CostPrice      float64 `json:"cost_price" binding:"required,gt=0"`
-	SellingPrice   float64 `json:"selling_price" binding:"required,gt=0"`
-	MRP            float64 `json:"mrp" binding:"required,gt=0"`
-	IsActive       bool    `json:"is_active"`
+	Size           string    `json:"size" binding:"required"`
+	AlcoholContent float64   `json:"alcohol_content"`
+	Description    string    `json:"description"`
+	Barcode        string    `json:"barcode"`
+	SKU            string    `json:"sku"`
+	CostPrice      float64   `json:"cost_price" binding:"required,gt=0"`
+	SellingPrice   float64   `json:"selling_price" binding:"required,gt=0"`
+	MRP            float64   `json:"mrp" binding:"required,gt=0"`
+	IsActive       bool      `json:"is_active"`
 }
 
 // ProductResponse represents product in responses
@@ -65,7 +65,6 @@ type ProductResponse struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
-
 
 // BrandPricingRequest represents brand pricing request
 type BrandPricingRequest struct {
@@ -103,7 +102,7 @@ func (s *ProductService) CreateProduct(ctx context.Context, req ProductRequest, 
 
 	// Create product
 	product := models.Product{
-		TenantModel:    models.TenantModel{TenantID: tenantID},
+		TenantModel:    models.TenantModel{TenantID: &tenantID},
 		Name:           req.Name,
 		CategoryID:     req.CategoryID,
 		BrandID:        req.BrandID,
@@ -152,7 +151,7 @@ func (s *ProductService) GetProducts(ctx context.Context, tenantID uuid.UUID, fi
 	}
 	if filters.Search != "" {
 		searchPattern := "%" + filters.Search + "%"
-		query = query.Where("name ILIKE ? OR sku ILIKE ? OR barcode ILIKE ?", 
+		query = query.Where("name ILIKE ? OR sku ILIKE ? OR barcode ILIKE ?",
 			searchPattern, searchPattern, searchPattern)
 	}
 
@@ -194,12 +193,12 @@ func (s *ProductService) GetProducts(ctx context.Context, tenantID uuid.UUID, fi
 // GetProductByID returns product by ID
 func (s *ProductService) GetProductByID(ctx context.Context, productID, tenantID uuid.UUID) (*ProductResponse, error) {
 	var product models.Product
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", productID, tenantID).
 		Preload("Category").
 		Preload("Brand").
 		First(&product).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("product not found")
@@ -220,7 +219,7 @@ func (s *ProductService) GetProductByID(ctx context.Context, productID, tenantID
 // UpdateProduct updates product information
 func (s *ProductService) UpdateProduct(ctx context.Context, productID, tenantID uuid.UUID, req ProductRequest) (*ProductResponse, error) {
 	var product models.Product
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", productID, tenantID).First(&product).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -283,7 +282,7 @@ func (s *ProductService) UpdateProduct(ctx context.Context, productID, tenantID 
 // DeleteProduct soft deletes a product
 func (s *ProductService) DeleteProduct(ctx context.Context, productID, tenantID uuid.UUID) error {
 	var product models.Product
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", productID, tenantID).First(&product).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -297,7 +296,7 @@ func (s *ProductService) DeleteProduct(ctx context.Context, productID, tenantID 
 	s.db.Model(&models.Stock{}).
 		Where("product_id = ? AND quantity > 0", productID).
 		Count(&stockCount)
-	
+
 	if stockCount > 0 {
 		return errors.New("cannot delete product with existing stock")
 	}
@@ -328,9 +327,9 @@ func (s *ProductService) CreateBrand(ctx context.Context, req BrandRequest, tena
 	if req.IsActive != nil {
 		isActive = *req.IsActive
 	}
-	
+
 	brand := models.Brand{
-		TenantModel: models.TenantModel{TenantID: tenantID},
+		TenantModel: models.TenantModel{TenantID: &tenantID},
 		Name:        req.Name,
 		Description: req.Description,
 		IsActive:    isActive,
@@ -349,11 +348,11 @@ func (s *ProductService) CreateBrand(ctx context.Context, req BrandRequest, tena
 // GetBrands returns all brands
 func (s *ProductService) GetBrands(ctx context.Context, tenantID uuid.UUID) ([]*BrandResponse, error) {
 	var brands []models.Brand
-	
+
 	err := s.db.Where("tenant_id = ?", tenantID).
 		Order("name ASC").
 		Find(&brands).Error
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get brands: %w", err)
 	}
@@ -386,7 +385,7 @@ func (s *ProductService) GetBrands(ctx context.Context, tenantID uuid.UUID) ([]*
 // GetBrandByID returns brand by ID
 func (s *ProductService) GetBrandByID(ctx context.Context, brandID, tenantID uuid.UUID) (*BrandResponse, error) {
 	var brand models.Brand
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", brandID, tenantID).First(&brand).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -407,7 +406,7 @@ func (s *ProductService) GetBrandByID(ctx context.Context, brandID, tenantID uui
 // UpdateBrand updates brand information
 func (s *ProductService) UpdateBrand(ctx context.Context, brandID, tenantID uuid.UUID, req BrandRequest) (*BrandResponse, error) {
 	var brand models.Brand
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", brandID, tenantID).First(&brand).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -445,7 +444,7 @@ func (s *ProductService) UpdateBrand(ctx context.Context, brandID, tenantID uuid
 // DeleteBrand soft deletes a brand
 func (s *ProductService) DeleteBrand(ctx context.Context, brandID, tenantID uuid.UUID) error {
 	var brand models.Brand
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", brandID, tenantID).First(&brand).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -459,7 +458,7 @@ func (s *ProductService) DeleteBrand(ctx context.Context, brandID, tenantID uuid
 	s.db.Model(&models.Product{}).
 		Where("brand_id = ? AND deleted_at IS NULL", brandID).
 		Count(&productCount)
-	
+
 	if productCount > 0 {
 		return errors.New("cannot delete brand with existing products")
 	}
@@ -487,7 +486,7 @@ func (s *ProductService) CreateBrandPricing(ctx context.Context, req BrandPricin
 
 	// Check for duplicate
 	var existing models.BrandPricing
-	if err := s.db.Where("brand_id = ? AND size = ? AND tenant_id = ?", 
+	if err := s.db.Where("brand_id = ? AND size = ? AND tenant_id = ?",
 		req.BrandID, req.Size, tenantID).First(&existing).Error; err == nil {
 		// Update existing
 		updates := map[string]interface{}{
@@ -500,7 +499,7 @@ func (s *ProductService) CreateBrandPricing(ctx context.Context, req BrandPricin
 
 	// Create new pricing
 	pricing := models.BrandPricing{
-		TenantModel:  models.TenantModel{TenantID: tenantID},
+		TenantModel:  models.TenantModel{TenantID: &tenantID},
 		BrandID:      req.BrandID,
 		Size:         req.Size,
 		CostPrice:    req.CostPrice,
@@ -513,13 +512,15 @@ func (s *ProductService) CreateBrandPricing(ctx context.Context, req BrandPricin
 	}
 
 	// Update all products with this brand and size
-	s.db.Model(&models.Product{}).
+	if err := s.db.Model(&models.Product{}).
 		Where("brand_id = ? AND size = ? AND tenant_id = ?", req.BrandID, req.Size, tenantID).
 		Updates(map[string]interface{}{
 			"cost_price":    req.CostPrice,
 			"selling_price": req.SellingPrice,
 			"mrp":           req.MRP,
-		})
+		}).Error; err != nil {
+		return fmt.Errorf("failed to update product pricing: %w", err)
+	}
 
 	return nil
 }
@@ -602,7 +603,7 @@ func (s *ProductService) generateSKU(brandName, size string) string {
 // getStockLevels gets stock levels for products
 func (s *ProductService) getStockLevels(tenantID uuid.UUID, products []models.Product) map[uuid.UUID]int {
 	stockMap := make(map[uuid.UUID]int)
-	
+
 	if len(products) == 0 {
 		return stockMap
 	}
@@ -640,4 +641,69 @@ func (s *ProductService) clearProductCache(ctx context.Context, tenantID uuid.UU
 func (s *ProductService) clearBrandCache(ctx context.Context, tenantID uuid.UUID) {
 	cacheKey := fmt.Sprintf("brands:%s", tenantID.String())
 	s.cache.Delete(ctx, cacheKey)
+}
+
+// Product Template Management
+
+// GetProductTemplates returns filtered product templates for the catalog
+func (s *ProductService) GetProductTemplates(ctx context.Context, tenantID uuid.UUID, categoryID, subcategoryID, brandID, search string) ([]*models.ProductTemplate, error) {
+	query := s.db.Model(&models.ProductTemplate{})
+
+	// Filter by tenant through category relationship
+	query = query.Joins("JOIN categories ON product_templates.category_id = categories.id").
+		Where("categories.tenant_id = ?", tenantID)
+
+	// Apply filters
+	if categoryID != "" {
+		if catUUID, err := uuid.Parse(categoryID); err == nil {
+			query = query.Where("product_templates.category_id = ?", catUUID)
+		}
+	}
+
+	if subcategoryID != "" {
+		if subUUID, err := uuid.Parse(subcategoryID); err == nil {
+			query = query.Where("product_templates.subcategory_id = ?", subUUID)
+		}
+	}
+
+	if brandID != "" {
+		if brandUUID, err := uuid.Parse(brandID); err == nil {
+			query = query.Where("product_templates.brand_id = ?", brandUUID)
+		}
+	}
+
+	if search != "" {
+		query = query.Where("product_templates.name ILIKE ?", "%"+search+"%")
+	}
+
+	// Only active templates
+	query = query.Where("product_templates.is_active = ?", true)
+
+	// Include relationships
+	query = query.Preload("Category").Preload("Subcategory").Preload("Brand")
+
+	// Order by sort order and name
+	query = query.Order("product_templates.sort_order ASC, product_templates.name ASC")
+
+	var templates []*models.ProductTemplate
+	if err := query.Find(&templates).Error; err != nil {
+		return nil, fmt.Errorf("failed to get product templates: %w", err)
+	}
+
+	return templates, nil
+}
+
+// GetSubcategories returns subcategories for a category
+func (s *ProductService) GetSubcategories(ctx context.Context, tenantID, categoryID uuid.UUID) ([]*models.Subcategory, error) {
+	var subcategories []*models.Subcategory
+
+	err := s.db.Where("tenant_id = ? AND category_id = ? AND is_active = ?", tenantID, categoryID, true).
+		Order("sort_order ASC, name ASC").
+		Find(&subcategories).Error
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get subcategories: %w", err)
+	}
+
+	return subcategories, nil
 }

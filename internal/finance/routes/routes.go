@@ -26,10 +26,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, fin
 		vendors.GET("/:id", financeHandlers.GetVendorByID)
 		vendors.PUT("/:id", middleware.RoleMiddleware("manager", "admin"), financeHandlers.UpdateVendor)
 		vendors.DELETE("/:id", middleware.RoleMiddleware("admin"), financeHandlers.DeleteVendor)
-		
+
 		// Vendor bank accounts
 		vendors.POST("/:id/bank-accounts", middleware.RoleMiddleware("manager", "admin"), financeHandlers.AddVendorBankAccount)
-		
+
 		// Vendor transactions (payments/purchases)
 		vendors.POST("/transactions", middleware.RoleMiddleware("manager", "admin"), financeHandlers.CreateVendorTransaction)
 		vendors.GET("/:id/transactions", financeHandlers.GetVendorTransactions)
@@ -83,28 +83,18 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, fin
 	reports := api.Group("/reports")
 	{
 		reports.GET("/expense-summary", financeHandlers.GetExpenseSummary)
-		
-		// TODO: Add more financial reports
-		reports.GET("/vendor-aging", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Vendor aging report not implemented yet"})
-		})
-		reports.GET("/cash-flow", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Cash flow report not implemented yet"})
-		})
-		reports.GET("/profit-loss", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Profit & Loss report not implemented yet"})
-		})
-		reports.GET("/balance-sheet", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Balance sheet not implemented yet"})
-		})
+
+		// Advanced Financial Reports
+		reports.GET("/vendor-aging", financeHandlers.GetVendorAgingReport)
+		reports.GET("/cash-flow", financeHandlers.GetCashFlowReport)
+		reports.GET("/profit-loss", financeHandlers.GetProfitLossReport)
+		reports.GET("/balance-sheet", financeHandlers.GetBalanceSheetReport)
 	}
 
 	// Dashboard Summary (Financial overview)
 	dashboard := api.Group("/dashboard")
 	{
-		dashboard.GET("/summary", func(c *gin.Context) {
-			c.JSON(501, gin.H{"message": "Financial dashboard summary not implemented yet"})
-		})
+		dashboard.GET("/summary", financeHandlers.GetFinancialDashboard)
 		dashboard.GET("/collections-due", financeHandlers.GetMoneyCollections) // Overdue collections
 	}
 }
@@ -160,4 +150,12 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 
 	// Reports Routes
 	router.GET("/reports/expense-summary", financeHandlers.GetExpenseSummary)
+	router.GET("/reports/vendor-aging", financeHandlers.GetVendorAgingReport)
+	router.GET("/reports/cash-flow", financeHandlers.GetCashFlowReport)
+	router.GET("/reports/profit-loss", financeHandlers.GetProfitLossReport)
+	router.GET("/reports/balance-sheet", financeHandlers.GetBalanceSheetReport)
+
+	// Dashboard Routes
+	router.GET("/dashboard/summary", financeHandlers.GetFinancialDashboard)
+	router.GET("/dashboard/collections-due", financeHandlers.GetMoneyCollections)
 }

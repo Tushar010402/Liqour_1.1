@@ -20,10 +20,10 @@ func RequestIDMiddleware() gin.HandlerFunc {
 			// Generate a simple request ID (you might want to use UUID here)
 			requestID = generateRequestID()
 		}
-		
+
 		c.Header("X-Request-ID", requestID)
 		c.Set("request_id", requestID)
-		
+
 		c.Next()
 	}
 }

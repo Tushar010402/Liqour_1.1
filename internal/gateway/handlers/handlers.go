@@ -35,15 +35,10 @@ func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
 			return
 		}
 
-		// Build target URL - strip service prefix from path for microservices (not auth)
+		// Build target URL - strip service prefix for microservices
 		path := c.Request.URL.Path
-		
-		// For non-auth services, remove service prefix (e.g., /api/inventory/categories -> /api/categories)
-		if serviceName != "auth" && strings.HasPrefix(path, "/api/"+serviceName+"/") {
-			path = "/api/" + strings.TrimPrefix(path, "/api/"+serviceName+"/")
-		}
-		
-		targetURL := serviceURL + path
+		targetPath := h.transformPath(path, serviceName)
+		targetURL := serviceURL + targetPath
 		if c.Request.URL.RawQuery != "" {
 			targetURL += "?" + c.Request.URL.RawQuery
 		}
@@ -151,16 +146,42 @@ func (h *GatewayHandlers) ServiceDiscovery(c *gin.Context) {
 			"url":    h.config.Services.Finance.URL,
 			"status": h.checkServiceHealth(h.config.Services.Finance.URL),
 		},
-		"frontend": gin.H{
-			"url":    h.config.Services.Frontend.URL,
-			"status": h.checkServiceHealth(h.config.Services.Frontend.URL),
-		},
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"gateway": h.config.Services.Gateway.URL,
+		"gateway":  h.config.Services.Gateway.URL,
 		"services": services,
 	})
+}
+
+// transformPath strips the service prefix from the path
+func (h *GatewayHandlers) transformPath(path, serviceName string) string {
+	switch strings.ToLower(serviceName) {
+	case "sales":
+		if strings.HasPrefix(path, "/api/sales/") {
+			return strings.Replace(path, "/api/sales/", "/api/", 1)
+		}
+	case "inventory":
+		// Keep saas-brands paths intact, strip prefix for others
+		if strings.HasPrefix(path, "/api/inventory/saas-brands/") {
+			return path // Keep full path for saas-brands
+		}
+		if strings.HasPrefix(path, "/api/inventory/") {
+			return strings.Replace(path, "/api/inventory/", "/", 1)
+		}
+	case "finance":
+		if strings.HasPrefix(path, "/api/finance/") {
+			return strings.Replace(path, "/api/finance/", "/api/", 1)
+		}
+	case "saas":
+		if strings.HasPrefix(path, "/api/saas/") {
+			return strings.Replace(path, "/api/saas/", "/api/", 1)
+		}
+	case "auth":
+		// Auth service paths don't need transformation
+		return path
+	}
+	return path
 }
 
 // getServiceURL returns the URL for a given service name
@@ -174,8 +195,8 @@ func (h *GatewayHandlers) getServiceURL(serviceName string) string {
 		return h.config.Services.Inventory.URL
 	case "finance":
 		return h.config.Services.Finance.URL
-	case "frontend":
-		return h.config.Services.Frontend.URL
+	case "saas":
+		return "http://localhost:8095"
 	default:
 		return ""
 	}
@@ -248,7 +269,5 @@ func (h *GatewayHandlers) setServiceURL(serviceName, url string) {
 		h.config.Services.Inventory.URL = url
 	case "finance":
 		h.config.Services.Finance.URL = url
-	case "frontend":
-		h.config.Services.Frontend.URL = url
 	}
 }

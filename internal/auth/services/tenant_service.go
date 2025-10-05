@@ -30,25 +30,25 @@ func NewTenantService(db *database.DB, cache *cache.Cache) *TenantService {
 
 // CreateShopRequest represents shop creation request
 type CreateShopRequest struct {
-	Name           string  `json:"name" binding:"required"`
-	Address        string  `json:"address" binding:"required"`
-	Phone          string  `json:"phone" binding:"required"`
-	LicenseNumber  string  `json:"license_number" binding:"required"`
-	LicenseFile    string  `json:"license_file"`
-	Latitude       float64 `json:"latitude"`
-	Longitude      float64 `json:"longitude"`
+	Name          string  `json:"name" binding:"required"`
+	Address       string  `json:"address" binding:"required"`
+	Phone         string  `json:"phone"`
+	LicenseNumber string  `json:"license_number"`
+	LicenseFile   string  `json:"license_file"`
+	Latitude      float64 `json:"latitude"`
+	Longitude     float64 `json:"longitude"`
 }
 
 // UpdateShopRequest represents shop update request
 type UpdateShopRequest struct {
-	Name           *string  `json:"name"`
-	Address        *string  `json:"address"`
-	Phone          *string  `json:"phone"`
-	LicenseNumber  *string  `json:"license_number"`
-	LicenseFile    *string  `json:"license_file"`
-	Latitude       *float64 `json:"latitude"`
-	Longitude      *float64 `json:"longitude"`
-	IsActive       *bool    `json:"is_active"`
+	Name          *string  `json:"name"`
+	Address       *string  `json:"address"`
+	Phone         *string  `json:"phone"`
+	LicenseNumber *string  `json:"license_number"`
+	LicenseFile   *string  `json:"license_file"`
+	Latitude      *float64 `json:"latitude"`
+	Longitude     *float64 `json:"longitude"`
+	IsActive      *bool    `json:"is_active"`
 }
 
 // ShopResponse represents shop data in responses
@@ -109,11 +109,11 @@ type SalesmanResponse struct {
 // GetShops returns all shops for a tenant
 func (s *TenantService) GetShops(ctx context.Context, tenantID uuid.UUID) ([]*ShopResponse, error) {
 	var shops []models.Shop
-	
+
 	err := s.db.Where("tenant_id = ?", tenantID).
 		Order("name").
 		Find(&shops).Error
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shops: %w", err)
 	}
@@ -129,7 +129,7 @@ func (s *TenantService) GetShops(ctx context.Context, tenantID uuid.UUID) ([]*Sh
 // GetShopByID returns shop by ID
 func (s *TenantService) GetShopByID(ctx context.Context, shopID, tenantID uuid.UUID) (*ShopResponse, error) {
 	var shop models.Shop
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", shopID, tenantID).First(&shop).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -155,7 +155,7 @@ func (s *TenantService) CreateShop(ctx context.Context, req CreateShopRequest, t
 	}
 
 	shop := models.Shop{
-		TenantModel:   models.TenantModel{TenantID: tenantID},
+		TenantModel:   models.TenantModel{TenantID: &tenantID},
 		Name:          req.Name,
 		Address:       req.Address,
 		Phone:         req.Phone,
@@ -176,7 +176,7 @@ func (s *TenantService) CreateShop(ctx context.Context, req CreateShopRequest, t
 // UpdateShop updates shop information
 func (s *TenantService) UpdateShop(ctx context.Context, shopID, tenantID uuid.UUID, req UpdateShopRequest) (*ShopResponse, error) {
 	var shop models.Shop
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", shopID, tenantID).First(&shop).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -187,7 +187,7 @@ func (s *TenantService) UpdateShop(ctx context.Context, shopID, tenantID uuid.UU
 
 	// Update fields if provided
 	updates := make(map[string]interface{})
-	
+
 	if req.Name != nil {
 		// Check if name already exists for another shop
 		var existingShop models.Shop
@@ -243,13 +243,13 @@ func (s *TenantService) UpdateShop(ctx context.Context, shopID, tenantID uuid.UU
 // GetSalesmen returns all salesmen for a tenant
 func (s *TenantService) GetSalesmen(ctx context.Context, tenantID uuid.UUID) ([]*SalesmanResponse, error) {
 	var salesmen []models.Salesman
-	
+
 	err := s.db.Where("tenant_id = ?", tenantID).
 		Preload("User").
 		Preload("Shop").
 		Order("name").
 		Find(&salesmen).Error
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get salesmen: %w", err)
 	}
@@ -265,12 +265,12 @@ func (s *TenantService) GetSalesmen(ctx context.Context, tenantID uuid.UUID) ([]
 // GetSalesmanByID returns salesman by ID
 func (s *TenantService) GetSalesmanByID(ctx context.Context, salesmanID, tenantID uuid.UUID) (*SalesmanResponse, error) {
 	var salesman models.Salesman
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", salesmanID, tenantID).
 		Preload("User").
 		Preload("Shop").
 		First(&salesman).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("salesman not found")
@@ -308,7 +308,7 @@ func (s *TenantService) CreateSalesman(ctx context.Context, req CreateSalesmanRe
 	}
 
 	salesman := models.Salesman{
-		TenantModel:      models.TenantModel{TenantID: tenantID},
+		TenantModel:      models.TenantModel{TenantID: &tenantID},
 		UserID:           req.UserID,
 		ShopID:           req.ShopID,
 		EmployeeID:       employeeID,
@@ -333,12 +333,12 @@ func (s *TenantService) CreateSalesman(ctx context.Context, req CreateSalesmanRe
 // UpdateSalesman updates salesman information
 func (s *TenantService) UpdateSalesman(ctx context.Context, salesmanID, tenantID uuid.UUID, req UpdateSalesmanRequest) (*SalesmanResponse, error) {
 	var salesman models.Salesman
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", salesmanID, tenantID).
 		Preload("User").
 		Preload("Shop").
 		First(&salesman).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("salesman not found")
@@ -348,7 +348,7 @@ func (s *TenantService) UpdateSalesman(ctx context.Context, salesmanID, tenantID
 
 	// Update fields if provided
 	updates := make(map[string]interface{})
-	
+
 	if req.ShopID != nil {
 		// Verify shop exists and belongs to this tenant
 		var shop models.Shop
@@ -452,4 +452,80 @@ func (s *TenantService) mapSalesmanToResponse(salesman *models.Salesman) *Salesm
 	}
 
 	return response
+}
+
+// SaaS Admin Methods
+
+// GetAllTenants returns all tenants in the system (SaaS Admin only)
+func (s *TenantService) GetAllTenants(ctx context.Context) ([]*models.Tenant, error) {
+	var tenants []models.Tenant
+
+	err := s.db.Order("created_at DESC").Find(&tenants).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all tenants: %w", err)
+	}
+
+	// Convert to pointer slice
+	result := make([]*models.Tenant, len(tenants))
+	for i := range tenants {
+		result[i] = &tenants[i]
+	}
+
+	return result, nil
+}
+
+// GetSystemStats returns system-wide statistics (SaaS Admin only)
+func (s *TenantService) GetSystemStats(ctx context.Context) (map[string]interface{}, error) {
+	stats := make(map[string]interface{})
+
+	// Count tenants
+	var tenantCount int64
+	if err := s.db.Model(&models.Tenant{}).Count(&tenantCount).Error; err != nil {
+		return nil, fmt.Errorf("failed to count tenants: %w", err)
+	}
+	stats["total_tenants"] = tenantCount
+
+	// Count total users
+	var userCount int64
+	if err := s.db.Model(&models.User{}).Count(&userCount).Error; err != nil {
+		return nil, fmt.Errorf("failed to count users: %w", err)
+	}
+	stats["total_users"] = userCount
+
+	// Count total shops
+	var shopCount int64
+	if err := s.db.Model(&models.Shop{}).Count(&shopCount).Error; err != nil {
+		return nil, fmt.Errorf("failed to count shops: %w", err)
+	}
+	stats["total_shops"] = shopCount
+
+	// Count active vs inactive tenants
+	var activeTenants, inactiveTenants int64
+	if err := s.db.Model(&models.Tenant{}).Where("is_active = ?", true).Count(&activeTenants).Error; err != nil {
+		return nil, fmt.Errorf("failed to count active tenants: %w", err)
+	}
+	if err := s.db.Model(&models.Tenant{}).Where("is_active = ?", false).Count(&inactiveTenants).Error; err != nil {
+		return nil, fmt.Errorf("failed to count inactive tenants: %w", err)
+	}
+	stats["active_tenants"] = activeTenants
+	stats["inactive_tenants"] = inactiveTenants
+
+	return stats, nil
+}
+
+// GetAllShops returns all shops across all tenants (SaaS Admin only)
+func (s *TenantService) GetAllShops(ctx context.Context) ([]*models.Shop, error) {
+	var shops []models.Shop
+
+	err := s.db.Preload("Tenant").Order("created_at DESC").Find(&shops).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all shops: %w", err)
+	}
+
+	// Convert to pointer slice
+	result := make([]*models.Shop, len(shops))
+	for i := range shops {
+		result[i] = &shops[i]
+	}
+	return result, nil
 }

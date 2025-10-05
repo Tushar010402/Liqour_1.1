@@ -19,29 +19,29 @@ type ErrorResponse struct {
 
 // ValidationErrorResponse represents validation error details
 type ValidationErrorResponse struct {
-	Error   string                     `json:"error"`
-	Code    string                     `json:"code"`
-	Fields  map[string][]string        `json:"fields,omitempty"`
-	Details map[string]interface{}     `json:"details,omitempty"`
-	TraceID string                     `json:"trace_id,omitempty"`
+	Error   string                 `json:"error"`
+	Code    string                 `json:"code"`
+	Fields  map[string][]string    `json:"fields,omitempty"`
+	Details map[string]interface{} `json:"details,omitempty"`
+	TraceID string                 `json:"trace_id,omitempty"`
 }
 
 // StandardErrorCodes defines common error codes
 const (
-	ErrCodeValidation       = "VALIDATION_ERROR"
-	ErrCodeUnauthorized     = "UNAUTHORIZED"
-	ErrCodeForbidden        = "FORBIDDEN"
-	ErrCodeNotFound         = "NOT_FOUND"
-	ErrCodeConflict         = "CONFLICT"
-	ErrCodeInternal         = "INTERNAL_ERROR"
-	ErrCodeBadRequest       = "BAD_REQUEST"
+	ErrCodeValidation         = "VALIDATION_ERROR"
+	ErrCodeUnauthorized       = "UNAUTHORIZED"
+	ErrCodeForbidden          = "FORBIDDEN"
+	ErrCodeNotFound           = "NOT_FOUND"
+	ErrCodeConflict           = "CONFLICT"
+	ErrCodeInternal           = "INTERNAL_ERROR"
+	ErrCodeBadRequest         = "BAD_REQUEST"
 	ErrCodeServiceUnavailable = "SERVICE_UNAVAILABLE"
-	ErrCodeTimeout          = "TIMEOUT"
-	ErrCodeRateLimited      = "RATE_LIMITED"
-	ErrCodeInvalidToken     = "INVALID_TOKEN"
-	ErrCodeExpiredToken     = "EXPIRED_TOKEN"
-	ErrCodeTenantMismatch   = "TENANT_MISMATCH"
-	ErrCodeInsufficientRole = "INSUFFICIENT_ROLE"
+	ErrCodeTimeout            = "TIMEOUT"
+	ErrCodeRateLimited        = "RATE_LIMITED"
+	ErrCodeInvalidToken       = "INVALID_TOKEN"
+	ErrCodeExpiredToken       = "EXPIRED_TOKEN"
+	ErrCodeTenantMismatch     = "TENANT_MISMATCH"
+	ErrCodeInsufficientRole   = "INSUFFICIENT_ROLE"
 )
 
 // HandleError sends a standardized error response
@@ -85,7 +85,7 @@ func HandleValidationError(c *gin.Context, err error) {
 
 // HandleNotFound sends a standardized not found error
 func HandleNotFound(c *gin.Context, resource string) {
-	HandleError(c, http.StatusNotFound, ErrCodeNotFound, 
+	HandleError(c, http.StatusNotFound, ErrCodeNotFound,
 		fmt.Sprintf("%s not found", resource),
 		map[string]interface{}{"resource": resource})
 }
@@ -114,7 +114,7 @@ func HandleConflict(c *gin.Context, message string, details ...map[string]interf
 // HandleInternalError sends a standardized internal error
 func HandleInternalError(c *gin.Context, message string) {
 	// Log the actual error internally but send generic message to client
-	HandleError(c, http.StatusInternalServerError, ErrCodeInternal, 
+	HandleError(c, http.StatusInternalServerError, ErrCodeInternal,
 		"An internal error occurred. Please try again later.")
 }
 
@@ -183,7 +183,7 @@ func ToSnakeCase(str string) string {
 // WrapDatabaseError converts database errors to user-friendly messages
 func WrapDatabaseError(c *gin.Context, err error, operation string) {
 	errStr := err.Error()
-	
+
 	switch {
 	case strings.Contains(errStr, "duplicate key"):
 		HandleConflict(c, "Resource already exists", map[string]interface{}{
@@ -204,22 +204,22 @@ func Success(c *gin.Context, statusCode int, data interface{}, message ...string
 		"success": true,
 		"data":    data,
 	}
-	
+
 	if len(message) > 0 && message[0] != "" {
 		response["message"] = message[0]
 	}
-	
+
 	if requestID := c.GetString("request_id"); requestID != "" {
 		response["trace_id"] = requestID
 	}
-	
+
 	c.JSON(statusCode, response)
 }
 
 // SuccessWithPagination sends a paginated success response
 func SuccessWithPagination(c *gin.Context, data interface{}, total int64, page int, pageSize int) {
 	totalPages := (total + int64(pageSize) - 1) / int64(pageSize)
-	
+
 	response := gin.H{
 		"success": true,
 		"data":    data,
@@ -230,10 +230,10 @@ func SuccessWithPagination(c *gin.Context, data interface{}, total int64, page i
 			"total_pages": totalPages,
 		},
 	}
-	
+
 	if requestID := c.GetString("request_id"); requestID != "" {
 		response["trace_id"] = requestID
 	}
-	
+
 	c.JSON(http.StatusOK, response)
 }

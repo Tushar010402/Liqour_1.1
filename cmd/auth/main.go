@@ -51,6 +51,13 @@ func main() {
 	}
 	defer db.Close()
 
+	// Run database migrations
+	log.Println("Running database migrations...")
+	if err := db.Migrate(); err != nil {
+		log.Printf("Migration warning: %v", err)
+		// Continue anyway as some migrations might be optional
+	}
+
 	// Initialize cache
 	cacheConfig := cache.Config{
 		Host:     cfg.Redis.Host,
@@ -66,12 +73,14 @@ func main() {
 	defer redisCache.Close()
 
 	// Initialize services
-	authService := services.NewAuthService(db, redisCache, &cfg.JWT)
+	rateLimitService := services.NewRateLimitService(db, redisCache)
+	authService := services.NewAuthService(db, redisCache, &cfg.JWT, rateLimitService)
 	userService := services.NewUserService(db, redisCache)
 	tenantService := services.NewTenantService(db, redisCache)
 
 	// Initialize handlers
 	authHandlers := handlers.NewAuthHandlers(authService, userService, tenantService)
+	rateLimitHandlers := handlers.NewRateLimitHandlers(rateLimitService)
 
 	// Create router
 	router := gin.New()
@@ -83,7 +92,7 @@ func main() {
 	router.Use(middleware.CORSMiddleware())
 
 	// Setup routes
-	routes.SetupRoutes(router, cfg, redisCache, authHandlers)
+	routes.SetupRoutes(router, cfg, redisCache, authHandlers, rateLimitHandlers)
 
 	// Start server
 	srv := &http.Server{

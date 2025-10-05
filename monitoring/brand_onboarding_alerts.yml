@@ -1,0 +1,207 @@
+# Prometheus Alert Rules for Brand Onboarding
+# File: monitoring/brand_onboarding_alerts.yml
+
+groups:
+  - name: brand_onboarding_alerts
+    interval: 30s
+    rules:
+      # Critical Alerts
+      - alert: BrandOnboardingHighFailureRate
+        expr: |
+          (
+            rate(brand_onboarding_requests_total{status="error"}[5m])
+            /
+            rate(brand_onboarding_requests_total[5m])
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          component: inventory
+          feature: brand_onboarding
+        annotations:
+          summary: "Brand onboarding failure rate above 5%"
+          description: "Brand onboarding failure rate is {{ $value | humanizePercentage }} in the last 5 minutes"
+          runbook: "https://docs.liquorpro.com/runbooks/brand-onboarding-failures"
+
+      - alert: DuplicateProductsDetected
+        expr: |
+          increase(duplicate_brand_variants_skipped_total[5m]) > 100
+        for: 1m
+        labels:
+          severity: critical
+          component: inventory
+          feature: duplicate_prevention
+        annotations:
+          summary: "High number of duplicate brand variants detected"
+          description: "{{ $value }} duplicate variants skipped in last 5 minutes - possible duplicate prevention bypass attempt"
+          runbook: "https://docs.liquorpro.com/runbooks/duplicate-detection"
+
+      - alert: SaaSServiceRetryStorm
+        expr: |
+          rate(saas_service_retry_attempts_total[5m]) > 50
+        for: 3m
+        labels:
+          severity: warning
+          component: inventory
+          feature: saas_integration
+        annotations:
+          summary: "High SaaS service retry rate"
+          description: "SaaS service retry rate is {{ $value }} retries/sec - service may be degraded"
+          runbook: "https://docs.liquorpro.com/runbooks/saas-service-issues"
+
+      # Warning Alerts
+      - alert: BrandOnboardingSlowResponse
+        expr: |
+          histogram_quantile(0.95,
+            rate(brand_onboarding_duration_seconds_bucket[5m])
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: inventory
+          feature: brand_onboarding
+        annotations:
+          summary: "Brand onboarding response time degraded"
+          description: "95th percentile response time is {{ $value }}s (threshold: 5s)"
+          runbook: "https://docs.liquorpro.com/runbooks/performance-degradation"
+
+      - alert: CategoryCreationSpike
+        expr: |
+          increase(categories_created_total[10m]) > 50
+        for: 2m
+        labels:
+          severity: info
+          component: inventory
+          feature: category_management
+        annotations:
+          summary: "Unusual spike in category creation"
+          description: "{{ $value }} categories created in last 10 minutes"
+
+      - alert: DatabaseConnectionPoolExhaustion
+        expr: |
+          (
+            database_connections_in_use{service="inventory"}
+            /
+            database_connections_max{service="inventory"}
+          ) > 0.8
+        for: 3m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Database connection pool utilization high"
+          description: "Connection pool is {{ $value | humanizePercentage }} utilized"
+          runbook: "https://docs.liquorpro.com/runbooks/database-connections"
+
+      # Info/Monitoring Alerts
+      - alert: BrandOnboardingVolumeIncrease
+        expr: |
+          (
+            rate(brand_onboarding_requests_total[30m])
+            /
+            rate(brand_onboarding_requests_total[30m] offset 24h)
+          ) > 2
+        for: 10m
+        labels:
+          severity: info
+          component: inventory
+          feature: brand_onboarding
+        annotations:
+          summary: "Brand onboarding volume increased significantly"
+          description: "Onboarding volume is {{ $value }}x compared to same time yesterday"
+
+      - alert: ZeroBrandsOnboardedForTenant
+        expr: |
+          sum by (tenant_id) (
+            increase(brand_onboarding_requests_total{status="success"}[1h])
+          ) > 0
+          and
+          sum by (tenant_id) (
+            increase(products_created_from_onboarding_total[1h])
+          ) == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: inventory
+          feature: brand_onboarding
+        annotations:
+          summary: "Tenant onboarding brands but creating no products"
+          description: "Tenant {{ $labels.tenant_id }} has successful onboardings but no products created"
+
+---
+# Grafana Dashboard Configuration
+# File: monitoring/brand_onboarding_dashboard.json
+
+{
+  "dashboard": {
+    "title": "Brand Onboarding Monitoring",
+    "tags": ["inventory", "brand-onboarding"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Onboarding Success Rate",
+        "targets": [
+          {
+            "expr": "rate(brand_onboarding_requests_total{status=\"success\"}[5m]) / rate(brand_onboarding_requests_total[5m])",
+            "legendFormat": "Success Rate"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Response Time (p95, p99)",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(brand_onboarding_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(brand_onboarding_duration_seconds_bucket[5m]))",
+            "legendFormat": "p99"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Duplicate Prevention",
+        "targets": [
+          {
+            "expr": "rate(duplicate_brand_variants_skipped_total[5m])",
+            "legendFormat": "Duplicates Skipped/sec"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "SaaS Service Retry Rate",
+        "targets": [
+          {
+            "expr": "rate(saas_service_retry_attempts_total[5m])",
+            "legendFormat": "Retries/sec"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Categories Created",
+        "targets": [
+          {
+            "expr": "increase(categories_created_total[1h])",
+            "legendFormat": "Categories/hour"
+          }
+        ],
+        "type": "stat"
+      },
+      {
+        "title": "Products Created from Onboarding",
+        "targets": [
+          {
+            "expr": "increase(products_created_from_onboarding_total[1h])",
+            "legendFormat": "Products/hour"
+          }
+        ],
+        "type": "stat"
+      }
+    ]
+  }
+}

@@ -9,28 +9,27 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
 
 // IntegrationTestSuite holds the integration test suite
 type IntegrationTestSuite struct {
 	suite.Suite
-	baseURL     string
-	adminToken  string
-	userToken   string
-	tenantID    string
-	client      *http.Client
+	baseURL    string
+	adminToken string
+	userToken  string
+	tenantID   string
+	client     *http.Client
 }
 
 // SetupSuite runs once before all tests
 func (suite *IntegrationTestSuite) SetupSuite() {
 	suite.baseURL = getEnvOrDefault("API_BASE_URL", "http://localhost:8090")
 	suite.client = &http.Client{Timeout: 30 * time.Second}
-	
+
 	// Wait for services to be ready
 	suite.waitForServices()
-	
+
 	// Create test users and get tokens
 	suite.setupTestUsers()
 }
@@ -45,12 +44,12 @@ func (suite *IntegrationTestSuite) TearDownSuite() {
 func (suite *IntegrationTestSuite) waitForServices() {
 	services := []string{
 		"/gateway/health",
-		"/api/auth/health", 
+		"/api/auth/health",
 		"/api/inventory/health",
 		"/api/sales/health",
 		"/api/finance/health",
 	}
-	
+
 	maxAttempts := 30
 	for _, endpoint := range services {
 		for i := 0; i < maxAttempts; i++ {
@@ -80,17 +79,17 @@ func (suite *IntegrationTestSuite) setupTestUsers() {
 		"company_name": "Integration Test Co",
 		"tenant_name":  "Integration Test Tenant",
 	}
-	
+
 	adminResp := suite.makeRequest("POST", "/api/auth/register", adminPayload, "")
 	suite.Equal(200, adminResp.StatusCode)
-	
+
 	var adminResult map[string]interface{}
 	json.NewDecoder(adminResp.Body).Decode(&adminResult)
 	adminResp.Body.Close()
-	
+
 	suite.adminToken = adminResult["token"].(string)
 	suite.tenantID = adminResult["tenant"].(map[string]interface{})["id"].(string)
-	
+
 	// Create regular user
 	userPayload := map[string]interface{}{
 		"username":   "integration_user",
@@ -100,24 +99,24 @@ func (suite *IntegrationTestSuite) setupTestUsers() {
 		"last_name":  "User",
 		"role":       "user",
 	}
-	
+
 	userResp := suite.makeRequest("POST", "/api/admin/users", userPayload, suite.adminToken)
 	suite.Equal(200, userResp.StatusCode)
 	userResp.Body.Close()
-	
+
 	// Login as regular user to get token
 	loginPayload := map[string]interface{}{
 		"username": "integration_user",
 		"password": "IntegrationTest123!",
 	}
-	
+
 	loginResp := suite.makeRequest("POST", "/api/auth/login", loginPayload, "")
 	suite.Equal(200, loginResp.StatusCode)
-	
+
 	var loginResult map[string]interface{}
 	json.NewDecoder(loginResp.Body).Decode(&loginResult)
 	loginResp.Body.Close()
-	
+
 	suite.userToken = loginResult["token"].(string)
 }
 
@@ -134,46 +133,46 @@ func (suite *IntegrationTestSuite) TestAuthenticationFlow() {
 			"company_name": "Test Company",
 			"tenant_name":  "Test Tenant",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/auth/register", payload, "")
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		suite.NotEmpty(result["token"])
 		suite.NotEmpty(result["user"])
 		suite.NotEmpty(result["tenant"])
 	})
-	
+
 	suite.Run("Login", func() {
 		payload := map[string]interface{}{
 			"username": "integration_admin",
 			"password": "IntegrationTest123!",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/auth/login", payload, "")
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		suite.NotEmpty(result["token"])
 	})
-	
+
 	suite.Run("Profile Access", func() {
 		resp := suite.makeRequest("GET", "/api/auth/profile", nil, suite.adminToken)
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		suite.Equal("integration_admin", result["username"])
 	})
-	
+
 	suite.Run("Unauthorized Access", func() {
 		resp := suite.makeRequest("GET", "/api/auth/profile", nil, "")
 		suite.Equal(401, resp.StatusCode)
@@ -184,43 +183,43 @@ func (suite *IntegrationTestSuite) TestAuthenticationFlow() {
 // Test Inventory Management
 func (suite *IntegrationTestSuite) TestInventoryManagement() {
 	var brandID, categoryID, productID string
-	
+
 	suite.Run("Create Brand", func() {
 		payload := map[string]interface{}{
 			"name":        "Integration Test Brand",
 			"description": "Brand for integration testing",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/inventory/brands", payload, suite.adminToken)
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		brandID = result["id"].(string)
 		suite.NotEmpty(brandID)
 		suite.Equal("Integration Test Brand", result["name"])
 	})
-	
+
 	suite.Run("Create Category", func() {
 		payload := map[string]interface{}{
 			"name":        "Integration Test Category",
 			"description": "Category for integration testing",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/inventory/categories", payload, suite.adminToken)
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		categoryID = result["id"].(string)
 		suite.NotEmpty(categoryID)
 		suite.Equal("Integration Test Category", result["name"])
 	})
-	
+
 	suite.Run("Create Product", func() {
 		payload := map[string]interface{}{
 			"name":          "Integration Test Product",
@@ -233,30 +232,30 @@ func (suite *IntegrationTestSuite) TestInventoryManagement() {
 			"cost_price":    80.00,
 			"description":   "Product for integration testing",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/inventory/products", payload, suite.adminToken)
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		productID = result["id"].(string)
 		suite.NotEmpty(productID)
 		suite.Equal("Integration Test Product", result["name"])
 	})
-	
+
 	suite.Run("List Products", func() {
 		resp := suite.makeRequest("GET", "/api/inventory/products", nil, suite.adminToken)
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		products := result["products"].([]interface{})
 		suite.NotEmpty(products)
-		
+
 		// Find our test product
 		found := false
 		for _, p := range products {
@@ -284,35 +283,35 @@ func (suite *IntegrationTestSuite) TestMultiTenantIsolation() {
 		"company_name": "Second Tenant Co",
 		"tenant_name":  "Second Tenant",
 	}
-	
+
 	secondTenantResp := suite.makeRequest("POST", "/api/auth/register", secondTenantPayload, "")
 	suite.Equal(200, secondTenantResp.StatusCode)
-	
+
 	var secondTenantResult map[string]interface{}
 	json.NewDecoder(secondTenantResp.Body).Decode(&secondTenantResult)
 	secondTenantResp.Body.Close()
-	
+
 	secondTenantToken := secondTenantResult["token"].(string)
-	
+
 	suite.Run("First Tenant Creates Brand", func() {
 		payload := map[string]interface{}{
 			"name":        "Tenant 1 Brand",
 			"description": "Brand for first tenant",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/inventory/brands", payload, suite.adminToken)
 		suite.Equal(200, resp.StatusCode)
 		resp.Body.Close()
 	})
-	
+
 	suite.Run("Second Tenant Cannot See First Tenant's Brand", func() {
 		resp := suite.makeRequest("GET", "/api/inventory/brands", nil, secondTenantToken)
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		brands := result["brands"]
 		if brands != nil {
 			brandsList := brands.([]interface{})
@@ -322,26 +321,26 @@ func (suite *IntegrationTestSuite) TestMultiTenantIsolation() {
 			}
 		}
 	})
-	
+
 	suite.Run("Second Tenant Creates Own Brand", func() {
 		payload := map[string]interface{}{
 			"name":        "Tenant 2 Brand",
 			"description": "Brand for second tenant",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/inventory/brands", payload, secondTenantToken)
 		suite.Equal(200, resp.StatusCode)
 		resp.Body.Close()
 	})
-	
+
 	suite.Run("First Tenant Cannot See Second Tenant's Brand", func() {
 		resp := suite.makeRequest("GET", "/api/inventory/brands", nil, suite.adminToken)
 		suite.Equal(200, resp.StatusCode)
-		
+
 		var result map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		
+
 		brands := result["brands"].([]interface{})
 		for _, b := range brands {
 			brand := b.(map[string]interface{})
@@ -358,34 +357,34 @@ func (suite *IntegrationTestSuite) TestErrorHandling() {
 		suite.Equal(400, resp.StatusCode)
 		resp.Body.Close()
 	})
-	
+
 	suite.Run("Missing Required Fields", func() {
 		payload := map[string]interface{}{
 			"description": "Brand without name",
 		}
-		
+
 		resp := suite.makeRequest("POST", "/api/inventory/brands", payload, suite.adminToken)
 		suite.Equal(400, resp.StatusCode)
 		resp.Body.Close()
 	})
-	
+
 	suite.Run("Invalid UUID", func() {
 		resp := suite.makeRequest("GET", "/api/inventory/products/invalid-uuid", nil, suite.adminToken)
 		suite.Equal(400, resp.StatusCode)
 		resp.Body.Close()
 	})
-	
+
 	suite.Run("Duplicate Brand Name", func() {
 		// Create first brand
 		payload := map[string]interface{}{
 			"name":        "Duplicate Test Brand",
 			"description": "First brand",
 		}
-		
+
 		resp1 := suite.makeRequest("POST", "/api/inventory/brands", payload, suite.adminToken)
 		suite.Equal(200, resp1.StatusCode)
 		resp1.Body.Close()
-		
+
 		// Try to create duplicate
 		resp2 := suite.makeRequest("POST", "/api/inventory/brands", payload, suite.adminToken)
 		suite.Equal(409, resp2.StatusCode)
@@ -399,23 +398,23 @@ func (suite *IntegrationTestSuite) TestPerformance() {
 		start := time.Now()
 		resp := suite.makeRequest("GET", "/api/inventory/brands", nil, suite.adminToken)
 		duration := time.Since(start)
-		
+
 		suite.Equal(200, resp.StatusCode)
 		resp.Body.Close()
-		
+
 		// Response should be under 1 second for simple operations
 		suite.Less(duration, 1*time.Second, "Response time should be under 1 second")
 	})
-	
+
 	suite.Run("Concurrent Requests", func() {
 		concurrency := 10
 		done := make(chan bool, concurrency)
 		errors := make(chan error, concurrency)
-		
+
 		for i := 0; i < concurrency; i++ {
 			go func() {
 				defer func() { done <- true }()
-				
+
 				resp := suite.makeRequest("GET", "/api/inventory/brands", nil, suite.adminToken)
 				if resp.StatusCode != 200 {
 					errors <- fmt.Errorf("Expected 200, got %d", resp.StatusCode)
@@ -423,7 +422,7 @@ func (suite *IntegrationTestSuite) TestPerformance() {
 				resp.Body.Close()
 			}()
 		}
-		
+
 		// Wait for all requests to complete
 		for i := 0; i < concurrency; i++ {
 			select {
@@ -448,21 +447,21 @@ func (suite *IntegrationTestSuite) makeRequest(method, endpoint string, payload 
 	} else {
 		body = bytes.NewBuffer([]byte{})
 	}
-	
+
 	req, err := http.NewRequest(method, suite.baseURL+endpoint, body)
 	suite.NoError(err)
-	
+
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	
+
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	
+
 	resp, err := suite.client.Do(req)
 	suite.NoError(err)
-	
+
 	return resp
 }
 

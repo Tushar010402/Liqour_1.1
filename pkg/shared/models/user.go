@@ -1,40 +1,43 @@
 package models
 
 import (
-	"time"
 	"github.com/google/uuid"
+	"time"
 )
 
 // User represents system users with role-based access
+// Note: TenantID can be NULL for Super Users (SaaS admins)
 type User struct {
-	TenantModel
-	Username     string `json:"username" gorm:"unique;not null"`
-	Email        string `json:"email" gorm:"unique;not null"`
-	FirstName    string `json:"first_name"`
-	LastName     string `json:"last_name"`
-	Phone        string `json:"phone"`
-	PasswordHash string `json:"-" gorm:"not null"`
-	Role         string `json:"role" gorm:"not null;default:'salesman'"`
-	CustomRole   string `json:"custom_role"`
-	IsActive     bool   `json:"is_active" gorm:"default:true"`
-	IsStaff      bool   `json:"is_staff" gorm:"default:false"`
-	IsSuperuser  bool   `json:"is_superuser" gorm:"default:false"`
-	
+	BaseModel
+	TenantID     *uuid.UUID `json:"tenant_id" gorm:"type:uuid;index"` // NULL for Super Users
+	Tenant       *Tenant    `json:"tenant,omitempty" gorm:"foreignKey:TenantID"`
+	Username     string     `json:"username" gorm:"unique;not null"`
+	Email        string     `json:"email" gorm:"unique;not null"`
+	FirstName    string     `json:"first_name"`
+	LastName     string     `json:"last_name"`
+	Phone        string     `json:"phone" gorm:"not null;index"` // Primary unique key for OTP-based auth - uniqueness handled at app level
+	PasswordHash string     `json:"-" gorm:"not null"`
+	Role         string     `json:"role" gorm:"not null;default:'salesman'"`
+	CustomRole   string     `json:"custom_role"`
+	IsActive     bool       `json:"is_active" gorm:"default:true"`
+	IsStaff      bool       `json:"is_staff" gorm:"default:false"`
+	IsSuperuser  bool       `json:"is_superuser" gorm:"default:false"`
+
 	// Profile fields
 	ProfileImage string `json:"profile_image"`
-	
+
 	// Relationships
 	TenantRoles       []TenantRole       `json:"tenant_roles,omitempty" gorm:"foreignKey:UserID"`
 	TenantPermissions []TenantPermission `json:"tenant_permissions,omitempty" gorm:"foreignKey:UserID"`
 	Salesman          *Salesman          `json:"salesman,omitempty" gorm:"foreignKey:UserID"`
-	
+
 	// Sales and finance relationships
-	CreatedSales       []Sale              `json:"created_sales,omitempty" gorm:"foreignKey:CreatedByID"`
-	ApprovedSales      []Sale              `json:"approved_sales,omitempty" gorm:"foreignKey:ApprovedByID"`
-	CreatedReturns     []SaleReturn        `json:"created_returns,omitempty" gorm:"foreignKey:CreatedByID"`
-	ApprovedReturns    []SaleReturn        `json:"approved_returns,omitempty" gorm:"foreignKey:ApprovedByID"`
-	ExecutiveFinances  []ExecutiveFinance  `json:"executive_finances,omitempty" gorm:"foreignKey:ExecutiveID"`
-	MoneyCollections   []MoneyCollection   `json:"money_collections,omitempty" gorm:"foreignKey:AssistantManagerID"`
+	CreatedSales      []Sale             `json:"created_sales,omitempty" gorm:"foreignKey:CreatedByID"`
+	ApprovedSales     []Sale             `json:"approved_sales,omitempty" gorm:"foreignKey:ApprovedByID"`
+	CreatedReturns    []SaleReturn       `json:"created_returns,omitempty" gorm:"foreignKey:CreatedByID"`
+	ApprovedReturns   []SaleReturn       `json:"approved_returns,omitempty" gorm:"foreignKey:ApprovedByID"`
+	ExecutiveFinances []ExecutiveFinance `json:"executive_finances,omitempty" gorm:"foreignKey:ExecutiveID"`
+	MoneyCollections  []MoneyCollection  `json:"money_collections,omitempty" gorm:"foreignKey:AssistantManagerID"`
 }
 
 // FullName returns the user's full name
@@ -73,11 +76,11 @@ type TenantPermission struct {
 // UserSession represents active user sessions
 type UserSession struct {
 	BaseModel
-	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;not null"`
-	User      *User     `json:"user,omitempty" gorm:"foreignKey:UserID"`
-	Token     string    `json:"token" gorm:"unique;not null"`
-	IPAddress string    `json:"ip_address"`
-	UserAgent string    `json:"user_agent"`
+	UserID    uuid.UUID  `json:"user_id" gorm:"type:uuid;not null"`
+	User      *User      `json:"user,omitempty" gorm:"foreignKey:UserID"`
+	Token     string     `json:"token" gorm:"unique;not null"`
+	IPAddress string     `json:"ip_address"`
+	UserAgent string     `json:"user_agent"`
 	ExpiresAt *time.Time `json:"expires_at"`
-	IsActive  bool      `json:"is_active" gorm:"default:true"`
+	IsActive  bool       `json:"is_active" gorm:"default:true"`
 }

@@ -10,15 +10,18 @@ func CORSMiddleware() gin.HandlerFunc {
 	config := cors.DefaultConfig()
 	config.AllowAllOrigins = false
 	config.AllowOrigins = []string{
-		"http://localhost:3000",  // React dev server
-		"http://localhost:3001",  // Next.js dev server
-		"http://localhost:8090",  // API Gateway
-		"http://localhost:8095",  // Frontend service
+		"http://localhost:3000", // React dev server
+		"http://localhost:3001", // Next.js dev server
+		"http://localhost:3014", // Flutter web app
+		"http://localhost:3015", // Flutter web app
+		"http://localhost:3020", // Flutter web app (clean build)
+		"http://localhost:8090", // API Gateway
+		"http://localhost:8095", // Frontend service
 	}
 	config.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 	config.AllowHeaders = []string{
 		"Origin",
-		"Content-Type", 
+		"Content-Type",
 		"Accept",
 		"Authorization",
 		"X-Request-ID",
@@ -29,7 +32,7 @@ func CORSMiddleware() gin.HandlerFunc {
 		"X-Total-Count",
 	}
 	config.AllowCredentials = true
-	
+
 	return cors.New(config)
 }
 
@@ -41,7 +44,7 @@ func ProductionCORSMiddleware(allowedOrigins []string) gin.HandlerFunc {
 	config.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
 	config.AllowHeaders = []string{
 		"Origin",
-		"Content-Type", 
+		"Content-Type",
 		"Accept",
 		"Authorization",
 		"X-Request-ID",
@@ -52,6 +55,6 @@ func ProductionCORSMiddleware(allowedOrigins []string) gin.HandlerFunc {
 		"X-Total-Count",
 	}
 	config.AllowCredentials = true
-	
+
 	return cors.New(config)
 }

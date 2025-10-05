@@ -70,7 +70,6 @@ type ServicesConfig struct {
 	Sales     ServiceConfig `mapstructure:"sales"`
 	Inventory ServiceConfig `mapstructure:"inventory"`
 	Finance   ServiceConfig `mapstructure:"finance"`
-	Frontend  ServiceConfig `mapstructure:"frontend"`
 }
 
 // ServiceConfig holds individual service configuration
@@ -151,16 +150,19 @@ func setDefaults() {
 	// Services defaults
 	viper.SetDefault("services.gateway.host", "localhost")
 	viper.SetDefault("services.gateway.port", 8090)
+	viper.SetDefault("services.gateway.url", "http://localhost:8090")
 	viper.SetDefault("services.auth.host", "localhost")
 	viper.SetDefault("services.auth.port", 8091)
+	viper.SetDefault("services.auth.url", "http://localhost:8091")
 	viper.SetDefault("services.sales.host", "localhost")
 	viper.SetDefault("services.sales.port", 8092)
+	viper.SetDefault("services.sales.url", "http://localhost:8092")
 	viper.SetDefault("services.inventory.host", "localhost")
 	viper.SetDefault("services.inventory.port", 8093)
+	viper.SetDefault("services.inventory.url", "http://localhost:8093")
 	viper.SetDefault("services.finance.host", "localhost")
 	viper.SetDefault("services.finance.port", 8094)
-	viper.SetDefault("services.frontend.host", "localhost")
-	viper.SetDefault("services.frontend.port", 8095)
+	viper.SetDefault("services.finance.url", "http://localhost:8094")
 }
 
 // GetDatabaseConnectionString returns the database connection string

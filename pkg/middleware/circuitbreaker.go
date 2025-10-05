@@ -35,12 +35,12 @@ func (s CircuitBreakerState) String() string {
 
 // CircuitBreakerConfig holds configuration for circuit breaker
 type CircuitBreakerConfig struct {
-	Name               string        `yaml:"name" json:"name"`
-	MaxFailures        int           `yaml:"max_failures" json:"max_failures"`
-	ResetTimeout       time.Duration `yaml:"reset_timeout" json:"reset_timeout"`
-	SuccessThreshold   int           `yaml:"success_threshold" json:"success_threshold"`
-	Timeout            time.Duration `yaml:"timeout" json:"timeout"`
-	OnStateChange      func(name string, from, to CircuitBreakerState)
+	Name             string        `yaml:"name" json:"name"`
+	MaxFailures      int           `yaml:"max_failures" json:"max_failures"`
+	ResetTimeout     time.Duration `yaml:"reset_timeout" json:"reset_timeout"`
+	SuccessThreshold int           `yaml:"success_threshold" json:"success_threshold"`
+	Timeout          time.Duration `yaml:"timeout" json:"timeout"`
+	OnStateChange    func(name string, from, to CircuitBreakerState)
 }
 
 // CircuitBreaker implements the circuit breaker pattern
@@ -261,7 +261,7 @@ func CircuitBreakerMiddleware(manager *CircuitBreakerManager, breakerName string
 	return gin.HandlerFunc(func(c *gin.Context) {
 		err := manager.Execute(breakerName, func() error {
 			c.Next()
-			
+
 			// Consider 5xx errors as failures
 			if c.Writer.Status() >= 500 {
 				return fmt.Errorf("HTTP %d error", c.Writer.Status())

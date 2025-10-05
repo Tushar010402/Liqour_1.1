@@ -71,7 +71,7 @@ func (h *PaymentHandler) GetPayments(c *gin.Context) {
 	// Parse pagination parameters
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-	
+
 	if page < 1 {
 		page = 1
 	}
@@ -208,7 +208,7 @@ func (h *PaymentHandler) GetInvoices(c *gin.Context) {
 	// Parse pagination parameters
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-	
+
 	if page < 1 {
 		page = 1
 	}
@@ -296,11 +296,11 @@ func (h *PaymentHandler) GetPaymentStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"payment_id": payment.ID,
-		"status":     payment.Status,
-		"amount":     payment.Amount,
-		"currency":   payment.Currency,
-		"created_at": payment.CreatedAt,
+		"payment_id":   payment.ID,
+		"status":       payment.Status,
+		"amount":       payment.Amount,
+		"currency":     payment.Currency,
+		"created_at":   payment.CreatedAt,
 		"processed_at": payment.ProcessedAt,
 	})
 }

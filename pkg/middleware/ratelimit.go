@@ -20,10 +20,10 @@ type RateLimiter interface {
 
 // RedisRateLimiter implements rate limiting using Redis
 type RedisRateLimiter struct {
-	client   *redis.Client
-	limit    int
-	window   time.Duration
-	logger   *zap.Logger
+	client *redis.Client
+	limit  int
+	window time.Duration
+	logger *zap.Logger
 }
 
 // NewRedisRateLimiter creates a new Redis-based rate limiter
@@ -44,13 +44,13 @@ func (rl *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error)
 
 	// Use Redis pipeline for atomic operations
 	pipe := rl.client.Pipeline()
-	
+
 	// Increment counter
 	incrCmd := pipe.Incr(ctx, redisKey)
-	
+
 	// Set expiration only if this is a new key
 	pipe.Expire(ctx, redisKey, rl.window)
-	
+
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		rl.logger.Error("Failed to execute rate limit pipeline", zap.Error(err))
@@ -58,7 +58,7 @@ func (rl *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error)
 	}
 
 	count := incrCmd.Val()
-	
+
 	rl.logger.Debug("Rate limit check",
 		zap.String("key", key),
 		zap.Int64("count", count),
@@ -75,37 +75,37 @@ func (rl *RedisRateLimiter) Reset(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	if len(keys) > 0 {
 		return rl.client.Del(ctx, keys...).Err()
 	}
-	
+
 	return nil
 }
 
 // RateLimitConfig holds rate limiting configuration
 type RateLimitConfig struct {
 	Global struct {
-		Enabled bool `yaml:"enabled" json:"enabled"`
-		Limit   int  `yaml:"limit" json:"limit"`
+		Enabled bool   `yaml:"enabled" json:"enabled"`
+		Limit   int    `yaml:"limit" json:"limit"`
 		Window  string `yaml:"window" json:"window"`
 	} `yaml:"global" json:"global"`
-	
+
 	PerUser struct {
-		Enabled bool `yaml:"enabled" json:"enabled"`
-		Limit   int  `yaml:"limit" json:"limit"`
+		Enabled bool   `yaml:"enabled" json:"enabled"`
+		Limit   int    `yaml:"limit" json:"limit"`
 		Window  string `yaml:"window" json:"window"`
 	} `yaml:"per_user" json:"per_user"`
-	
+
 	PerTenant struct {
-		Enabled bool `yaml:"enabled" json:"enabled"`
-		Limit   int  `yaml:"limit" json:"limit"`
+		Enabled bool   `yaml:"enabled" json:"enabled"`
+		Limit   int    `yaml:"limit" json:"limit"`
 		Window  string `yaml:"window" json:"window"`
 	} `yaml:"per_tenant" json:"per_tenant"`
-	
+
 	PerIP struct {
-		Enabled bool `yaml:"enabled" json:"enabled"`
-		Limit   int  `yaml:"limit" json:"limit"`
+		Enabled bool   `yaml:"enabled" json:"enabled"`
+		Limit   int    `yaml:"limit" json:"limit"`
 		Window  string `yaml:"window" json:"window"`
 	} `yaml:"per_ip" json:"per_ip"`
 }
@@ -114,21 +114,21 @@ type RateLimitConfig struct {
 func RateLimitMiddleware(redisClient *redis.Client, config RateLimitConfig, logger *zap.Logger) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		ctx := c.Request.Context()
-		
+
 		// Check different rate limit types
 		if config.Global.Enabled {
 			if !checkRateLimit(ctx, redisClient, "global", "global", config.Global.Limit, config.Global.Window, logger, c) {
 				return
 			}
 		}
-		
+
 		if config.PerIP.Enabled {
 			clientIP := c.ClientIP()
 			if !checkRateLimit(ctx, redisClient, "ip", clientIP, config.PerIP.Limit, config.PerIP.Window, logger, c) {
 				return
 			}
 		}
-		
+
 		if config.PerUser.Enabled {
 			userID := c.GetString("user_id")
 			if userID != "" {
@@ -137,7 +137,7 @@ func RateLimitMiddleware(redisClient *redis.Client, config RateLimitConfig, logg
 				}
 			}
 		}
-		
+
 		if config.PerTenant.Enabled {
 			tenantID := c.GetString("tenant_id")
 			if tenantID != "" {
@@ -146,7 +146,7 @@ func RateLimitMiddleware(redisClient *redis.Client, config RateLimitConfig, logg
 				}
 			}
 		}
-		
+
 		c.Next()
 	})
 }
@@ -158,19 +158,19 @@ func checkRateLimit(ctx context.Context, redisClient *redis.Client, limitType, k
 		logger.Error("Invalid rate limit window", zap.String("window", windowStr), zap.Error(err))
 		return true // Allow request if configuration is invalid
 	}
-	
+
 	rateLimiter := NewRedisRateLimiter(redisClient, limit, window, logger)
-	
+
 	allowed, err := rateLimiter.Allow(ctx, fmt.Sprintf("%s:%s", limitType, key))
 	if err != nil {
-		logger.Error("Rate limit check failed", 
+		logger.Error("Rate limit check failed",
 			zap.String("type", limitType),
 			zap.String("key", key),
 			zap.Error(err),
 		)
 		return true // Allow request if rate limiter fails
 	}
-	
+
 	if !allowed {
 		logger.Warn("Rate limit exceeded",
 			zap.String("type", limitType),
@@ -178,25 +178,25 @@ func checkRateLimit(ctx context.Context, redisClient *redis.Client, limitType, k
 			zap.Int("limit", limit),
 			zap.String("window", windowStr),
 		)
-		
+
 		// Set rate limit headers
 		c.Header("X-RateLimit-Limit", strconv.Itoa(limit))
 		c.Header("X-RateLimit-Window", windowStr)
 		c.Header("Retry-After", windowStr)
-		
+
 		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error":   "Rate limit exceeded",
-			"message": fmt.Sprintf("Too many requests. Limit: %d per %s", limit, windowStr),
+			"error":       "Rate limit exceeded",
+			"message":     fmt.Sprintf("Too many requests. Limit: %d per %s", limit, windowStr),
 			"retry_after": windowStr,
 		})
 		c.Abort()
 		return false
 	}
-	
+
 	// Set rate limit headers for successful requests
 	c.Header("X-RateLimit-Limit", strconv.Itoa(limit))
 	c.Header("X-RateLimit-Window", windowStr)
-	
+
 	return true
 }
 
@@ -222,7 +222,7 @@ func NewTokenBucketRateLimiter(client *redis.Client, capacity int, refillRate fl
 func (tbl *TokenBucketRateLimiter) Allow(ctx context.Context, key string) (bool, error) {
 	now := time.Now()
 	redisKey := fmt.Sprintf("token_bucket:%s", key)
-	
+
 	// Lua script for atomic token bucket operations
 	luaScript := `
 		local key = KEYS[1]
@@ -252,16 +252,16 @@ func (tbl *TokenBucketRateLimiter) Allow(ctx context.Context, key string) (bool,
 			return {0, tokens}
 		end
 	`
-	
-	result, err := rl.client.Eval(ctx, luaScript, []string{redisKey}, tbl.capacity, tbl.refillRate, now.UnixMilli(), 1).Result()
+
+	result, err := tbl.client.Eval(ctx, luaScript, []string{redisKey}, tbl.capacity, tbl.refillRate, now.UnixMilli(), 1).Result()
 	if err != nil {
 		tbl.logger.Error("Token bucket script failed", zap.Error(err))
 		return false, err
 	}
-	
+
 	resultArray := result.([]interface{})
 	allowed := resultArray[0].(int64) == 1
-	
+
 	return allowed, nil
 }
 

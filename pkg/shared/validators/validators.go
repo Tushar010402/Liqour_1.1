@@ -113,7 +113,7 @@ func (v *Validator) Email(email, field string) {
 	if email == "" {
 		return // Skip validation for empty values
 	}
-	
+
 	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 	if !emailRegex.MatchString(email) {
 		v.AddError(field, "must be a valid email address")
@@ -125,7 +125,7 @@ func (v *Validator) Phone(phone, field string) {
 	if phone == "" {
 		return // Skip validation for empty values
 	}
-	
+
 	phoneRegex := regexp.MustCompile(`^[+]?[\d\s\-\(\)]{10,15}$`)
 	if !phoneRegex.MatchString(phone) {
 		v.AddError(field, "must be a valid phone number")
@@ -137,7 +137,7 @@ func (v *Validator) MinLength(value string, min int, field string) {
 	if value == "" {
 		return // Skip validation for empty values
 	}
-	
+
 	if len(value) < min {
 		v.AddError(field, fmt.Sprintf("must be at least %d characters long", min))
 	}
@@ -153,7 +153,7 @@ func (v *Validator) MaxLength(value string, max int, field string) {
 // Min validates minimum numeric value
 func (v *Validator) Min(value interface{}, min float64, field string) {
 	var val float64
-	
+
 	switch vt := value.(type) {
 	case int:
 		val = float64(vt)
@@ -172,7 +172,7 @@ func (v *Validator) Min(value interface{}, min float64, field string) {
 		v.AddError(field, "must be a numeric value")
 		return
 	}
-	
+
 	if val < min {
 		v.AddError(field, fmt.Sprintf("must be at least %.2f", min))
 	}
@@ -181,7 +181,7 @@ func (v *Validator) Min(value interface{}, min float64, field string) {
 // Max validates maximum numeric value
 func (v *Validator) Max(value interface{}, max float64, field string) {
 	var val float64
-	
+
 	switch vt := value.(type) {
 	case int:
 		val = float64(vt)
@@ -200,7 +200,7 @@ func (v *Validator) Max(value interface{}, max float64, field string) {
 		v.AddError(field, "must be a numeric value")
 		return
 	}
-	
+
 	if val > max {
 		v.AddError(field, fmt.Sprintf("must not exceed %.2f", max))
 	}
@@ -221,13 +221,13 @@ func (v *Validator) In(value string, options []string, field string) {
 	if value == "" {
 		return // Skip validation for empty values
 	}
-	
+
 	for _, option := range options {
 		if value == option {
 			return
 		}
 	}
-	
+
 	v.AddError(field, fmt.Sprintf("must be one of: %s", strings.Join(options, ", ")))
 }
 
@@ -236,7 +236,7 @@ func (v *Validator) UUID(value string, field string) {
 	if value == "" {
 		return // Skip validation for empty values
 	}
-	
+
 	if _, err := uuid.Parse(value); err != nil {
 		v.AddError(field, "must be a valid UUID")
 	}
@@ -247,7 +247,7 @@ func (v *Validator) Date(value string, field string) {
 	if value == "" {
 		return // Skip validation for empty values
 	}
-	
+
 	if _, err := time.Parse("2006-01-02", value); err != nil {
 		v.AddError(field, "must be a valid date (YYYY-MM-DD)")
 	}
@@ -258,7 +258,7 @@ func (v *Validator) DateTime(value string, field string) {
 	if value == "" {
 		return // Skip validation for empty values
 	}
-	
+
 	if _, err := time.Parse("2006-01-02T15:04:05Z", value); err != nil {
 		if _, err := time.Parse("2006-01-02 15:04:05", value); err != nil {
 			v.AddError(field, "must be a valid datetime")
@@ -271,16 +271,16 @@ func (v *Validator) Password(password, field string) {
 	if password == "" {
 		return // Required validation should be done separately
 	}
-	
+
 	if len(password) < 8 {
 		v.AddError(field, "must be at least 8 characters long")
 	}
-	
+
 	hasUpper := regexp.MustCompile(`[A-Z]`).MatchString(password)
 	hasLower := regexp.MustCompile(`[a-z]`).MatchString(password)
 	hasDigit := regexp.MustCompile(`\d`).MatchString(password)
 	hasSpecial := regexp.MustCompile(`[^a-zA-Z0-9]`).MatchString(password)
-	
+
 	if !hasUpper {
 		v.AddError(field, "must contain at least one uppercase letter")
 	}

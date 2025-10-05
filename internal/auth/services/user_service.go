@@ -29,14 +29,14 @@ func NewUserService(db *database.DB, cache *cache.Cache) *UserService {
 
 // CreateUserRequest represents user creation request
 type CreateUserRequest struct {
-	Username    string `json:"username" binding:"required,min=3,max=50"`
-	Email       string `json:"email" binding:"required,email"`
-	Password    string `json:"password" binding:"required,min=8"`
-	FirstName   string `json:"first_name" binding:"required"`
-	LastName    string `json:"last_name" binding:"required"`
-	Phone       string `json:"phone"`
-	Role        string `json:"role" binding:"required"`
-	IsActive    bool   `json:"is_active"`
+	Username  string `json:"username" binding:"required,min=3,max=50"`
+	Email     string `json:"email" binding:"required,email"`
+	Password  string `json:"password" binding:"required,min=8"`
+	FirstName string `json:"first_name" binding:"required"`
+	LastName  string `json:"last_name" binding:"required"`
+	Phone     string `json:"phone"`
+	Role      string `json:"role" binding:"required"`
+	IsActive  bool   `json:"is_active"`
 }
 
 // UpdateUserRequest represents user update request
@@ -116,11 +116,11 @@ func (s *UserService) GetUsers(ctx context.Context, tenantID uuid.UUID, page, pa
 // GetUserByID returns user by ID
 func (s *UserService) GetUserByID(ctx context.Context, userID, tenantID uuid.UUID) (*UserResponse, error) {
 	var user models.User
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).
 		Preload("Salesman").
 		First(&user).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("user not found")
@@ -144,7 +144,7 @@ func (s *UserService) GetUserByID(ctx context.Context, userID, tenantID uuid.UUI
 func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, tenantID uuid.UUID) (*UserResponse, error) {
 	// Check if username or email already exists
 	var existingUser models.User
-	if err := s.db.Where("(username = ? OR email = ?) AND tenant_id = ?", 
+	if err := s.db.Where("(username = ? OR email = ?) AND tenant_id = ?",
 		req.Username, req.Email, tenantID).First(&existingUser).Error; err == nil {
 		return nil, errors.New("username or email already exists")
 	}
@@ -157,7 +157,7 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, ten
 
 	// Create user
 	user := models.User{
-		TenantModel:  models.TenantModel{TenantID: tenantID},
+		TenantID:     &tenantID,
 		Username:     req.Username,
 		Email:        req.Email,
 		FirstName:    req.FirstName,
@@ -187,7 +187,7 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, ten
 // UpdateUser updates user information
 func (s *UserService) UpdateUser(ctx context.Context, userID, tenantID uuid.UUID, req UpdateUserRequest) (*UserResponse, error) {
 	var user models.User
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -198,7 +198,7 @@ func (s *UserService) UpdateUser(ctx context.Context, userID, tenantID uuid.UUID
 
 	// Update fields if provided
 	updates := make(map[string]interface{})
-	
+
 	if req.FirstName != nil {
 		updates["first_name"] = *req.FirstName
 		user.FirstName = *req.FirstName
@@ -247,7 +247,7 @@ func (s *UserService) UpdateUser(ctx context.Context, userID, tenantID uuid.UUID
 // ChangePassword changes user password
 func (s *UserService) ChangePassword(ctx context.Context, userID, tenantID uuid.UUID, req ChangePasswordRequest) error {
 	var user models.User
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -282,7 +282,7 @@ func (s *UserService) ChangePassword(ctx context.Context, userID, tenantID uuid.
 // DeleteUser soft deletes a user
 func (s *UserService) DeleteUser(ctx context.Context, userID, tenantID uuid.UUID) error {
 	var user models.User
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -297,7 +297,7 @@ func (s *UserService) DeleteUser(ctx context.Context, userID, tenantID uuid.UUID
 		s.db.Model(&models.User{}).
 			Where("tenant_id = ? AND role = ? AND is_active = ?", tenantID, models.RoleAdmin, true).
 			Count(&adminCount)
-		
+
 		if adminCount <= 1 {
 			return errors.New("cannot delete the last active admin user")
 		}
@@ -318,11 +318,11 @@ func (s *UserService) DeleteUser(ctx context.Context, userID, tenantID uuid.UUID
 // GetUsersByRole returns users by role
 func (s *UserService) GetUsersByRole(ctx context.Context, tenantID uuid.UUID, role string) ([]*UserResponse, error) {
 	var users []models.User
-	
+
 	err := s.db.Where("tenant_id = ? AND role = ? AND is_active = ?", tenantID, role, true).
 		Order("first_name, last_name").
 		Find(&users).Error
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get users by role: %w", err)
 	}
@@ -357,7 +357,7 @@ func (s *UserService) DeactivateUser(ctx context.Context, userID, tenantID uuid.
 	err := s.db.Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", userID, tenantID).
 		Update("is_active", false).Error
-	
+
 	if err != nil {
 		return err
 	}
@@ -367,4 +367,43 @@ func (s *UserService) DeactivateUser(ctx context.Context, userID, tenantID uuid.
 	s.cache.Delete(ctx, sessionKey)
 
 	return nil
+}
+
+// SaaS Admin Methods
+
+// GetAllUsersAcrossTenants returns all users across all tenants (SaaS Admin only)
+func (s *UserService) GetAllUsersAcrossTenants(ctx context.Context) ([]*UserResponse, error) {
+	var users []models.User
+
+	err := s.db.Preload("Tenant").Order("created_at DESC").Find(&users).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all users: %w", err)
+	}
+
+	// Convert to response format
+	userResponses := make([]*UserResponse, len(users))
+	for i, user := range users {
+		response := &UserResponse{
+			ID:           user.ID,
+			Username:     user.Username,
+			Email:        user.Email,
+			FirstName:    user.FirstName,
+			LastName:     user.LastName,
+			Role:         user.Role,
+			IsActive:     user.IsActive,
+			ProfileImage: user.ProfileImage,
+		}
+
+		// Add tenant information if available
+		if user.Tenant != nil {
+			response.TenantName = user.Tenant.Name
+		} else {
+			// This is a Super User (SaaS Admin)
+			response.TenantName = "System Admin"
+		}
+
+		userResponses[i] = response
+	}
+
+	return userResponses, nil
 }

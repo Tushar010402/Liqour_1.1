@@ -2,9 +2,9 @@ package versioning
 
 import (
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -23,7 +23,7 @@ type APIVersion struct {
 func ParseVersion(version string) (*APIVersion, error) {
 	// Remove 'v' prefix if present
 	version = strings.TrimPrefix(version, "v")
-	
+
 	// Split pre-release if present
 	parts := strings.Split(version, "-")
 	versionPart := parts[0]
@@ -31,18 +31,18 @@ func ParseVersion(version string) (*APIVersion, error) {
 	if len(parts) > 1 {
 		preRelease = parts[1]
 	}
-	
+
 	// Split major.minor.patch
 	versionNumbers := strings.Split(versionPart, ".")
 	if len(versionNumbers) < 1 {
 		return nil, fmt.Errorf("invalid version format: %s", version)
 	}
-	
+
 	major, err := strconv.Atoi(versionNumbers[0])
 	if err != nil {
 		return nil, fmt.Errorf("invalid major version: %s", versionNumbers[0])
 	}
-	
+
 	minor := 0
 	if len(versionNumbers) > 1 {
 		minor, err = strconv.Atoi(versionNumbers[1])
@@ -50,7 +50,7 @@ func ParseVersion(version string) (*APIVersion, error) {
 			return nil, fmt.Errorf("invalid minor version: %s", versionNumbers[1])
 		}
 	}
-	
+
 	patch := 0
 	if len(versionNumbers) > 2 {
 		patch, err = strconv.Atoi(versionNumbers[2])
@@ -58,7 +58,7 @@ func ParseVersion(version string) (*APIVersion, error) {
 			return nil, fmt.Errorf("invalid patch version: %s", versionNumbers[2])
 		}
 	}
-	
+
 	return &APIVersion{
 		Major:      major,
 		Minor:      minor,
@@ -74,17 +74,17 @@ func (v *APIVersion) IsCompatible(requested *APIVersion) bool {
 	if v.Major != requested.Major {
 		return false
 	}
-	
+
 	// Current minor version must be >= requested minor version
 	if v.Minor < requested.Minor {
 		return false
 	}
-	
+
 	// If minor versions match, current patch must be >= requested patch
 	if v.Minor == requested.Minor && v.Patch < requested.Patch {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -96,30 +96,30 @@ func (v *APIVersion) Compare(other *APIVersion) int {
 		}
 		return -1
 	}
-	
+
 	if v.Minor != other.Minor {
 		if v.Minor > other.Minor {
 			return 1
 		}
 		return -1
 	}
-	
+
 	if v.Patch != other.Patch {
 		if v.Patch > other.Patch {
 			return 1
 		}
 		return -1
 	}
-	
+
 	return 0
 }
 
 // VersionManager manages API versioning
 type VersionManager struct {
-	currentVersion    *APIVersion
-	supportedVersions []*APIVersion
+	currentVersion     *APIVersion
+	supportedVersions  []*APIVersion
 	deprecatedVersions map[string]string // version -> deprecation message
-	logger           *zap.Logger
+	logger             *zap.Logger
 }
 
 // NewVersionManager creates a new version manager
@@ -128,7 +128,7 @@ func NewVersionManager(currentVersion string, supportedVersions []string, logger
 	if err != nil {
 		return nil, fmt.Errorf("invalid current version: %w", err)
 	}
-	
+
 	supported := make([]*APIVersion, len(supportedVersions))
 	for i, v := range supportedVersions {
 		parsed, err := ParseVersion(v)
@@ -137,12 +137,12 @@ func NewVersionManager(currentVersion string, supportedVersions []string, logger
 		}
 		supported[i] = parsed
 	}
-	
+
 	return &VersionManager{
 		currentVersion:     current,
 		supportedVersions:  supported,
 		deprecatedVersions: make(map[string]string),
-		logger:            logger,
+		logger:             logger,
 	}, nil
 }
 
@@ -151,12 +151,12 @@ func (vm *VersionManager) VersioningMiddleware() gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		// Try to get version from different sources
 		version := vm.extractVersion(c)
-		
+
 		if version == "" {
 			// Default to current version if none specified
 			version = vm.currentVersion.String
 		}
-		
+
 		// Parse and validate version
 		requestedVersion, err := ParseVersion(version)
 		if err != nil {
@@ -172,39 +172,39 @@ func (vm *VersionManager) VersioningMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		
+
 		// Check if version is supported
 		if !vm.isVersionSupported(requestedVersion) {
 			c.JSON(400, gin.H{
-				"error":             "Unsupported API version",
-				"message":           fmt.Sprintf("API version %s is not supported", version),
-				"current_version":   vm.currentVersion.String,
+				"error":              "Unsupported API version",
+				"message":            fmt.Sprintf("API version %s is not supported", version),
+				"current_version":    vm.currentVersion.String,
 				"supported_versions": vm.getSupportedVersionStrings(),
 			})
 			c.Abort()
 			return
 		}
-		
+
 		// Check for deprecated versions
 		if deprecationMsg, isDeprecated := vm.deprecatedVersions[requestedVersion.String]; isDeprecated {
 			c.Header("X-API-Deprecation-Warning", deprecationMsg)
 			c.Header("X-API-Current-Version", vm.currentVersion.String)
-			
+
 			vm.logger.Warn("Deprecated API version used",
 				zap.String("version", requestedVersion.String),
 				zap.String("client_ip", c.ClientIP()),
 				zap.String("user_agent", c.Request.UserAgent()),
 			)
 		}
-		
+
 		// Set version in context for handlers to use
 		c.Set("api_version", requestedVersion)
 		c.Set("api_version_string", requestedVersion.String)
-		
+
 		// Add version headers to response
 		c.Header("X-API-Version", requestedVersion.String)
 		c.Header("X-API-Current-Version", vm.currentVersion.String)
-		
+
 		c.Next()
 	})
 }
@@ -217,22 +217,22 @@ func (vm *VersionManager) extractVersion(c *gin.Context) string {
 			return version
 		}
 	}
-	
+
 	// 2. Check custom header
 	if version := c.GetHeader("X-API-Version"); version != "" {
 		return version
 	}
-	
+
 	// 3. Check query parameter
 	if version := c.Query("version"); version != "" {
 		return version
 	}
-	
+
 	// 4. Check URL path (e.g., /v1/api/...)
 	if version := vm.extractVersionFromPath(c.Request.URL.Path); version != "" {
 		return version
 	}
-	
+
 	return ""
 }
 
@@ -264,9 +264,9 @@ func (vm *VersionManager) extractVersionFromPath(path string) string {
 // isVersionSupported checks if a version is supported
 func (vm *VersionManager) isVersionSupported(requested *APIVersion) bool {
 	for _, supported := range vm.supportedVersions {
-		if supported.Major == requested.Major && 
-		   supported.Minor == requested.Minor &&
-		   supported.Patch == requested.Patch {
+		if supported.Major == requested.Major &&
+			supported.Minor == requested.Minor &&
+			supported.Patch == requested.Patch {
 			return true
 		}
 	}
@@ -288,21 +288,21 @@ func (vm *VersionManager) DeprecateVersion(version, message string) error {
 	if err != nil {
 		return fmt.Errorf("invalid version to deprecate: %w", err)
 	}
-	
+
 	vm.deprecatedVersions[version] = message
 	vm.logger.Info("API version deprecated",
 		zap.String("version", version),
 		zap.String("message", message),
 	)
-	
+
 	return nil
 }
 
 // GetVersionInfo returns version information endpoint
 func (vm *VersionManager) GetVersionInfo(c *gin.Context) {
 	info := gin.H{
-		"current_version":    vm.currentVersion,
-		"supported_versions": vm.supportedVersions,
+		"current_version":     vm.currentVersion,
+		"supported_versions":  vm.supportedVersions,
 		"deprecated_versions": vm.deprecatedVersions,
 		"api_info": gin.H{
 			"name":        "LiquorPro API",
@@ -313,7 +313,7 @@ func (vm *VersionManager) GetVersionInfo(c *gin.Context) {
 			},
 		},
 	}
-	
+
 	c.JSON(200, info)
 }
 
@@ -341,7 +341,7 @@ func (vah *VersionAwareHandler) AddVersionHandler(version string, handler gin.Ha
 // Handle handles the request with version-specific logic
 func (vah *VersionAwareHandler) Handle(c *gin.Context) {
 	version := c.GetString("api_version_string")
-	
+
 	// Try to find version-specific handler
 	if handler, exists := vah.handlers[version]; exists {
 		vah.logger.Debug("Using version-specific handler",
@@ -351,7 +351,7 @@ func (vah *VersionAwareHandler) Handle(c *gin.Context) {
 		handler(c)
 		return
 	}
-	
+
 	// Fall back to default handler
 	if vah.fallback != nil {
 		vah.logger.Debug("Using fallback handler",
@@ -361,7 +361,7 @@ func (vah *VersionAwareHandler) Handle(c *gin.Context) {
 		vah.fallback(c)
 		return
 	}
-	
+
 	c.JSON(501, gin.H{
 		"error":   "Handler not implemented",
 		"message": fmt.Sprintf("No handler implemented for version %s", version),
@@ -380,17 +380,17 @@ type VersionedResponse struct {
 func WrapResponse(c *gin.Context, data interface{}) VersionedResponse {
 	version := c.GetString("api_version_string")
 	deprecated := c.GetHeader("X-API-Deprecation-Warning") != ""
-	
+
 	response := VersionedResponse{
 		Data:      data,
 		Version:   version,
-		Timestamp: c.GetTime().Unix(),
+		Timestamp: time.Now().Unix(),
 	}
-	
+
 	if deprecated {
 		response.Deprecated = true
 	}
-	
+
 	return response
 }
 
@@ -399,14 +399,14 @@ func (vm *VersionManager) ContentNegotiation() gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		version := c.GetString("api_version_string")
 		accept := c.GetHeader("Accept")
-		
+
 		// Default content type
 		contentType := "application/json"
-		
+
 		// Version-specific content type logic
 		if version != "" {
 			parsedVersion, _ := ParseVersion(version)
-			
+
 			// Example: v2+ supports additional content types
 			if parsedVersion.Major >= 2 {
 				if strings.Contains(accept, "application/vnd.api+json") {
@@ -414,7 +414,7 @@ func (vm *VersionManager) ContentNegotiation() gin.HandlerFunc {
 				}
 			}
 		}
-		
+
 		c.Header("Content-Type", contentType)
 		c.Next()
 	})
@@ -424,10 +424,10 @@ func (vm *VersionManager) ContentNegotiation() gin.HandlerFunc {
 func (vm *VersionManager) RateLimitByVersion() gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		version := c.GetString("api_version_string")
-		
+
 		if version != "" {
 			parsedVersion, _ := ParseVersion(version)
-			
+
 			// Example: Lower rate limits for older versions
 			var limit int
 			switch parsedVersion.Major {
@@ -438,11 +438,11 @@ func (vm *VersionManager) RateLimitByVersion() gin.HandlerFunc {
 			default:
 				limit = 300
 			}
-			
+
 			c.Header("X-RateLimit-Version", fmt.Sprintf("v%d", parsedVersion.Major))
 			c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
 		}
-		
+
 		c.Next()
 	})
 }

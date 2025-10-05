@@ -46,7 +46,7 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 	validator := validators.New()
 	validator.Required(req.Username, "username")
 	validator.Required(req.Password, "password")
-	
+
 	if validator.HasErrors() {
 		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
 		return
@@ -61,7 +61,126 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// Register handles user registration
+// CheckUser handles user existence check requests
+func (h *AuthHandlers) CheckUser(c *gin.Context) {
+	var req services.CheckUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate request
+	validator := validators.New()
+	validator.Required(req.Mobile, "mobile")
+	validator.Phone(req.Mobile, "mobile")
+
+	if validator.HasErrors() {
+		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
+		return
+	}
+
+	response, err := h.authService.CheckUser(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// SendOTP sends OTP to mobile number
+func (h *AuthHandlers) SendOTP(c *gin.Context) {
+	var req services.SendOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate request
+	validator := validators.New()
+	validator.Required(req.Mobile, "mobile")
+	validator.Phone(req.Mobile, "mobile")
+
+	if validator.HasErrors() {
+		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
+		return
+	}
+
+	response, err := h.authService.SendOTP(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// SendOTPForRegistration sends OTP for registration after validating phone/email uniqueness
+func (h *AuthHandlers) SendOTPForRegistration(c *gin.Context) {
+	var req services.SendOTPForRegistrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate request
+	validator := validators.New()
+	validator.Required(req.Phone, "phone")
+	validator.Phone(req.Phone, "phone")
+	validator.Required(req.Email, "email")
+	validator.Email(req.Email, "email")
+	validator.Required(req.FirstName, "first_name")
+
+	if validator.HasErrors() {
+		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
+		return
+	}
+
+	response, err := h.authService.SendOTPForRegistration(c.Request.Context(), req)
+	if err != nil {
+		// Check for specific error types
+		if err.Error() == "phone number already registered" || err.Error() == "email already registered" {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// VerifyOTP verifies OTP and logs in user
+func (h *AuthHandlers) VerifyOTP(c *gin.Context) {
+	var req services.VerifyOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate request
+	validator := validators.New()
+	validator.Required(req.Mobile, "mobile")
+	validator.Phone(req.Mobile, "mobile")
+	validator.Required(req.OTP, "otp")
+	validator.MinLength(req.OTP, 6, "otp")
+	validator.MaxLength(req.OTP, 6, "otp")
+
+	if validator.HasErrors() {
+		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
+		return
+	}
+
+	response, err := h.authService.VerifyOTP(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// Register handles user registration (after OTP verification)
 func (h *AuthHandlers) Register(c *gin.Context) {
 	var req services.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -71,21 +190,16 @@ func (h *AuthHandlers) Register(c *gin.Context) {
 
 	// Validate request
 	validator := validators.New()
-	validator.Required(req.Username, "username")
-	validator.MinLength(req.Username, 3, "username")
-	validator.MaxLength(req.Username, 50, "username")
 	validator.Required(req.Email, "email")
 	validator.Email(req.Email, "email")
 	validator.Required(req.Password, "password")
 	validator.Password(req.Password, "password")
 	validator.Required(req.FirstName, "first_name")
 	validator.Required(req.LastName, "last_name")
+	validator.Required(req.Phone, "phone")
+	validator.Phone(req.Phone, "phone")
 	validator.Required(req.TenantName, "tenant_name")
 	validator.Required(req.CompanyName, "company_name")
-	
-	if req.Phone != "" {
-		validator.Phone(req.Phone, "phone")
-	}
 
 	if validator.HasErrors() {
 		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
@@ -123,7 +237,7 @@ func (h *AuthHandlers) RefreshToken(c *gin.Context) {
 	var req struct {
 		RefreshToken string `json:"refresh_token" binding:"required"`
 	}
-	
+
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -319,7 +433,7 @@ func (h *AuthHandlers) CreateUser(c *gin.Context) {
 	validator.Required(req.LastName, "last_name")
 	validator.Required(req.Role, "role")
 	validator.ValidRole(req.Role, "role")
-	
+
 	if req.Phone != "" {
 		validator.Phone(req.Phone, "phone")
 	}
@@ -470,9 +584,11 @@ func (h *AuthHandlers) CreateShop(c *gin.Context) {
 	validator := validators.New()
 	validator.Required(req.Name, "name")
 	validator.Required(req.Address, "address")
-	validator.Required(req.Phone, "phone")
-	validator.Phone(req.Phone, "phone")
-	validator.Required(req.LicenseNumber, "license_number")
+
+	// Phone and license number are optional
+	if req.Phone != "" {
+		validator.Phone(req.Phone, "phone")
+	}
 
 	if validator.HasErrors() {
 		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
@@ -685,8 +801,16 @@ func (h *AuthHandlers) UpdateSalesman(c *gin.Context) {
 
 // GetTenants returns all tenants (SaaS Admin only)
 func (h *AuthHandlers) GetTenants(c *gin.Context) {
-	// TODO: Implement tenant listing for SaaS admins
-	c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+	tenants, err := h.tenantService.GetAllTenants(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve tenants"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tenants":     tenants,
+		"total_count": len(tenants),
+	})
 }
 
 // CreateTenant creates a new tenant (SaaS Admin only)
@@ -715,18 +839,38 @@ func (h *AuthHandlers) DeleteTenant(c *gin.Context) {
 
 // GetAllUsers returns users across all tenants (SaaS Admin only)
 func (h *AuthHandlers) GetAllUsers(c *gin.Context) {
-	// TODO: Implement global user listing for SaaS admins
-	c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+	users, err := h.userService.GetAllUsersAcrossTenants(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve users"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"users":       users,
+		"total_count": len(users),
+	})
 }
 
 // GetAllShops returns shops across all tenants (SaaS Admin only)
 func (h *AuthHandlers) GetAllShops(c *gin.Context) {
-	// TODO: Implement global shop listing for SaaS admins
-	c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+	shops, err := h.tenantService.GetAllShops(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve shops"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"shops":       shops,
+		"total_count": len(shops),
+	})
 }
 
 // GetSystemStats returns system statistics (SaaS Admin only)
 func (h *AuthHandlers) GetSystemStats(c *gin.Context) {
-	// TODO: Implement system statistics for SaaS admins
-	c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+	stats, err := h.tenantService.GetSystemStats(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve system statistics"})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
 }

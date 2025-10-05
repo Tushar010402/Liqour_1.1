@@ -16,10 +16,11 @@ type BaseModel struct {
 }
 
 // TenantModel provides tenant isolation for multi-tenant models
+// TenantID can be NULL for Super Users (SaaS admins)
 type TenantModel struct {
 	BaseModel
-	TenantID uuid.UUID `json:"tenant_id" gorm:"type:uuid;not null;index"`
-	Tenant   *Tenant   `json:"tenant,omitempty" gorm:"foreignKey:TenantID"`
+	TenantID *uuid.UUID `json:"tenant_id" gorm:"type:uuid;index"`
+	Tenant   *Tenant    `json:"tenant,omitempty" gorm:"foreignKey:TenantID"`
 }
 
 // TimestampModel provides only timestamp fields without ID

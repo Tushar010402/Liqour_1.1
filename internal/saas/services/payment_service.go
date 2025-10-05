@@ -38,7 +38,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *models.CreatePa
 	// Create Razorpay order
 	amountInPaise := int64(req.Amount * 100) // Convert to paise
 	receipt := fmt.Sprintf("payment_%s_%d", req.SubscriptionID.String()[:8], time.Now().Unix())
-	
+
 	orderID, err := s.paymentClient.CreateOrder(amountInPaise, req.Currency, receipt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create razorpay order: %w", err)
@@ -46,14 +46,14 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *models.CreatePa
 
 	// Create payment record
 	payment := models.Payment{
-		ID:                uuid.New(),
-		SubscriptionID:    req.SubscriptionID,
-		Amount:            req.Amount,
-		Currency:          req.Currency,
-		Status:            "pending",
-		PaymentMethod:     req.PaymentMethod,
-		RazorpayOrderID:   orderID,
-		Description:       req.Description,
+		ID:              uuid.New(),
+		SubscriptionID:  req.SubscriptionID,
+		Amount:          req.Amount,
+		Currency:        req.Currency,
+		Status:          "pending",
+		PaymentMethod:   req.PaymentMethod,
+		RazorpayOrderID: orderID,
+		Description:     req.Description,
 	}
 
 	if req.Currency == "" {
@@ -69,7 +69,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *models.CreatePa
 
 func (s *PaymentService) GetPayment(ctx context.Context, id uuid.UUID) (*models.Payment, error) {
 	var payment models.Payment
-	
+
 	err := s.db.Preload("Subscription").Preload("Invoice").First(&payment, id).Error
 	if err != nil {
 		return nil, fmt.Errorf("payment not found: %w", err)
@@ -104,7 +104,7 @@ func (s *PaymentService) GetPaymentsBySubscription(ctx context.Context, subscrip
 
 func (s *PaymentService) UpdatePaymentStatus(ctx context.Context, paymentID uuid.UUID, status string, razorpayPaymentID string) error {
 	var payment models.Payment
-	
+
 	if err := s.db.First(&payment, paymentID).Error; err != nil {
 		return fmt.Errorf("payment not found: %w", err)
 	}
@@ -133,7 +133,7 @@ func (s *PaymentService) UpdatePaymentStatus(ctx context.Context, paymentID uuid
 
 func (s *PaymentService) RefundPayment(ctx context.Context, paymentID uuid.UUID, amount float64, reason string) (*models.Payment, error) {
 	var payment models.Payment
-	
+
 	if err := s.db.First(&payment, paymentID).Error; err != nil {
 		return nil, fmt.Errorf("payment not found: %w", err)
 	}
@@ -348,7 +348,7 @@ func (s *PaymentService) handleSuccessfulPayment(payment *models.Payment) error 
 
 func (s *PaymentService) createInvoice(subscription *models.Subscription, payment *models.Payment) (*models.Invoice, error) {
 	invoiceNumber := fmt.Sprintf("INV-%s-%d", subscription.ID.String()[:8], time.Now().Unix())
-	
+
 	invoice := models.Invoice{
 		ID:             uuid.New(),
 		SubscriptionID: subscription.ID,
@@ -403,7 +403,7 @@ func (s *PaymentService) GetInvoices(ctx context.Context, subscriptionID uuid.UU
 
 func (s *PaymentService) GetInvoice(ctx context.Context, id uuid.UUID) (*models.Invoice, error) {
 	var invoice models.Invoice
-	
+
 	err := s.db.Preload("Subscription").Preload("Payments").First(&invoice, id).Error
 	if err != nil {
 		return nil, fmt.Errorf("invoice not found: %w", err)

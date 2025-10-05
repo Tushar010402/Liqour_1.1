@@ -54,7 +54,7 @@ func (s *SubscriptionService) CreateSubscription(ctx context.Context, req *model
 	// Calculate subscription details
 	now := time.Now()
 	trialEnd := now.AddDate(0, 0, plan.TrialDays)
-	
+
 	var periodEnd time.Time
 	if req.BillingCycle == "yearly" {
 		periodEnd = trialEnd.AddDate(1, 0, 0)
@@ -97,11 +97,11 @@ func (s *SubscriptionService) CreateSubscription(ctx context.Context, req *model
 			tx.Rollback()
 			return nil, fmt.Errorf("failed to create razorpay subscription: %w", err)
 		}
-		
+
 		subscription.RazorpayCustomerID = razorpayCustomerID
 		subscription.RazorpaySubscriptionID = razorpaySubID
 		subscription.Status = "active"
-		
+
 		if err := tx.Save(&subscription).Error; err != nil {
 			tx.Rollback()
 			return nil, fmt.Errorf("failed to update subscription with razorpay details: %w", err)
@@ -138,11 +138,11 @@ func (s *SubscriptionService) CreateSubscription(ctx context.Context, req *model
 
 func (s *SubscriptionService) GetSubscription(ctx context.Context, tenantID uuid.UUID) (*models.SubscriptionResponse, error) {
 	var subscription models.Subscription
-	
+
 	err := s.db.Preload("Plan").
 		Where("tenant_id = ? AND status IN ?", tenantID, []string{"active", "trial", "suspended"}).
 		First(&subscription).Error
-	
+
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil, fmt.Errorf("no active subscription found for tenant")
@@ -155,7 +155,7 @@ func (s *SubscriptionService) GetSubscription(ctx context.Context, tenantID uuid
 
 func (s *SubscriptionService) UpdateSubscription(ctx context.Context, subID uuid.UUID, req *models.UpdateSubscriptionRequest) (*models.SubscriptionResponse, error) {
 	var subscription models.Subscription
-	
+
 	if err := s.db.First(&subscription, subID).Error; err != nil {
 		return nil, fmt.Errorf("subscription not found: %w", err)
 	}
@@ -164,7 +164,7 @@ func (s *SubscriptionService) UpdateSubscription(ctx context.Context, subID uuid
 	if req.AutoRenew != nil {
 		subscription.AutoRenew = *req.AutoRenew
 	}
-	
+
 	if req.Status != "" {
 		subscription.Status = req.Status
 		if req.Status == "cancelled" {
@@ -188,7 +188,7 @@ func (s *SubscriptionService) UpdateSubscription(ctx context.Context, subID uuid
 
 func (s *SubscriptionService) CancelSubscription(ctx context.Context, subID uuid.UUID) error {
 	var subscription models.Subscription
-	
+
 	if err := s.db.First(&subscription, subID).Error; err != nil {
 		return fmt.Errorf("subscription not found: %w", err)
 	}
@@ -245,7 +245,7 @@ func (s *SubscriptionService) UpgradeSubscription(ctx context.Context, subID uui
 	// Update subscription
 	subscription.PlanID = newPlanID
 	subscription.Amount = newPlan.Price
-	
+
 	// Apply yearly discount if applicable
 	if subscription.BillingCycle == "yearly" {
 		discountAmount := subscription.Amount * (newPlan.YearlyDiscount / 100)
@@ -271,11 +271,11 @@ func (s *SubscriptionService) UpgradeSubscription(ctx context.Context, subID uui
 
 func (s *SubscriptionService) GetUsage(ctx context.Context, subID uuid.UUID) (*models.UsageRecord, error) {
 	var usage models.UsageRecord
-	
+
 	err := s.db.Where("subscription_id = ?", subID).
 		Order("record_date DESC").
 		First(&usage).Error
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get usage: %w", err)
 	}
@@ -319,10 +319,10 @@ func (s *SubscriptionService) RecordUsage(ctx context.Context, tenantID uuid.UUI
 
 	// Create or update today's usage record
 	today := time.Now().Truncate(24 * time.Hour)
-	
+
 	var usage models.UsageRecord
 	err = s.db.Where("subscription_id = ? AND record_date = ?", subscription.ID, today).First(&usage).Error
-	
+
 	if err == gorm.ErrRecordNotFound {
 		// Create new usage record
 		usage = models.UsageRecord{

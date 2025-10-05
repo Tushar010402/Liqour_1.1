@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -266,6 +267,54 @@ func (r *RazorpayClient) VerifyWebhookSignature(payload []byte, signature string
 	// Implement webhook signature verification
 	// This is a simplified version - in production, implement proper HMAC verification
 	return len(signature) > 0
+}
+
+// ChargeCustomer charges a customer for a subscription
+func (r *RazorpayClient) ChargeCustomer(ctx context.Context, customerID string, amount float64, description string) (string, error) {
+	// Create order for the charge
+	orderData := map[string]interface{}{
+		"amount":   int64(amount * 100), // Convert to paise
+		"currency": "INR",
+		"receipt":  fmt.Sprintf("charge_%s_%d", customerID, time.Now().Unix()),
+		"notes": map[string]string{
+			"customer_id": customerID,
+			"description": description,
+		},
+	}
+
+	jsonData, err := json.Marshal(orderData)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal order data: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", r.baseURL+"/orders", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Basic "+r.basicAuth())
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("razorpay order creation failed with status: %d", resp.StatusCode)
+	}
+
+	var order map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&order); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if orderID, ok := order["id"].(string); ok {
+		return orderID, nil
+	}
+
+	return "", fmt.Errorf("invalid order response from razorpay")
 }
 
 func (r *RazorpayClient) basicAuth() string {

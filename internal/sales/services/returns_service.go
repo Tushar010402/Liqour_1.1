@@ -30,39 +30,39 @@ func NewReturnsService(db *database.DB, cache *cache.Cache) *ReturnsService {
 
 // SaleReturnRequest represents sale return creation request
 type SaleReturnRequest struct {
-	SaleID       uuid.UUID               `json:"sale_id" binding:"required"`
-	ReturnDate   time.Time               `json:"return_date" binding:"required"`
-	Reason       string                  `json:"reason" binding:"required"`
-	Notes        string                  `json:"notes"`
-	Items        []SaleReturnItemRequest `json:"items" binding:"required,min=1"`
+	SaleID     uuid.UUID               `json:"sale_id" binding:"required"`
+	ReturnDate time.Time               `json:"return_date" binding:"required"`
+	Reason     string                  `json:"reason" binding:"required"`
+	Notes      string                  `json:"notes"`
+	Items      []SaleReturnItemRequest `json:"items" binding:"required,min=1"`
 }
 
 // SaleReturnItemRequest represents return item request
 type SaleReturnItemRequest struct {
-	SaleItemID  uuid.UUID `json:"sale_item_id" binding:"required"`
-	Quantity    int       `json:"quantity" binding:"required,gt=0"`
-	UnitPrice   float64   `json:"unit_price" binding:"required,gt=0"`
-	Reason      string    `json:"reason"`
+	SaleItemID uuid.UUID `json:"sale_item_id" binding:"required"`
+	Quantity   int       `json:"quantity" binding:"required,gt=0"`
+	UnitPrice  float64   `json:"unit_price" binding:"required,gt=0"`
+	Reason     string    `json:"reason"`
 }
 
 // SaleReturnResponse represents sale return in responses
 type SaleReturnResponse struct {
-	ID            uuid.UUID                `json:"id"`
-	ReturnNumber  string                   `json:"return_number"`
-	SaleID        uuid.UUID                `json:"sale_id"`
-	SaleNumber    string                   `json:"sale_number"`
-	ReturnDate    time.Time                `json:"return_date"`
-	ReturnAmount  float64                  `json:"return_amount"`
-	Reason        string                   `json:"reason"`
-	Status        string                   `json:"status"`
-	ApprovedAt    *time.Time               `json:"approved_at"`
-	ApprovedByName string                  `json:"approved_by_name"`
-	CreatedByName string                   `json:"created_by_name"`
-	Notes         string                   `json:"notes"`
-	CreatedAt     time.Time                `json:"created_at"`
-	UpdatedAt     time.Time                `json:"updated_at"`
-	Items         []SaleReturnItemResponse `json:"items"`
-	TotalItems    int                      `json:"total_items"`
+	ID             uuid.UUID                `json:"id"`
+	ReturnNumber   string                   `json:"return_number"`
+	SaleID         uuid.UUID                `json:"sale_id"`
+	SaleNumber     string                   `json:"sale_number"`
+	ReturnDate     time.Time                `json:"return_date"`
+	ReturnAmount   float64                  `json:"return_amount"`
+	Reason         string                   `json:"reason"`
+	Status         string                   `json:"status"`
+	ApprovedAt     *time.Time               `json:"approved_at"`
+	ApprovedByName string                   `json:"approved_by_name"`
+	CreatedByName  string                   `json:"created_by_name"`
+	Notes          string                   `json:"notes"`
+	CreatedAt      time.Time                `json:"created_at"`
+	UpdatedAt      time.Time                `json:"updated_at"`
+	Items          []SaleReturnItemResponse `json:"items"`
+	TotalItems     int                      `json:"total_items"`
 }
 
 // SaleReturnItemResponse represents return item in responses
@@ -87,7 +87,7 @@ func (s *ReturnsService) CreateSaleReturn(ctx context.Context, req SaleReturnReq
 	err := s.db.Where("id = ? AND tenant_id = ?", req.SaleID, tenantID).
 		Preload("Items").
 		First(&sale).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("sale not found")
@@ -117,7 +117,7 @@ func (s *ReturnsService) CreateSaleReturn(ctx context.Context, req SaleReturnReq
 		// Check if return quantity doesn't exceed sold quantity
 		// TODO: Check previously returned quantities
 		if returnItem.Quantity > saleItem.Quantity {
-			return nil, fmt.Errorf("return quantity (%d) exceeds sold quantity (%d) for product", 
+			return nil, fmt.Errorf("return quantity (%d) exceeds sold quantity (%d) for product",
 				returnItem.Quantity, saleItem.Quantity)
 		}
 
@@ -129,7 +129,7 @@ func (s *ReturnsService) CreateSaleReturn(ctx context.Context, req SaleReturnReq
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		// Create sale return
 		saleReturn = &models.SaleReturn{
-			TenantModel:  models.TenantModel{TenantID: tenantID},
+			TenantModel:  models.TenantModel{TenantID: &tenantID},
 			ReturnNumber: utils.GenerateReturnNumber(),
 			SaleID:       req.SaleID,
 			ReturnDate:   req.ReturnDate,
@@ -149,7 +149,7 @@ func (s *ReturnsService) CreateSaleReturn(ctx context.Context, req SaleReturnReq
 			totalAmount := float64(itemReq.Quantity) * itemReq.UnitPrice
 
 			returnItem := models.SaleReturnItem{
-				TenantModel:  models.TenantModel{TenantID: tenantID},
+				TenantModel:  models.TenantModel{TenantID: &tenantID},
 				SaleReturnID: saleReturn.ID,
 				SaleItemID:   itemReq.SaleItemID,
 				Quantity:     itemReq.Quantity,
@@ -243,7 +243,7 @@ func (s *ReturnsService) GetSaleReturns(ctx context.Context, tenantID uuid.UUID,
 // GetSaleReturnByID returns sale return by ID
 func (s *ReturnsService) GetSaleReturnByID(ctx context.Context, returnID, tenantID uuid.UUID) (*SaleReturnResponse, error) {
 	var saleReturn models.SaleReturn
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", returnID, tenantID).
 		Preload("Sale.Shop").
 		Preload("Sale.Salesman").
@@ -252,7 +252,7 @@ func (s *ReturnsService) GetSaleReturnByID(ctx context.Context, returnID, tenant
 		Preload("Items.SaleItem.Product.Brand").
 		Preload("Items.SaleItem.Product.Category").
 		First(&saleReturn).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("sale return not found")
@@ -266,11 +266,11 @@ func (s *ReturnsService) GetSaleReturnByID(ctx context.Context, returnID, tenant
 // ApproveSaleReturn approves a sale return
 func (s *ReturnsService) ApproveSaleReturn(ctx context.Context, returnID, tenantID, approvedByID uuid.UUID) (*SaleReturnResponse, error) {
 	var saleReturn models.SaleReturn
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", returnID, tenantID).
 		Preload("Sale").
 		First(&saleReturn).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("sale return not found")
@@ -318,11 +318,11 @@ func (s *ReturnsService) ApproveSaleReturn(ctx context.Context, returnID, tenant
 // RejectSaleReturn rejects a sale return
 func (s *ReturnsService) RejectSaleReturn(ctx context.Context, returnID, tenantID, rejectedByID uuid.UUID, reason string) error {
 	var saleReturn models.SaleReturn
-	
+
 	err := s.db.Where("id = ? AND tenant_id = ?", returnID, tenantID).
 		Preload("Sale").
 		First(&saleReturn).Error
-	
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errors.New("sale return not found")
@@ -454,11 +454,11 @@ func (s *ReturnsService) mapSaleReturnToResponse(saleReturn *models.SaleReturn) 
 				response.Items[i].ProductID = item.SaleItem.Product.ID
 				response.Items[i].ProductName = item.SaleItem.Product.Name
 				response.Items[i].Size = item.SaleItem.Product.Size
-				
+
 				if item.SaleItem.Product.Brand != nil {
 					response.Items[i].BrandName = item.SaleItem.Product.Brand.Name
 				}
-				
+
 				if item.SaleItem.Product.Category != nil {
 					response.Items[i].CategoryName = item.SaleItem.Product.Category.Name
 				}
@@ -476,7 +476,7 @@ func (s *ReturnsService) clearReturnsCache(ctx context.Context, tenantID, shopID
 		fmt.Sprintf("pending_returns:%s", shopID.String()),
 		fmt.Sprintf("returns_summary:%s:%s", shopID.String(), time.Now().Format("2006-01-02")),
 	}
-	
+
 	for _, key := range cacheKeys {
 		s.cache.Delete(ctx, key)
 	}

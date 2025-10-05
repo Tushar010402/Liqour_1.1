@@ -58,7 +58,7 @@ func NewDatabase(config Config) (*DB, error) {
 // Migrate runs database migrations
 func (db *DB) Migrate() error {
 	log.Println("Running database migrations...")
-	
+
 	if err := models.MigrateDB(db.DB); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}

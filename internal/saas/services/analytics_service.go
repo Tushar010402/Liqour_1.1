@@ -26,14 +26,15 @@ func NewAnalyticsService(db *gorm.DB, cfg *config.Config) *AnalyticsService {
 
 func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.DashboardMetrics, error) {
 	metrics := &models.DashboardMetrics{
-		PlanDistribution: make(map[string]int),
-		RevenueByPlan:    make(map[string]float64),
-		MonthlyGrowth:    make(map[string]float64),
+		PlanDistribution:    make(map[string]int),
+		SubscriptionMetrics: make([]models.SubscriptionMetric, 0),
+		RevenueByPlan:       make(map[string]float64),
+		MonthlyGrowth:       make(map[string]float64),
 	}
 
 	// Total subscriptions
 	var totalSubs int64
-	if err := s.db.Model(&models.Subscription{}).Count(&totalSubs); err != nil {
+	if err := s.db.Model(&models.Subscription{}).Count(&totalSubs).Error; err != nil {
 		return nil, fmt.Errorf("failed to get total subscriptions: %w", err)
 	}
 	metrics.TotalSubscriptions = int(totalSubs)
@@ -42,7 +43,7 @@ func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.Das
 	var activeSubs int64
 	if err := s.db.Model(&models.Subscription{}).
 		Where("status = 'active'").
-		Count(&activeSubs); err != nil {
+		Count(&activeSubs).Error; err != nil {
 		return nil, fmt.Errorf("failed to get active subscriptions: %w", err)
 	}
 	metrics.ActiveSubscriptions = int(activeSubs)
@@ -51,7 +52,7 @@ func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.Das
 	var trialSubs int64
 	if err := s.db.Model(&models.Subscription{}).
 		Where("status = 'trial'").
-		Count(&trialSubs); err != nil {
+		Count(&trialSubs).Error; err != nil {
 		return nil, fmt.Errorf("failed to get trial subscriptions: %w", err)
 	}
 	metrics.TrialSubscriptions = int(trialSubs)
@@ -67,7 +68,7 @@ func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.Das
 	metrics.TotalRevenue = totalRevenue
 
 	// Monthly revenue (current month)
-	currentMonth := time.Now().Truncate(24 * time.Hour).AddDate(0, 0, -time.Now().Day()+1)
+	currentMonth := time.Now().Truncate(24*time.Hour).AddDate(0, 0, -time.Now().Day()+1)
 	var monthlyRevenue float64
 	if err := s.db.Model(&models.Payment{}).
 		Where("status = 'succeeded' AND created_at >= ?", currentMonth).
@@ -81,7 +82,7 @@ func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.Das
 	var totalTenants int64
 	if err := s.db.Model(&models.Subscription{}).
 		Distinct("tenant_id").
-		Count(&totalTenants); err != nil {
+		Count(&totalTenants).Error; err != nil {
 		return nil, fmt.Errorf("failed to get total tenants: %w", err)
 	}
 	metrics.TotalTenants = int(totalTenants)
@@ -91,7 +92,7 @@ func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.Das
 	if err := s.db.Model(&models.Subscription{}).
 		Where("created_at >= ?", currentMonth).
 		Distinct("tenant_id").
-		Count(&newTenants); err != nil {
+		Count(&newTenants).Error; err != nil {
 		return nil, fmt.Errorf("failed to get new tenants: %w", err)
 	}
 	metrics.NewTenants = int(newTenants)
@@ -109,6 +110,23 @@ func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.Das
 		return nil, fmt.Errorf("failed to get plan distribution: %w", err)
 	}
 	metrics.PlanDistribution = planDist
+
+	// Convert plan distribution to subscription metrics format for Flutter compatibility
+	totalActiveForPercentage := metrics.ActiveSubscriptions
+	if totalActiveForPercentage == 0 {
+		totalActiveForPercentage = 1 // Avoid division by zero
+	}
+
+	subscriptionMetrics := make([]models.SubscriptionMetric, 0, len(planDist))
+	for planName, count := range planDist {
+		percentage := (float64(count) / float64(totalActiveForPercentage)) * 100
+		subscriptionMetrics = append(subscriptionMetrics, models.SubscriptionMetric{
+			PlanName:   planName,
+			Count:      count,
+			Percentage: percentage,
+		})
+	}
+	metrics.SubscriptionMetrics = subscriptionMetrics
 
 	// Revenue by plan
 	revenueByPlan, err := s.getRevenueByPlan()
@@ -129,13 +147,13 @@ func (s *AnalyticsService) GetDashboardMetrics(ctx context.Context) (*models.Das
 
 func (s *AnalyticsService) GetRevenueAnalytics(ctx context.Context, period string, startDate, endDate time.Time) (*RevenueAnalytics, error) {
 	analytics := &RevenueAnalytics{
-		Period:           period,
-		StartDate:        startDate,
-		EndDate:          endDate,
-		DailyRevenue:     make([]DailyRevenue, 0),
-		PaymentMethods:   make(map[string]float64),
-		TopPlans:         make([]PlanRevenue, 0),
-		RevenueByStatus:  make(map[string]float64),
+		Period:          period,
+		StartDate:       startDate,
+		EndDate:         endDate,
+		DailyRevenue:    make([]DailyRevenue, 0),
+		PaymentMethods:  make(map[string]float64),
+		TopPlans:        make([]PlanRevenue, 0),
+		RevenueByStatus: make(map[string]float64),
 	}
 
 	// Total revenue in period
@@ -189,7 +207,7 @@ func (s *AnalyticsService) GetSubscriptionMetrics(ctx context.Context, period st
 	}
 
 	// Total subscriptions
-	if err := s.db.Model(&models.Subscription{}).Count(&metrics.TotalSubscriptions); err != nil {
+	if err := s.db.Model(&models.Subscription{}).Count(&metrics.TotalSubscriptions).Error; err != nil {
 		return nil, fmt.Errorf("failed to get total subscriptions: %w", err)
 	}
 
@@ -239,18 +257,19 @@ func (s *AnalyticsService) GetTenantMetrics(ctx context.Context) (*TenantMetrics
 		UsageByPlan: make(map[string]TenantUsage),
 	}
 
-	// Total tenants
-	if err := s.db.Model(&models.Subscription{}).
-		Distinct("tenant_id").
-		Count(&metrics.TotalTenants); err != nil {
+	// Total tenants - use the tenants table directly
+	if err := s.db.Table("tenants").
+		Where("deleted_at IS NULL").
+		Count(&metrics.TotalTenants).Error; err != nil {
 		return nil, fmt.Errorf("failed to get total tenants: %w", err)
 	}
 
-	// Active tenants
-	if err := s.db.Model(&models.Subscription{}).
-		Where("status IN ?", []string{"active", "trial"}).
-		Distinct("tenant_id").
-		Count(&metrics.ActiveTenants); err != nil {
+	// Active tenants - all tenants that are active (has no subscription or has active/trial subscription)
+	if err := s.db.Table("tenants").
+		Joins("LEFT JOIN (SELECT DISTINCT ON (tenant_id) tenant_id, status FROM subscriptions WHERE deleted_at IS NULL ORDER BY tenant_id, created_at DESC) latest_sub ON tenants.id = latest_sub.tenant_id").
+		Where("tenants.deleted_at IS NULL AND (latest_sub.status IN ? OR latest_sub.tenant_id IS NULL)", []string{"active", "trial"}).
+		Distinct("tenants.id").
+		Count(&metrics.ActiveTenants).Error; err != nil {
 		return nil, fmt.Errorf("failed to get active tenants: %w", err)
 	}
 
@@ -360,13 +379,13 @@ func (s *AnalyticsService) getRevenueByPlan() (map[string]float64, error) {
 func (s *AnalyticsService) getMonthlyGrowth() (map[string]float64, error) {
 	// Simplified monthly growth calculation
 	growth := make(map[string]float64)
-	
+
 	// Calculate subscription growth
-	currentMonth := time.Now().Truncate(24 * time.Hour).AddDate(0, 0, -time.Now().Day()+1)
+	currentMonth := time.Now().Truncate(24*time.Hour).AddDate(0, 0, -time.Now().Day()+1)
 	lastMonth := currentMonth.AddDate(0, -1, 0)
 
 	var currentMonthSubs, lastMonthSubs int64
-	
+
 	if err := s.db.Model(&models.Subscription{}).
 		Where("created_at >= ?", currentMonth).
 		Count(&currentMonthSubs).Error; err != nil {
@@ -385,7 +404,7 @@ func (s *AnalyticsService) getMonthlyGrowth() (map[string]float64, error) {
 
 	// Calculate revenue growth
 	var currentMonthRevenue, lastMonthRevenue float64
-	
+
 	if err := s.db.Model(&models.Payment{}).
 		Where("status = 'succeeded' AND created_at >= ?", currentMonth).
 		Select("COALESCE(SUM(amount), 0)").
@@ -547,14 +566,14 @@ func (s *AnalyticsService) getPlanPopularity() ([]PlanPopularity, error) {
 
 func (s *AnalyticsService) getConversionRates() (map[string]float64, error) {
 	rates := make(map[string]float64)
-	
+
 	// Trial to active conversion
 	var trialCount, activeFromTrialCount int64
-	
+
 	if err := s.db.Model(&models.Subscription{}).Where("status = 'trial'").Count(&trialCount).Error; err != nil {
 		return nil, err
 	}
-	
+
 	// Simplified: count active subscriptions that had a trial period
 	if err := s.db.Model(&models.Subscription{}).
 		Where("status = 'active' AND trial_start IS NOT NULL").
@@ -629,14 +648,14 @@ func (s *AnalyticsService) getTopTenantsByUsage(limit int) ([]TopTenant, error) 
 // Analytics structs
 
 type RevenueAnalytics struct {
-	Period          string                 `json:"period"`
-	StartDate       time.Time              `json:"start_date"`
-	EndDate         time.Time              `json:"end_date"`
-	TotalRevenue    float64                `json:"total_revenue"`
-	DailyRevenue    []DailyRevenue         `json:"daily_revenue"`
-	PaymentMethods  map[string]float64     `json:"payment_methods"`
-	TopPlans        []PlanRevenue          `json:"top_plans"`
-	RevenueByStatus map[string]float64     `json:"revenue_by_status"`
+	Period          string             `json:"period"`
+	StartDate       time.Time          `json:"start_date"`
+	EndDate         time.Time          `json:"end_date"`
+	TotalRevenue    float64            `json:"total_revenue"`
+	DailyRevenue    []DailyRevenue     `json:"daily_revenue"`
+	PaymentMethods  map[string]float64 `json:"payment_methods"`
+	TopPlans        []PlanRevenue      `json:"top_plans"`
+	RevenueByStatus map[string]float64 `json:"revenue_by_status"`
 }
 
 type DailyRevenue struct {
@@ -652,29 +671,29 @@ type PlanRevenue struct {
 }
 
 type SubscriptionMetrics struct {
-	Period                    string                  `json:"period"`
-	TotalSubscriptions        int64                   `json:"total_subscriptions"`
-	StatusDistribution        map[string]int          `json:"status_distribution"`
-	BillingCycleBreakdown     map[string]int          `json:"billing_cycle_breakdown"`
-	PlanPopularity            []PlanPopularity        `json:"plan_popularity"`
-	ConversionRates           map[string]float64      `json:"conversion_rates"`
-	AverageSubscriptionValue  float64                 `json:"average_subscription_value"`
+	Period                   string             `json:"period"`
+	TotalSubscriptions       int64              `json:"total_subscriptions"`
+	StatusDistribution       map[string]int     `json:"status_distribution"`
+	BillingCycleBreakdown    map[string]int     `json:"billing_cycle_breakdown"`
+	PlanPopularity           []PlanPopularity   `json:"plan_popularity"`
+	ConversionRates          map[string]float64 `json:"conversion_rates"`
+	AverageSubscriptionValue float64            `json:"average_subscription_value"`
 }
 
 type PlanPopularity struct {
-	PlanName        string  `json:"plan_name"`
-	Subscriptions   int     `json:"subscriptions"`
-	AverageRevenue  float64 `json:"average_revenue"`
+	PlanName       string  `json:"plan_name"`
+	Subscriptions  int     `json:"subscriptions"`
+	AverageRevenue float64 `json:"average_revenue"`
 }
 
 type TenantMetrics struct {
-	TotalTenants     int64                   `json:"total_tenants"`
-	ActiveTenants    int64                   `json:"active_tenants"`
-	AverageLocations float64                 `json:"average_locations"`
-	AverageUsers     float64                 `json:"average_users"`
-	AverageProducts  float64                 `json:"average_products"`
-	UsageByPlan      map[string]TenantUsage  `json:"usage_by_plan"`
-	TopTenants       []TopTenant             `json:"top_tenants"`
+	TotalTenants     int64                  `json:"total_tenants"`
+	ActiveTenants    int64                  `json:"active_tenants"`
+	AverageLocations float64                `json:"average_locations"`
+	AverageUsers     float64                `json:"average_users"`
+	AverageProducts  float64                `json:"average_products"`
+	UsageByPlan      map[string]TenantUsage `json:"usage_by_plan"`
+	TopTenants       []TopTenant            `json:"top_tenants"`
 }
 
 type TenantUsage struct {

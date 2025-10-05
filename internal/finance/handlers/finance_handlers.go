@@ -269,37 +269,37 @@ func (h *FinanceHandlers) GetExpenses(c *gin.Context) {
 
 	// Parse filters
 	filters := services.ExpenseFilters{}
-	
+
 	if categoryIDStr := c.Query("category_id"); categoryIDStr != "" {
 		if categoryID, err := uuid.Parse(categoryIDStr); err == nil {
 			filters.CategoryID = &categoryID
 		}
 	}
-	
+
 	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
 		if shopID, err := uuid.Parse(shopIDStr); err == nil {
 			filters.ShopID = &shopID
 		}
 	}
-	
+
 	if vendorIDStr := c.Query("vendor_id"); vendorIDStr != "" {
 		if vendorID, err := uuid.Parse(vendorIDStr); err == nil {
 			filters.VendorID = &vendorID
 		}
 	}
-	
+
 	if startDateStr := c.Query("start_date"); startDateStr != "" {
 		if startDate, err := time.Parse("2006-01-02", startDateStr); err == nil {
 			filters.StartDate = startDate
 		}
 	}
-	
+
 	if endDateStr := c.Query("end_date"); endDateStr != "" {
 		if endDate, err := time.Parse("2006-01-02", endDateStr); err == nil {
 			filters.EndDate = endDate
 		}
 	}
-	
+
 	filters.PaymentMethod = c.Query("payment_method")
 
 	limit, offset := h.getPagination(c)
@@ -643,12 +643,21 @@ func (h *FinanceHandlers) CreateAssistantManagerFinance(c *gin.Context) {
 
 // Helper functions
 func (h *FinanceHandlers) extractTenantID(c *gin.Context) (uuid.UUID, error) {
-	tenantID, exists := c.Get("tenant_id")
-	if !exists {
-		return uuid.Nil, fmt.Errorf("tenant ID not found")
+	tenantIDStr := c.GetString("tenant_id")
+	userRole := c.GetString("role")
+
+	// For saas_admin users, tenant_id can be empty (they have system-wide access)
+	if userRole == "saas_admin" {
+		// Return uuid.Nil to indicate no tenant restriction
+		return uuid.Nil, nil
 	}
 
-	tenantUUID, err := uuid.Parse(tenantID.(string))
+	// For all other users, tenant_id is required
+	if tenantIDStr == "" {
+		return uuid.Nil, fmt.Errorf("tenant ID required")
+	}
+
+	tenantUUID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("invalid tenant ID")
 	}
@@ -671,14 +680,34 @@ func (h *FinanceHandlers) extractUserID(c *gin.Context) (uuid.UUID, error) {
 }
 
 func (h *FinanceHandlers) extractTenantAndUser(c *gin.Context) (uuid.UUID, uuid.UUID, error) {
-	tenantID, err := h.extractTenantID(c)
-	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+	tenantIDStr := c.GetString("tenant_id")
+	userIDStr := c.GetString("user_id")
+	userRole := c.GetString("role")
+
+	// User ID is always required
+	if userIDStr == "" {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("user ID not found in context")
 	}
 
-	userID, err := h.extractUserID(c)
+	userID, err := uuid.Parse(userIDStr)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid user ID")
+	}
+
+	// For saas_admin users, tenant_id can be empty (they have system-wide access)
+	if userRole == "saas_admin" {
+		// Return uuid.Nil for tenant_id to indicate no tenant restriction
+		return uuid.Nil, userID, nil
+	}
+
+	// For all other users, tenant_id is required
+	if tenantIDStr == "" {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("tenant ID not found in context")
+	}
+
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid tenant ID")
 	}
 
 	return tenantID, userID, nil
@@ -699,4 +728,160 @@ func (h *FinanceHandlers) getPagination(c *gin.Context) (int, int) {
 	}
 
 	return limit, offset
+}
+
+// Financial Reports handlers
+func (h *FinanceHandlers) GetVendorAgingReport(c *gin.Context) {
+	tenantID, err := h.extractTenantID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Parse query parameters
+	asOfDate := time.Now()
+	if asOfDateStr := c.Query("as_of_date"); asOfDateStr != "" {
+		if parsed, err := time.Parse("2006-01-02", asOfDateStr); err == nil {
+			asOfDate = parsed
+		}
+	}
+
+	agingReport, err := h.vendorService.GetVendorAgingReport(c.Request.Context(), tenantID, asOfDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"report":       agingReport,
+		"as_of_date":   asOfDate.Format("2006-01-02"),
+		"generated_at": time.Now(),
+	})
+}
+
+func (h *FinanceHandlers) GetCashFlowReport(c *gin.Context) {
+	tenantID, err := h.extractTenantID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Parse date range
+	startDate := time.Now().AddDate(0, -1, 0) // Default: last month
+	endDate := time.Now()
+
+	if startDateStr := c.Query("start_date"); startDateStr != "" {
+		if parsed, err := time.Parse("2006-01-02", startDateStr); err == nil {
+			startDate = parsed
+		}
+	}
+	if endDateStr := c.Query("end_date"); endDateStr != "" {
+		if parsed, err := time.Parse("2006-01-02", endDateStr); err == nil {
+			endDate = parsed
+		}
+	}
+
+	groupBy := c.DefaultQuery("group_by", "monthly") // daily, weekly, monthly
+
+	cashFlowReport, err := h.expenseService.GetCashFlowReport(c.Request.Context(), tenantID, startDate, endDate, groupBy)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"report":       cashFlowReport,
+		"start_date":   startDate.Format("2006-01-02"),
+		"end_date":     endDate.Format("2006-01-02"),
+		"group_by":     groupBy,
+		"generated_at": time.Now(),
+	})
+}
+
+func (h *FinanceHandlers) GetProfitLossReport(c *gin.Context) {
+	tenantID, err := h.extractTenantID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Parse date range
+	startDate := time.Now().AddDate(0, -1, 0) // Default: last month
+	endDate := time.Now()
+
+	if startDateStr := c.Query("start_date"); startDateStr != "" {
+		if parsed, err := time.Parse("2006-01-02", startDateStr); err == nil {
+			startDate = parsed
+		}
+	}
+	if endDateStr := c.Query("end_date"); endDateStr != "" {
+		if parsed, err := time.Parse("2006-01-02", endDateStr); err == nil {
+			endDate = parsed
+		}
+	}
+
+	profitLossReport, err := h.expenseService.GetProfitLossReport(c.Request.Context(), tenantID, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"report":       profitLossReport,
+		"start_date":   startDate.Format("2006-01-02"),
+		"end_date":     endDate.Format("2006-01-02"),
+		"generated_at": time.Now(),
+	})
+}
+
+func (h *FinanceHandlers) GetBalanceSheetReport(c *gin.Context) {
+	tenantID, err := h.extractTenantID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Parse as-of date
+	asOfDate := time.Now()
+	if asOfDateStr := c.Query("as_of_date"); asOfDateStr != "" {
+		if parsed, err := time.Parse("2006-01-02", asOfDateStr); err == nil {
+			asOfDate = parsed
+		}
+	}
+
+	balanceSheetReport, err := h.vendorService.GetBalanceSheetReport(c.Request.Context(), tenantID, asOfDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"report":       balanceSheetReport,
+		"as_of_date":   asOfDate.Format("2006-01-02"),
+		"generated_at": time.Now(),
+	})
+}
+
+func (h *FinanceHandlers) GetFinancialDashboard(c *gin.Context) {
+	tenantID, err := h.extractTenantID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get dashboard data from last 30 days
+	startDate := time.Now().AddDate(0, 0, -30)
+	endDate := time.Now()
+
+	dashboard, err := h.expenseService.GetFinancialDashboard(c.Request.Context(), tenantID, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"dashboard":    dashboard,
+		"period":       "last_30_days",
+		"generated_at": time.Now(),
+	})
 }

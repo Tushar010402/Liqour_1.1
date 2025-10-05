@@ -112,13 +112,13 @@ var (
 func PrometheusMiddleware(serviceName string) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		start := time.Now()
-		
+
 		// Process request
 		c.Next()
-		
+
 		// Calculate duration
 		duration := time.Since(start)
-		
+
 		// Record metrics
 		httpRequestsTotal.WithLabelValues(
 			c.Request.Method,
@@ -126,7 +126,7 @@ func PrometheusMiddleware(serviceName string) gin.HandlerFunc {
 			strconv.Itoa(c.Writer.Status()),
 			serviceName,
 		).Inc()
-		
+
 		httpRequestDuration.WithLabelValues(
 			c.Request.Method,
 			c.FullPath(),
@@ -193,6 +193,6 @@ func StartMetricsServer(port string, serviceName string) {
 			"metrics": "enabled",
 		})
 	})
-	
+
 	go router.Run(":" + port)
 }

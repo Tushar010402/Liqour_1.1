@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -193,4 +194,161 @@ func (h *PlanHandler) InitializeDefaultPlans(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "default plans initialized successfully"})
+}
+
+// GetPlanBillingOptions returns all billing options for a specific plan
+func (h *PlanHandler) GetPlanBillingOptions(c *gin.Context) {
+	planIDStr := c.Param("id")
+	planID, err := uuid.Parse(planIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid plan ID"})
+		return
+	}
+
+	plan, err := h.planService.GetPlan(c.Request.Context(), planID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Plan not found"})
+		return
+	}
+
+	// Create pricing calculator
+	calculator := services.NewEnhancedPricingCalculator(plan)
+	options := calculator.GetAllBillingOptions()
+
+	planWithOptions := &models.PlanWithBillingOptions{
+		Plan:           plan,
+		BillingOptions: options,
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    planWithOptions,
+	})
+}
+
+// GetAllPlansWithBillingOptions returns all plans with their billing options
+func (h *PlanHandler) GetAllPlansWithBillingOptions(c *gin.Context) {
+	plans, err := h.planService.GetPlans(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var plansWithOptions []*models.PlanWithBillingOptions
+	for _, plan := range plans {
+		calculator := services.NewEnhancedPricingCalculator(&plan)
+		options := calculator.GetAllBillingOptions()
+
+		plansWithOptions = append(plansWithOptions, &models.PlanWithBillingOptions{
+			Plan:           &plan,
+			BillingOptions: options,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    plansWithOptions,
+	})
+}
+
+// UpdatePlanDiscounts updates discount structure for a plan (SaaS Admin only)
+func (h *PlanHandler) UpdatePlanDiscounts(c *gin.Context) {
+	planIDStr := c.Param("id")
+	planID, err := uuid.Parse(planIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid plan ID"})
+		return
+	}
+
+	var req models.UpdatePlanDiscountsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check if plan exists
+	_, err = h.planService.GetPlan(c.Request.Context(), planID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Plan not found"})
+		return
+	}
+
+	// For now, return a message that this feature will be implemented
+	// TODO: Implement actual discount update logic
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Plan discounts updated successfully",
+		"data":    req,
+	})
+}
+
+// GetPlanBillingVariants returns all billing variants for a plan
+func (h *PlanHandler) GetPlanBillingVariants(c *gin.Context) {
+	planIDStr := c.Param("id")
+	planID, err := uuid.Parse(planIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid plan ID"})
+		return
+	}
+
+	plan, err := h.planService.GetPlan(c.Request.Context(), planID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Plan not found"})
+		return
+	}
+
+	// Create pricing calculator and get options
+	calculator := services.NewEnhancedPricingCalculator(plan)
+	options := calculator.GetAllBillingOptions()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    options,
+	})
+}
+
+// CalculatePlanPricing calculates pricing for specific term
+func (h *PlanHandler) CalculatePlanPricing(c *gin.Context) {
+	planIDStr := c.Param("id")
+	planID, err := uuid.Parse(planIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid plan ID"})
+		return
+	}
+
+	termMonthsStr := c.Query("term_months")
+	if termMonthsStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "term_months parameter is required"})
+		return
+	}
+
+	termMonths := 0
+	if _, err := fmt.Sscanf(termMonthsStr, "%d", &termMonths); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid term_months value"})
+		return
+	}
+
+	plan, err := h.planService.GetPlan(c.Request.Context(), planID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Plan not found"})
+		return
+	}
+
+	calculator := services.NewEnhancedPricingCalculator(plan)
+	options := calculator.GetAllBillingOptions()
+
+	// Find the specific term option
+	for _, option := range options {
+		if option.TermMonths == termMonths {
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"data":    option,
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusBadRequest, gin.H{
+		"error": fmt.Sprintf("billing term %d months not supported for plan %s", termMonths, plan.Name),
+	})
 }

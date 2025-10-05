@@ -25,22 +25,22 @@ func NewPurchaseService(db *database.DB, cache *cache.Cache) *PurchaseService {
 }
 
 type PurchaseRequest struct {
-	VendorID    uuid.UUID                 `json:"vendor_id" binding:"required"`
-	ShopID      uuid.UUID                 `json:"shop_id" binding:"required"`
-	ReceiptNo   string                    `json:"receipt_no"`
-	Items       []PurchaseItemRequest     `json:"items" binding:"required,min=1"`
-	TotalAmount float64                   `json:"total_amount"`
-	Notes       string                    `json:"notes"`
-	Payments    []PurchasePaymentRequest  `json:"payments"`
+	VendorID    uuid.UUID                `json:"vendor_id" binding:"required"`
+	ShopID      uuid.UUID                `json:"shop_id" binding:"required"`
+	ReceiptNo   string                   `json:"receipt_no"`
+	Items       []PurchaseItemRequest    `json:"items" binding:"required,min=1"`
+	TotalAmount float64                  `json:"total_amount"`
+	Notes       string                   `json:"notes"`
+	Payments    []PurchasePaymentRequest `json:"payments"`
 }
 
 type PurchaseItemRequest struct {
-	ProductID    uuid.UUID `json:"product_id" binding:"required"`
-	Quantity     float64   `json:"quantity" binding:"required,gt=0"`
-	UnitPrice    float64   `json:"unit_price" binding:"required,gt=0"`
-	TotalPrice   float64   `json:"total_price"`
-	ExpiryDate   *time.Time `json:"expiry_date"`
-	BatchNumber  string    `json:"batch_number"`
+	ProductID   uuid.UUID  `json:"product_id" binding:"required"`
+	Quantity    float64    `json:"quantity" binding:"required,gt=0"`
+	UnitPrice   float64    `json:"unit_price" binding:"required,gt=0"`
+	TotalPrice  float64    `json:"total_price"`
+	ExpiryDate  *time.Time `json:"expiry_date"`
+	BatchNumber string     `json:"batch_number"`
 }
 
 type PurchasePaymentRequest struct {
@@ -49,34 +49,34 @@ type PurchasePaymentRequest struct {
 }
 
 type PurchaseResponse struct {
-	ID          uuid.UUID                  `json:"id"`
-	PurchaseNo  string                     `json:"purchase_no"`
-	VendorID    uuid.UUID                  `json:"vendor_id"`
-	VendorName  string                     `json:"vendor_name"`
-	ShopID      uuid.UUID                  `json:"shop_id"`
-	ShopName    string                     `json:"shop_name"`
-	ReceiptNo   string                     `json:"receipt_no"`
-	Status      string                     `json:"status"`
-	TotalAmount float64                    `json:"total_amount"`
-	Items       []PurchaseItemResponse     `json:"items"`
-	Payments    []PurchasePaymentResponse  `json:"payments"`
-	Notes       string                     `json:"notes"`
-	CreatedBy   uuid.UUID                  `json:"created_by"`
-	CreatedAt   time.Time                  `json:"created_at"`
-	UpdatedAt   time.Time                  `json:"updated_at"`
+	ID          uuid.UUID                 `json:"id"`
+	PurchaseNo  string                    `json:"purchase_no"`
+	VendorID    uuid.UUID                 `json:"vendor_id"`
+	VendorName  string                    `json:"vendor_name"`
+	ShopID      uuid.UUID                 `json:"shop_id"`
+	ShopName    string                    `json:"shop_name"`
+	ReceiptNo   string                    `json:"receipt_no"`
+	Status      string                    `json:"status"`
+	TotalAmount float64                   `json:"total_amount"`
+	Items       []PurchaseItemResponse    `json:"items"`
+	Payments    []PurchasePaymentResponse `json:"payments"`
+	Notes       string                    `json:"notes"`
+	CreatedBy   uuid.UUID                 `json:"created_by"`
+	CreatedAt   time.Time                 `json:"created_at"`
+	UpdatedAt   time.Time                 `json:"updated_at"`
 }
 
 type PurchaseItemResponse struct {
-	ID           uuid.UUID  `json:"id"`
-	ProductID    uuid.UUID  `json:"product_id"`
-	ProductName  string     `json:"product_name"`
-	BrandName    string     `json:"brand_name"`
-	Quantity     float64    `json:"quantity"`
-	UnitPrice    float64    `json:"unit_price"`
-	TotalPrice   float64    `json:"total_price"`
-	ExpiryDate   *time.Time `json:"expiry_date"`
-	BatchNumber  string     `json:"batch_number"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID          uuid.UUID  `json:"id"`
+	ProductID   uuid.UUID  `json:"product_id"`
+	ProductName string     `json:"product_name"`
+	BrandName   string     `json:"brand_name"`
+	Quantity    float64    `json:"quantity"`
+	UnitPrice   float64    `json:"unit_price"`
+	TotalPrice  float64    `json:"total_price"`
+	ExpiryDate  *time.Time `json:"expiry_date"`
+	BatchNumber string     `json:"batch_number"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type PurchasePaymentResponse struct {
@@ -126,7 +126,7 @@ func (s *PurchaseService) CreatePurchase(ctx context.Context, req PurchaseReques
 	purchase = models.StockPurchase{
 		TenantModel: models.TenantModel{
 			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  tenantID,
+			TenantID:  &tenantID,
 		},
 		PurchaseNumber: purchaseNo,
 		VendorID:       req.VendorID,
@@ -159,7 +159,7 @@ func (s *PurchaseService) CreatePurchase(ctx context.Context, req PurchaseReques
 		purchaseItem := models.StockPurchaseItem{
 			TenantModel: models.TenantModel{
 				BaseModel: models.BaseModel{ID: uuid.New()},
-				TenantID:  tenantID,
+				TenantID:  &tenantID,
 			},
 			StockPurchaseID: purchase.ID,
 			ProductID:       itemReq.ProductID,
@@ -195,7 +195,7 @@ func (s *PurchaseService) CreatePurchase(ctx context.Context, req PurchaseReques
 		payment := models.StockPurchasePayment{
 			TenantModel: models.TenantModel{
 				BaseModel: models.BaseModel{ID: uuid.New()},
-				TenantID:  tenantID,
+				TenantID:  &tenantID,
 			},
 			StockPurchaseID: purchase.ID,
 			PaymentMethod:   paymentReq.Method,
@@ -230,11 +230,11 @@ func (s *PurchaseService) GetPurchases(ctx context.Context, tenantID uuid.UUID, 
 	var total int64
 
 	query := s.db.Where("tenant_id = ?", tenantID)
-	
+
 	if shopID != nil {
 		query = query.Where("shop_id = ?", *shopID)
 	}
-	
+
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -319,7 +319,7 @@ func (s *PurchaseService) ReceivePurchase(ctx context.Context, id, tenantID, use
 	for _, item := range purchase.Items {
 		// Check if stock exists for this product in this shop
 		var stock models.Stock
-		err := tx.Where("product_id = ? AND shop_id = ? AND tenant_id = ?", 
+		err := tx.Where("product_id = ? AND shop_id = ? AND tenant_id = ?",
 			item.ProductID, purchase.VendorID, tenantID).First(&stock).Error
 
 		if err == gorm.ErrRecordNotFound {
@@ -327,14 +327,14 @@ func (s *PurchaseService) ReceivePurchase(ctx context.Context, id, tenantID, use
 			stock = models.Stock{
 				TenantModel: models.TenantModel{
 					BaseModel: models.BaseModel{ID: uuid.New()},
-					TenantID:  tenantID,
+					TenantID:  &tenantID,
 				},
-				ProductID:      item.ProductID,
-				ShopID:         purchase.VendorID,
-				Quantity:       item.Quantity,
-				MinimumLevel:   0,
-				MaximumLevel:   0,
-				AverageCost:    item.UnitCost,
+				ProductID:        item.ProductID,
+				ShopID:           purchase.VendorID,
+				Quantity:         item.Quantity,
+				MinimumLevel:     0,
+				MaximumLevel:     0,
+				AverageCost:      item.UnitCost,
 				LastPurchaseDate: &time.Time{},
 			}
 			*stock.LastPurchaseDate = time.Now()
@@ -350,10 +350,10 @@ func (s *PurchaseService) ReceivePurchase(ctx context.Context, id, tenantID, use
 			// Update existing stock
 			newStock := stock.Quantity + item.Quantity
 			now := time.Now()
-			
+
 			updates := map[string]interface{}{
-				"quantity": newStock,
-				"average_cost": item.UnitCost,
+				"quantity":           newStock,
+				"average_cost":       item.UnitCost,
 				"last_purchase_date": &now,
 			}
 
@@ -368,7 +368,7 @@ func (s *PurchaseService) ReceivePurchase(ctx context.Context, id, tenantID, use
 		movement := models.StockMovement{
 			TenantModel: models.TenantModel{
 				BaseModel: models.BaseModel{ID: uuid.New()},
-				TenantID:  tenantID,
+				TenantID:  &tenantID,
 			},
 			StockID:      stock.ID,
 			MovementType: "purchase",
@@ -386,7 +386,7 @@ func (s *PurchaseService) ReceivePurchase(ctx context.Context, id, tenantID, use
 
 	// Update purchase status
 	if err := tx.Model(&purchase).Updates(map[string]interface{}{
-		"status": "received",
+		"status":      "received",
 		"received_at": time.Now(),
 		"received_by": userID,
 	}).Error; err != nil {
@@ -401,7 +401,7 @@ func (s *PurchaseService) ReceivePurchase(ctx context.Context, id, tenantID, use
 	// Clear cache
 	cacheKey := fmt.Sprintf("purchases:tenant:%s", tenantID.String())
 	s.cache.Delete(ctx, cacheKey)
-	
+
 	stockCacheKey := fmt.Sprintf("stocks:shop:%s:tenant:%s", purchase.VendorID.String(), tenantID.String())
 	s.cache.Delete(ctx, stockCacheKey)
 
@@ -410,7 +410,7 @@ func (s *PurchaseService) ReceivePurchase(ctx context.Context, id, tenantID, use
 
 func (s *PurchaseService) generatePurchaseNumber(ctx context.Context, tenantID uuid.UUID) (string, error) {
 	year := time.Now().Year()
-	
+
 	var count int64
 	if err := s.db.
 		Model(&models.StockPurchase{}).

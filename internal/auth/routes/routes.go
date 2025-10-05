@@ -9,15 +9,19 @@ import (
 )
 
 // SetupRoutes configures all auth service routes
-func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, authHandlers *handlers.AuthHandlers) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, authHandlers *handlers.AuthHandlers, rateLimitHandlers *handlers.RateLimitHandlers) {
 	// Health check
 	router.GET("/health", authHandlers.Health)
 
 	// Public authentication routes (no auth required)
 	auth := router.Group("/api/auth")
 	{
+		auth.POST("/check-user", authHandlers.CheckUser)
 		auth.POST("/login", authHandlers.Login)
 		auth.POST("/register", authHandlers.Register)
+		auth.POST("/send-otp", authHandlers.SendOTP)
+		auth.POST("/send-otp-registration", authHandlers.SendOTPForRegistration)
+		auth.POST("/verify-otp", authHandlers.VerifyOTP)
 		// TODO: Add forgot-password, reset-password, verify-email endpoints
 	}
 
@@ -70,13 +74,23 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, aut
 		saasAdmin.GET("/tenants/:id", authHandlers.GetTenantByID)
 		saasAdmin.PUT("/tenants/:id", authHandlers.UpdateTenant)
 		saasAdmin.DELETE("/tenants/:id", authHandlers.DeleteTenant)
-		
+
 		// Global user management (across all tenants)
 		saasAdmin.GET("/all-users", authHandlers.GetAllUsers)
 		saasAdmin.GET("/all-shops", authHandlers.GetAllShops)
-		
+
 		// System statistics
 		saasAdmin.GET("/stats", authHandlers.GetSystemStats)
+
+		// Rate limit management
+		saasAdmin.GET("/rate-limits", rateLimitHandlers.GetRateLimits)
+		saasAdmin.POST("/rate-limits", rateLimitHandlers.CreateRateLimit)
+		saasAdmin.GET("/rate-limits/stats", rateLimitHandlers.GetRateLimitStats)
+		saasAdmin.GET("/rate-limits/check/:name", rateLimitHandlers.CheckRateLimit)
+		saasAdmin.POST("/rate-limits/reset/:name", rateLimitHandlers.ResetRateLimit)
+		saasAdmin.GET("/rate-limits/:id", rateLimitHandlers.GetRateLimit)
+		saasAdmin.PUT("/rate-limits/:id", rateLimitHandlers.UpdateRateLimit)
+		saasAdmin.DELETE("/rate-limits/:id", rateLimitHandlers.DeleteRateLimit)
 	}
 }
 
@@ -86,8 +100,12 @@ func SetupPublicRoutes(router *gin.Engine, authHandlers *handlers.AuthHandlers) 
 	router.GET("/health", authHandlers.Health)
 
 	// Public authentication routes
+	router.POST("/check-user", authHandlers.CheckUser)
 	router.POST("/login", authHandlers.Login)
 	router.POST("/register", authHandlers.Register)
+	router.POST("/send-otp", authHandlers.SendOTP)
+	router.POST("/send-otp-registration", authHandlers.SendOTPForRegistration)
+	router.POST("/verify-otp", authHandlers.VerifyOTP)
 }
 
 // SetupProtectedRoutes sets up only protected routes (for gateway routing)

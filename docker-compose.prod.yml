@@ -76,7 +76,6 @@ services:
       - SERVICES_SALES_URL=http://sales:8092
       - SERVICES_INVENTORY_URL=http://inventory:8093
       - SERVICES_FINANCE_URL=http://finance:8094
-      - SERVICES_FRONTEND_URL=http://frontend:8095
     depends_on:
       postgres:
         condition: service_healthy

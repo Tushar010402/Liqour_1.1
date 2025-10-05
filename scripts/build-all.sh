@@ -60,13 +60,13 @@ SERVICES=(
     "sales"
     "inventory"
     "finance"
-    "frontend"
+    "saas"
 )
 
 for service in "${SERVICES[@]}"; do
     print_status "Building $service service..."
     
-    if CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o "build/$service" "./cmd/$service/main.go"; then
+    if go build -o "build/$service" "./cmd/$service"; then
         print_success "$service service built successfully"
     else
         print_error "Failed to build $service service"

@@ -28,24 +28,28 @@ func NewPlanService(db *gorm.DB, cfg *config.Config) *PlanService {
 
 func (s *PlanService) CreatePlan(ctx context.Context, req *models.CreatePlanRequest) (*models.PricingPlan, error) {
 	plan := models.PricingPlan{
-		ID:             uuid.New(),
-		Name:           req.Name,
-		DisplayName:    req.DisplayName,
-		Description:    req.Description,
-		Price:          req.Price,
-		Currency:       "INR",
-		BillingCycle:   req.BillingCycle,
-		TrialDays:      req.TrialDays,
-		MaxLocations:   req.MaxLocations,
-		MaxUsers:       req.MaxUsers,
-		MaxProducts:    req.MaxProducts,
-		Features:       req.Features,
-		AIFeatures:     req.AIFeatures,
-		Popular:        req.Popular,
-		Enterprise:     req.Enterprise,
-		Active:         req.Active,
-		SortOrder:      req.SortOrder,
-		YearlyDiscount: req.YearlyDiscount,
+		ID:                 uuid.New(),
+		Name:               req.Name,
+		DisplayName:        req.DisplayName,
+		Description:        req.Description,
+		Price:              req.Price,
+		Currency:           "INR",
+		BillingCycle:       req.BillingCycle,
+		BillingTermMonths:  1, // Default to monthly
+		TrialDays:          req.TrialDays,
+		MaxLocations:       req.MaxLocations,
+		MaxUsers:           req.MaxUsers,
+		MaxProducts:        req.MaxProducts,
+		Features:           req.Features,
+		AIFeatures:         req.AIFeatures,
+		Popular:            req.Popular,
+		Enterprise:         req.Enterprise,
+		Active:             req.Active,
+		SortOrder:          req.SortOrder,
+		YearlyDiscount:     req.YearlyDiscount,
+		TwoYearDiscount:    req.TwoYearDiscount,
+		ThreeYearDiscount:  req.ThreeYearDiscount,
+		AutoCreateVariants: req.AutoCreateVariants,
 	}
 
 	if req.Currency != "" {
@@ -55,6 +59,14 @@ func (s *PlanService) CreatePlan(ctx context.Context, req *models.CreatePlanRequ
 	// Create plan in database
 	if err := s.db.Create(&plan).Error; err != nil {
 		return nil, fmt.Errorf("failed to create plan: %w", err)
+	}
+
+	// Auto-create billing variants if enabled
+	if req.AutoCreateVariants {
+		if err := s.createBillingVariants(ctx, plan.ID); err != nil {
+			// Log error but don't fail plan creation
+			fmt.Printf("Warning: failed to create billing variants for plan %s: %v\n", plan.Name, err)
+		}
 	}
 
 	// TODO: Create corresponding Razorpay plan
@@ -69,7 +81,7 @@ func (s *PlanService) CreatePlan(ctx context.Context, req *models.CreatePlanRequ
 
 func (s *PlanService) GetPlan(ctx context.Context, id uuid.UUID) (*models.PricingPlan, error) {
 	var plan models.PricingPlan
-	
+
 	err := s.db.Where("id = ? AND active = true", id).First(&plan).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -83,11 +95,11 @@ func (s *PlanService) GetPlan(ctx context.Context, id uuid.UUID) (*models.Pricin
 
 func (s *PlanService) GetPlans(ctx context.Context) ([]models.PricingPlan, error) {
 	var plans []models.PricingPlan
-	
+
 	err := s.db.Where("active = true").
 		Order("sort_order ASC, price ASC").
 		Find(&plans).Error
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get plans: %w", err)
 	}
@@ -97,11 +109,11 @@ func (s *PlanService) GetPlans(ctx context.Context) ([]models.PricingPlan, error
 
 func (s *PlanService) GetPublicPlans(ctx context.Context) ([]models.PricingPlan, error) {
 	var plans []models.PricingPlan
-	
+
 	err := s.db.Where("active = true").
 		Order("sort_order ASC, price ASC").
 		Find(&plans).Error
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get public plans: %w", err)
 	}
@@ -111,7 +123,7 @@ func (s *PlanService) GetPublicPlans(ctx context.Context) ([]models.PricingPlan,
 
 func (s *PlanService) UpdatePlan(ctx context.Context, id uuid.UUID, req *models.CreatePlanRequest) (*models.PricingPlan, error) {
 	var plan models.PricingPlan
-	
+
 	if err := s.db.First(&plan, id).Error; err != nil {
 		return nil, fmt.Errorf("plan not found: %w", err)
 	}
@@ -151,11 +163,11 @@ func (s *PlanService) DeletePlan(ctx context.Context, id uuid.UUID) error {
 	err := s.db.Model(&models.Subscription{}).
 		Where("plan_id = ? AND status IN ?", id, []string{"active", "trial"}).
 		Count(&count).Error
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to check subscriptions: %w", err)
 	}
-	
+
 	if count > 0 {
 		return fmt.Errorf("cannot delete plan with active subscriptions")
 	}
@@ -182,17 +194,17 @@ func (s *PlanService) InitializeDefaultPlans(ctx context.Context) error {
 	// Create default plans based on website pricing
 	defaultPlans := []models.PricingPlan{
 		{
-			ID:          uuid.New(),
-			Name:        "smart_starter",
-			DisplayName: "Smart Starter",
-			Description: "Perfect for small businesses getting started with AI-powered liquor inventory management",
-			Price:       49.0,
-			Currency:    "INR",
+			ID:           uuid.New(),
+			Name:         "smart_starter",
+			DisplayName:  "Smart Starter",
+			Description:  "Perfect for small businesses getting started with AI-powered liquor inventory management",
+			Price:        49.0,
+			Currency:     "INR",
 			BillingCycle: "monthly",
-			TrialDays:   60, // 2 months free trial
+			TrialDays:    60, // 2 months free trial
 			MaxLocations: 1,
-			MaxUsers:    10,
-			MaxProducts: 1000,
+			MaxUsers:     10,
+			MaxProducts:  1000,
 			Features: []string{
 				"Basic inventory management",
 				"Sales tracking",
@@ -211,17 +223,17 @@ func (s *PlanService) InitializeDefaultPlans(ctx context.Context) error {
 			YearlyDiscount: 20.0,
 		},
 		{
-			ID:          uuid.New(),
-			Name:        "pro_intelligence",
-			DisplayName: "Pro Intelligence",
-			Description: "Advanced features for growing businesses with AI-powered insights and analytics",
-			Price:       149.0,
-			Currency:    "INR",
+			ID:           uuid.New(),
+			Name:         "pro_intelligence",
+			DisplayName:  "Pro Intelligence",
+			Description:  "Advanced features for growing businesses with AI-powered insights and analytics",
+			Price:        149.0,
+			Currency:     "INR",
 			BillingCycle: "monthly",
-			TrialDays:   60, // 2 months free trial
+			TrialDays:    60, // 2 months free trial
 			MaxLocations: 5,
-			MaxUsers:    25,
-			MaxProducts: 5000,
+			MaxUsers:     25,
+			MaxProducts:  5000,
 			Features: []string{
 				"Advanced inventory management",
 				"Multi-location support",
@@ -244,17 +256,17 @@ func (s *PlanService) InitializeDefaultPlans(ctx context.Context) error {
 			YearlyDiscount: 20.0,
 		},
 		{
-			ID:          uuid.New(),
-			Name:        "enterprise_ai",
-			DisplayName: "Enterprise AI",
-			Description: "Complete enterprise solution with full AI capabilities and dedicated support",
-			Price:       399.0,
-			Currency:    "INR",
+			ID:           uuid.New(),
+			Name:         "enterprise_ai",
+			DisplayName:  "Enterprise AI",
+			Description:  "Complete enterprise solution with full AI capabilities and dedicated support",
+			Price:        399.0,
+			Currency:     "INR",
 			BillingCycle: "monthly",
-			TrialDays:   60, // 2 months free trial
+			TrialDays:    60, // 2 months free trial
 			MaxLocations: -1, // Unlimited
-			MaxUsers:    -1,  // Unlimited
-			MaxProducts: -1,  // Unlimited
+			MaxUsers:     -1, // Unlimited
+			MaxProducts:  -1, // Unlimited
 			Features: []string{
 				"Enterprise inventory management",
 				"Unlimited locations & users",
@@ -293,7 +305,7 @@ func (s *PlanService) InitializeDefaultPlans(ctx context.Context) error {
 
 func (s *PlanService) GetPlanFeatures(ctx context.Context, planID uuid.UUID) ([]string, []string, error) {
 	var plan models.PricingPlan
-	
+
 	err := s.db.Select("features, ai_features").Where("id = ?", planID).First(&plan).Error
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get plan features: %w", err)
@@ -333,4 +345,57 @@ func (s *PlanService) createRazorpayPlan(plan *models.PricingPlan) (string, erro
 	// TODO: Implement Razorpay plan creation
 	// This would involve creating a plan in Razorpay with the pricing details
 	return fmt.Sprintf("rzp_plan_%s", plan.ID.String()), nil
+}
+
+// createBillingVariants creates billing variants for all supported terms
+func (s *PlanService) createBillingVariants(ctx context.Context, planID uuid.UUID) error {
+	// Get the plan
+	var plan models.PricingPlan
+	err := s.db.Where("id = ?", planID).First(&plan).Error
+	if err != nil {
+		return fmt.Errorf("failed to get plan: %w", err)
+	}
+
+	baseMonthlyPrice := plan.Price
+
+	// Define billing variants with their calculations
+	variants := []struct {
+		termMonths int
+		discount   float64
+	}{
+		{1, 0},                       // Monthly - no discount
+		{12, plan.YearlyDiscount},    // Yearly
+		{24, plan.TwoYearDiscount},   // 2-Year
+		{36, plan.ThreeYearDiscount}, // 3-Year
+	}
+
+	// Create billing variants
+	for _, v := range variants {
+		totalPrice := baseMonthlyPrice * float64(v.termMonths)
+		effectivePrice := totalPrice * (1 - v.discount/100)
+
+		variant := models.PlanBillingVariant{
+			BasePlanID:         planID,
+			BillingTermMonths:  v.termMonths,
+			DiscountPercentage: v.discount,
+			EffectivePrice:     effectivePrice,
+			IsActive:           true,
+		}
+
+		// Create or update the variant
+		err = s.db.Where("base_plan_id = ? AND billing_term_months = ?", planID, v.termMonths).
+			Assign(map[string]interface{}{
+				"discount_percentage": v.discount,
+				"effective_price":     effectivePrice,
+				"is_active":           true,
+				"updated_at":          "NOW()",
+			}).
+			FirstOrCreate(&variant).Error
+
+		if err != nil {
+			return fmt.Errorf("failed to create billing variant for %d months: %w", v.termMonths, err)
+		}
+	}
+
+	return nil
 }

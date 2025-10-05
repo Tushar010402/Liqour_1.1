@@ -9,8 +9,8 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
-	
-	"github.com/liquorpro/pkg/monitoring"
+
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 )
 
 // MessageHandler defines the function signature for message handlers
@@ -21,20 +21,20 @@ type Message struct {
 	ID        string                 `json:"id"`
 	Stream    string                 `json:"stream"`
 	Data      map[string]interface{} `json:"data"`
-	Timestamp time.Time             `json:"timestamp"`
-	Attempts  int                   `json:"attempts"`
+	Timestamp time.Time              `json:"timestamp"`
+	Attempts  int                    `json:"attempts"`
 }
 
 // StreamConfig holds configuration for a Redis stream
 type StreamConfig struct {
-	StreamName     string        `json:"stream_name"`
-	ConsumerGroup  string        `json:"consumer_group"`
-	ConsumerName   string        `json:"consumer_name"`
-	MaxRetries     int           `json:"max_retries"`
-	RetryDelay     time.Duration `json:"retry_delay"`
-	BlockDuration  time.Duration `json:"block_duration"`
-	BatchSize      int64         `json:"batch_size"`
-	MaxLen         int64         `json:"max_len"`
+	StreamName    string        `json:"stream_name"`
+	ConsumerGroup string        `json:"consumer_group"`
+	ConsumerName  string        `json:"consumer_name"`
+	MaxRetries    int           `json:"max_retries"`
+	RetryDelay    time.Duration `json:"retry_delay"`
+	BlockDuration time.Duration `json:"block_duration"`
+	BatchSize     int64         `json:"batch_size"`
+	MaxLen        int64         `json:"max_len"`
 }
 
 // QueueManager manages Redis streams for message queuing
@@ -52,7 +52,7 @@ type QueueManager struct {
 // NewQueueManager creates a new Redis streams queue manager
 func NewQueueManager(redisClient *redis.Client, logger *zap.Logger) *QueueManager {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	return &QueueManager{
 		client:    redisClient,
 		logger:    logger,
@@ -68,7 +68,7 @@ func NewQueueManager(redisClient *redis.Client, logger *zap.Logger) *QueueManage
 func (qm *QueueManager) RegisterStream(config StreamConfig, handler MessageHandler) error {
 	qm.mutex.Lock()
 	defer qm.mutex.Unlock()
-	
+
 	// Set defaults
 	if config.MaxRetries == 0 {
 		config.MaxRetries = 3
@@ -85,22 +85,22 @@ func (qm *QueueManager) RegisterStream(config StreamConfig, handler MessageHandl
 	if config.MaxLen == 0 {
 		config.MaxLen = 10000
 	}
-	
+
 	// Create consumer group if it doesn't exist
 	err := qm.client.XGroupCreateMkStream(qm.ctx, config.StreamName, config.ConsumerGroup, "0").Err()
 	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
 		return fmt.Errorf("failed to create consumer group: %w", err)
 	}
-	
+
 	qm.streams[config.StreamName] = &config
 	qm.handlers[config.StreamName] = handler
-	
+
 	qm.logger.Info("Stream registered",
 		zap.String("stream", config.StreamName),
 		zap.String("consumer_group", config.ConsumerGroup),
 		zap.String("consumer_name", config.ConsumerName),
 	)
-	
+
 	return nil
 }
 
@@ -108,22 +108,22 @@ func (qm *QueueManager) RegisterStream(config StreamConfig, handler MessageHandl
 func (qm *QueueManager) StartConsumer(streamName string) error {
 	qm.mutex.Lock()
 	defer qm.mutex.Unlock()
-	
+
 	config, exists := qm.streams[streamName]
 	if !exists {
 		return fmt.Errorf("stream %s not registered", streamName)
 	}
-	
+
 	handler, exists := qm.handlers[streamName]
 	if !exists {
 		return fmt.Errorf("no handler registered for stream %s", streamName)
 	}
-	
+
 	consumer := NewStreamConsumer(qm.client, config, handler, qm.logger)
 	qm.consumers[streamName] = consumer
-	
+
 	go consumer.Start(qm.ctx)
-	
+
 	qm.logger.Info("Consumer started", zap.String("stream", streamName))
 	return nil
 }
@@ -136,13 +136,13 @@ func (qm *QueueManager) StartAllConsumers() error {
 		streamNames = append(streamNames, streamName)
 	}
 	qm.mutex.RUnlock()
-	
+
 	for _, streamName := range streamNames {
 		if err := qm.StartConsumer(streamName); err != nil {
 			return fmt.Errorf("failed to start consumer for stream %s: %w", streamName, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -151,11 +151,11 @@ func (qm *QueueManager) Publish(streamName string, data map[string]interface{}) 
 	qm.mutex.RLock()
 	config, exists := qm.streams[streamName]
 	qm.mutex.RUnlock()
-	
+
 	if !exists {
 		return fmt.Errorf("stream %s not registered", streamName)
 	}
-	
+
 	// Convert data to string map for Redis
 	values := make(map[string]interface{})
 	for k, v := range data {
@@ -165,11 +165,11 @@ func (qm *QueueManager) Publish(streamName string, data map[string]interface{}) 
 		}
 		values[k] = string(jsonBytes)
 	}
-	
+
 	// Add metadata
 	values["published_at"] = time.Now().Format(time.RFC3339)
 	values["attempts"] = "0"
-	
+
 	// Publish to stream with max length limit
 	args := &redis.XAddArgs{
 		Stream: streamName,
@@ -177,20 +177,20 @@ func (qm *QueueManager) Publish(streamName string, data map[string]interface{}) 
 		Approx: true, // Use approximate trimming for better performance
 		Values: values,
 	}
-	
+
 	messageID, err := qm.client.XAdd(qm.ctx, args).Result()
 	if err != nil {
 		monitoring.RecordRedisOperation("queue_manager", "xadd", "error")
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
-	
+
 	monitoring.RecordRedisOperation("queue_manager", "xadd", "success")
-	
+
 	qm.logger.Debug("Message published",
 		zap.String("stream", streamName),
 		zap.String("message_id", messageID),
 	)
-	
+
 	return nil
 }
 
@@ -199,22 +199,22 @@ func (qm *QueueManager) PublishDelayed(streamName string, data map[string]interf
 	// Add delay information to the message
 	data["scheduled_for"] = time.Now().Add(delay).Format(time.RFC3339)
 	data["delayed"] = true
-	
+
 	return qm.Publish(streamName+"_delayed", data)
 }
 
 // Stop stops all consumers and closes connections
 func (qm *QueueManager) Stop() error {
 	qm.cancel()
-	
+
 	qm.mutex.Lock()
 	defer qm.mutex.Unlock()
-	
+
 	for streamName, consumer := range qm.consumers {
 		consumer.Stop()
 		qm.logger.Info("Consumer stopped", zap.String("stream", streamName))
 	}
-	
+
 	return nil
 }
 
@@ -246,7 +246,7 @@ func (sc *StreamConsumer) Start(ctx context.Context) {
 		zap.String("stream", sc.config.StreamName),
 		zap.String("consumer_group", sc.config.ConsumerGroup),
 	)
-	
+
 	// Start two goroutines: one for new messages, one for pending messages
 	go sc.consumeNewMessages(ctx)
 	go sc.processPendingMessages(ctx)
@@ -263,7 +263,7 @@ func (sc *StreamConsumer) consumeNewMessages(ctx context.Context) {
 			return
 		default:
 		}
-		
+
 		// Read messages from the stream
 		streams, err := sc.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    sc.config.ConsumerGroup,
@@ -272,10 +272,10 @@ func (sc *StreamConsumer) consumeNewMessages(ctx context.Context) {
 			Count:    sc.config.BatchSize,
 			Block:    sc.config.BlockDuration,
 		}).Result()
-		
+
 		if err != nil {
 			if err != redis.Nil && err != context.Canceled {
-				sc.logger.Error("Failed to read from stream", 
+				sc.logger.Error("Failed to read from stream",
 					zap.String("stream", sc.config.StreamName),
 					zap.Error(err),
 				)
@@ -284,9 +284,9 @@ func (sc *StreamConsumer) consumeNewMessages(ctx context.Context) {
 			}
 			continue
 		}
-		
+
 		monitoring.RecordRedisOperation("stream_consumer", "xreadgroup", "success")
-		
+
 		// Process messages
 		for _, stream := range streams {
 			for _, message := range stream.Messages {
@@ -300,7 +300,7 @@ func (sc *StreamConsumer) consumeNewMessages(ctx context.Context) {
 func (sc *StreamConsumer) processPendingMessages(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -318,7 +318,7 @@ func (sc *StreamConsumer) processDelayedMessages(ctx context.Context) {
 	delayedStream := sc.config.StreamName + "_delayed"
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -338,16 +338,16 @@ func (sc *StreamConsumer) handleDelayedMessages(ctx context.Context, delayedStre
 		Streams: []string{delayedStream, "0"},
 		Count:   10,
 	}).Result()
-	
+
 	if err != nil {
 		if err != redis.Nil {
 			sc.logger.Error("Failed to read delayed messages", zap.Error(err))
 		}
 		return
 	}
-	
+
 	now := time.Now()
-	
+
 	for _, stream := range streams {
 		for _, message := range stream.Messages {
 			// Check if message is ready
@@ -357,13 +357,13 @@ func (sc *StreamConsumer) handleDelayedMessages(ctx context.Context, delayedStre
 					// Message is ready, move it to main stream
 					delete(message.Values, "scheduled_for")
 					delete(message.Values, "delayed")
-					
+
 					// Add to main stream
 					sc.client.XAdd(ctx, &redis.XAddArgs{
 						Stream: sc.config.StreamName,
 						Values: message.Values,
 					})
-					
+
 					// Remove from delayed stream
 					sc.client.XDel(ctx, delayedStream, message.ID)
 				}
@@ -383,15 +383,15 @@ func (sc *StreamConsumer) handlePendingMessages(ctx context.Context) {
 		Count:    100,
 		Consumer: sc.config.ConsumerName,
 	}).Result()
-	
+
 	if err != nil {
 		sc.logger.Error("Failed to get pending messages", zap.Error(err))
 		return
 	}
-	
+
 	for _, msg := range pending {
 		// Check if message has been idle for too long
-		if time.Since(msg.Idle) > sc.config.RetryDelay {
+		if time.Duration(msg.Idle) > sc.config.RetryDelay {
 			// Claim the message and retry
 			messages, err := sc.client.XClaim(ctx, &redis.XClaimArgs{
 				Stream:   sc.config.StreamName,
@@ -400,15 +400,15 @@ func (sc *StreamConsumer) handlePendingMessages(ctx context.Context) {
 				MinIdle:  sc.config.RetryDelay,
 				Messages: []string{msg.ID},
 			}).Result()
-			
+
 			if err != nil {
-				sc.logger.Error("Failed to claim pending message", 
+				sc.logger.Error("Failed to claim pending message",
 					zap.String("message_id", msg.ID),
 					zap.Error(err),
 				)
 				continue
 			}
-			
+
 			// Process claimed messages
 			for _, message := range messages {
 				sc.processMessage(ctx, &message)
@@ -426,7 +426,7 @@ func (sc *StreamConsumer) processMessage(ctx context.Context, redisMsg *redis.XM
 		Data:      make(map[string]interface{}),
 		Timestamp: time.Now(),
 	}
-	
+
 	// Parse message data
 	for k, v := range redisMsg.Values {
 		if k == "published_at" {
@@ -435,14 +435,14 @@ func (sc *StreamConsumer) processMessage(ctx context.Context, redisMsg *redis.XM
 			}
 			continue
 		}
-		
+
 		if k == "attempts" {
-			if attempts, err := json.Unmarshal([]byte(v.(string)), &message.Attempts); err == nil {
+			if err := json.Unmarshal([]byte(v.(string)), &message.Attempts); err == nil {
 				message.Attempts++
 			}
 			continue
 		}
-		
+
 		// Unmarshal JSON data
 		var data interface{}
 		if err := json.Unmarshal([]byte(v.(string)), &data); err == nil {
@@ -451,17 +451,17 @@ func (sc *StreamConsumer) processMessage(ctx context.Context, redisMsg *redis.XM
 			message.Data[k] = v
 		}
 	}
-	
+
 	sc.logger.Debug("Processing message",
 		zap.String("stream", sc.config.StreamName),
 		zap.String("message_id", message.ID),
 		zap.Int("attempts", message.Attempts),
 	)
-	
+
 	// Process message with timeout
 	processCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	
+
 	err := sc.handler(processCtx, message)
 	if err != nil {
 		sc.logger.Error("Failed to process message",
@@ -470,7 +470,7 @@ func (sc *StreamConsumer) processMessage(ctx context.Context, redisMsg *redis.XM
 			zap.Int("attempts", message.Attempts),
 			zap.Error(err),
 		)
-		
+
 		// Check if we should retry
 		if message.Attempts < sc.config.MaxRetries {
 			// Update attempts count and re-add to stream for retry
@@ -482,7 +482,7 @@ func (sc *StreamConsumer) processMessage(ctx context.Context, redisMsg *redis.XM
 			retryData["attempts"] = fmt.Sprintf("%d", message.Attempts)
 			retryData["last_error"] = err.Error()
 			retryData["retry_at"] = time.Now().Add(sc.config.RetryDelay).Format(time.RFC3339)
-			
+
 			// Add to delayed stream for retry
 			sc.client.XAdd(ctx, &redis.XAddArgs{
 				Stream: sc.config.StreamName + "_delayed",
@@ -493,7 +493,7 @@ func (sc *StreamConsumer) processMessage(ctx context.Context, redisMsg *redis.XM
 			sc.moveToDeadLetterQueue(ctx, message, err)
 		}
 	}
-	
+
 	// Acknowledge message
 	if err := sc.client.XAck(ctx, sc.config.StreamName, sc.config.ConsumerGroup, redisMsg.ID).Err(); err != nil {
 		sc.logger.Error("Failed to acknowledge message",
@@ -506,7 +506,7 @@ func (sc *StreamConsumer) processMessage(ctx context.Context, redisMsg *redis.XM
 // moveToDeadLetterQueue moves failed messages to dead letter queue
 func (sc *StreamConsumer) moveToDeadLetterQueue(ctx context.Context, message *Message, err error) {
 	dlqStream := sc.config.StreamName + "_dlq"
-	
+
 	data := make(map[string]interface{})
 	for k, v := range message.Data {
 		jsonBytes, _ := json.Marshal(v)
@@ -516,12 +516,12 @@ func (sc *StreamConsumer) moveToDeadLetterQueue(ctx context.Context, message *Me
 	data["failed_at"] = time.Now().Format(time.RFC3339)
 	data["error"] = err.Error()
 	data["attempts"] = fmt.Sprintf("%d", message.Attempts)
-	
+
 	_, err = sc.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: dlqStream,
 		Values: data,
 	}).Result()
-	
+
 	if err != nil {
 		sc.logger.Error("Failed to add message to dead letter queue", zap.Error(err))
 	} else {
@@ -536,7 +536,7 @@ func (sc *StreamConsumer) moveToDeadLetterQueue(ctx context.Context, message *Me
 func (sc *StreamConsumer) Stop() {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
-	
+
 	if !sc.stopped {
 		close(sc.stopChan)
 		sc.stopped = true
@@ -556,16 +556,16 @@ type QueueStats struct {
 func (qm *QueueManager) GetStats() ([]QueueStats, error) {
 	qm.mutex.RLock()
 	defer qm.mutex.RUnlock()
-	
+
 	stats := make([]QueueStats, 0, len(qm.streams))
-	
+
 	for streamName, config := range qm.streams {
 		// Get stream length
 		length, err := qm.client.XLen(qm.ctx, streamName).Result()
 		if err != nil {
 			length = 0
 		}
-		
+
 		// Get pending messages count
 		pending, err := qm.client.XPending(qm.ctx, streamName, config.ConsumerGroup).Result()
 		var pendingCount int64 = 0
@@ -574,7 +574,7 @@ func (qm *QueueManager) GetStats() ([]QueueStats, error) {
 			pendingCount = pending.Count
 			consumersCount = int64(len(pending.Consumers))
 		}
-		
+
 		stats = append(stats, QueueStats{
 			StreamName:      streamName,
 			Length:          length,
@@ -583,6 +583,6 @@ func (qm *QueueManager) GetStats() ([]QueueStats, error) {
 			Consumers:       consumersCount,
 		})
 	}
-	
+
 	return stats, nil
 }

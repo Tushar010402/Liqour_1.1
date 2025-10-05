@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/gateway/handlers"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
@@ -10,6 +12,14 @@ import (
 
 // SetupRoutes configures all gateway routes
 func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gatewayHandlers *handlers.GatewayHandlers) {
+	// Root-level health check for Docker healthcheck
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "healthy",
+			"service": "gateway",
+		})
+	})
+
 	// Gateway management endpoints
 	gateway := router.Group("/gateway")
 	{
@@ -21,8 +31,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 	// Authentication service routes (no auth required for login/register)
 	authPublic := router.Group("/api/auth")
 	{
+		authPublic.POST("/check-user", gatewayHandlers.ProxyRequest("auth"))
 		authPublic.POST("/login", gatewayHandlers.ProxyRequest("auth"))
 		authPublic.POST("/register", gatewayHandlers.ProxyRequest("auth"))
+		authPublic.POST("/send-otp", gatewayHandlers.ProxyRequest("auth"))
+		authPublic.POST("/send-otp-registration", gatewayHandlers.ProxyRequest("auth"))
+		authPublic.POST("/verify-otp", gatewayHandlers.ProxyRequest("auth"))
 		authPublic.POST("/forgot-password", gatewayHandlers.ProxyRequest("auth"))
 		authPublic.POST("/reset-password", gatewayHandlers.ProxyRequest("auth"))
 		authPublic.POST("/verify-email", gatewayHandlers.ProxyRequest("auth"))
@@ -76,6 +90,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		// Sales summaries and reports
 		sales.GET("/summaries", gatewayHandlers.ProxyRequest("sales"))
 		sales.GET("/dashboard", gatewayHandlers.ProxyRequest("sales"))
+		sales.GET("/dashboard/summary", gatewayHandlers.ProxyRequest("sales"))
 		sales.GET("/uncollected", gatewayHandlers.ProxyRequest("sales"))
 
 		// OCR and image processing
@@ -115,6 +130,20 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		inventory.PUT("/brands/:id", gatewayHandlers.ProxyRequest("inventory"))
 		inventory.DELETE("/brands/:id", gatewayHandlers.ProxyRequest("inventory"))
 
+		// SaaS Brand Integration
+		inventory.GET("/brands/saas/available", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/brands/saas/tenant", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/brands/saas/select", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/brands/saas/customize", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/brands/saas/import-as-products", gatewayHandlers.ProxyRequest("inventory"))
+
+		// Legacy compatibility endpoints
+		inventory.GET("/brands/available", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/brands/my-brands", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/brands/create-product", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/brands/products", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/brands/sync-pricing", gatewayHandlers.ProxyRequest("inventory"))
+
 		// Brand pricing
 		inventory.GET("/brand-pricing", gatewayHandlers.ProxyRequest("inventory"))
 		inventory.POST("/brand-pricing", gatewayHandlers.ProxyRequest("inventory"))
@@ -123,10 +152,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		inventory.DELETE("/brand-pricing/:id", gatewayHandlers.ProxyRequest("inventory"))
 
 		// Stock management
-		inventory.GET("/stock", gatewayHandlers.ProxyRequest("inventory"))
-		inventory.POST("/stock/adjust", gatewayHandlers.ProxyRequest("inventory"))
-		inventory.GET("/stock/:id", gatewayHandlers.ProxyRequest("inventory"))
-		inventory.GET("/stock/history/:id", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/stocks", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/stocks/adjust", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/stocks/:id", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/stocks/movements", gatewayHandlers.ProxyRequest("inventory"))
 
 		// Stock purchases
 		inventory.GET("/purchases", gatewayHandlers.ProxyRequest("inventory"))
@@ -140,6 +169,27 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		inventory.GET("/transfers", gatewayHandlers.ProxyRequest("inventory"))
 		inventory.GET("/transfers/:id", gatewayHandlers.ProxyRequest("inventory"))
 		inventory.POST("/transfers/:id/approve", gatewayHandlers.ProxyRequest("inventory"))
+
+		// Product catalog endpoints
+		inventory.GET("/catalog/product-templates", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/catalog/product-templates", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/catalog/product-templates/:id", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.PUT("/catalog/product-templates/:id", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.DELETE("/catalog/product-templates/:id", gatewayHandlers.ProxyRequest("inventory"))
+
+		// Subcategories
+		inventory.GET("/catalog/subcategories", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/catalog/subcategories", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/catalog/subcategories/:id", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.PUT("/catalog/subcategories/:id", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.DELETE("/catalog/subcategories/:id", gatewayHandlers.ProxyRequest("inventory"))
+
+		// SaaS Brand Onboarding (new architecture)
+		inventory.GET("/saas-brands/available", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.POST("/saas-brands/onboard", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/saas-brands/onboarded", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.PUT("/saas-brands/onboarded/:id", gatewayHandlers.ProxyRequest("inventory"))
+		inventory.GET("/brands/custom", gatewayHandlers.ProxyRequest("inventory"))
 	}
 
 	// Finance service routes (protected)
@@ -239,8 +289,68 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		admin.POST("/permissions", gatewayHandlers.ProxyRequest("auth"))
 	}
 
-	// Catch-all for frontend SPA routing (handles all non-API routes)
-	router.NoRoute(gatewayHandlers.ProxyRequest("frontend"))
+	// SaaS Admin routes (super admin functionality)
+	saasAdmin := router.Group("/api/saas-admin")
+	saasAdmin.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	saasAdmin.Use(middleware.RoleMiddleware("saas_admin"))
+	{
+		// Tenant management
+		saasAdmin.GET("/tenants", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.POST("/tenants", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.GET("/tenants/:id", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.PUT("/tenants/:id", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.DELETE("/tenants/:id", gatewayHandlers.ProxyRequest("auth"))
+
+		// Global user management (across all tenants)
+		saasAdmin.GET("/all-users", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.GET("/all-shops", gatewayHandlers.ProxyRequest("auth"))
+
+		// System statistics
+		saasAdmin.GET("/stats", gatewayHandlers.ProxyRequest("auth"))
+
+		// Rate limit management
+		saasAdmin.GET("/rate-limits", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.POST("/rate-limits", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.GET("/rate-limits/stats", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.GET("/rate-limits/check/:name", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.POST("/rate-limits/reset/:name", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.GET("/rate-limits/:id", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.PUT("/rate-limits/:id", gatewayHandlers.ProxyRequest("auth"))
+		saasAdmin.DELETE("/rate-limits/:id", gatewayHandlers.ProxyRequest("auth"))
+	}
+
+	// Super Admin Brand Management (accessible to all authenticated tenants for viewing)
+	superAdmin := router.Group("/api/super-admin")
+	superAdmin.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	{
+		// Brand packages for tenant onboarding (read-only for tenants)
+		superAdmin.GET("/brands/packages", gatewayHandlers.ProxyRequest("saas"))
+	}
+
+	// SaaS service routes (for brand catalog access)
+	saas := router.Group("/api/saas")
+	saas.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	saas.Use(middleware.TenantMiddleware())
+	{
+		// Public brand catalog for tenants
+		saas.GET("/brands/public", gatewayHandlers.ProxyRequest("saas"))
+		saas.GET("/brands/categories", gatewayHandlers.ProxyRequest("saas"))
+		saas.GET("/brands/subcategories", gatewayHandlers.ProxyRequest("saas"))
+		saas.GET("/brands/:id/variants", gatewayHandlers.ProxyRequest("saas"))
+
+		// Brand selection and import for tenants
+		saas.POST("/brands/select", gatewayHandlers.ProxyRequest("saas"))
+		saas.POST("/brands/import-products", gatewayHandlers.ProxyRequest("saas"))
+
+		// Subscription and tenant management
+		saas.GET("/plans", gatewayHandlers.ProxyRequest("saas"))
+		saas.GET("/subscription", gatewayHandlers.ProxyRequest("saas"))
+	}
+
+	// Default 404 handler for non-API routes
+	router.NoRoute(func(c *gin.Context) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Endpoint not found"})
+	})
 }
 
 // SetupAPIRoutes sets up API-only routes (for API-only deployments)

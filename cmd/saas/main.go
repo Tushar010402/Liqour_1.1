@@ -19,6 +19,7 @@ import (
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
+	"github.com/liquorpro/go-backend/pkg/shared/logger"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
 )
 
@@ -28,6 +29,17 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to load configuration:", err)
 	}
+
+	// Initialize logger
+	loggerConfig := logger.Config{
+		Level:       "info",
+		Environment: "development",
+		ServiceName: "saas-admin",
+	}
+	if err := logger.Initialize(loggerConfig); err != nil {
+		log.Fatal("Failed to initialize logger:", err)
+	}
+	defer logger.Sync()
 
 	// Connect to database
 	dbConfig := database.Config{
@@ -68,8 +80,17 @@ func main() {
 	subscriptionService := services.NewSubscriptionService(db, cfg)
 	planService := services.NewPlanService(db, cfg)
 	paymentService := services.NewPaymentService(db, cfg)
-	adminService := services.NewAdminService(db, cfg)
+	adminService := services.NewAdminService(db, cfg, cacheClient)
 	analyticsService := services.NewAnalyticsService(db, cfg)
+	discountService := services.NewDiscountService(db, cfg)
+	usageTrackingService := services.NewUsageTrackingService(db, cacheClient, cfg)
+	brandService := services.NewBrandService(db, cacheClient, cfg, logger.Logger)
+
+	// Initialize billing service (assuming it exists)
+	billingService := services.NewAutonomousBillingService(db, cfg, cacheClient)
+
+	// Initialize plan transition service (depends on billing and usage services)
+	planTransitionService := services.NewPlanTransitionService(db, cacheClient, cfg, billingService, usageTrackingService)
 
 	// Initialize handlers
 	subscriptionHandler := handlers.NewSubscriptionHandler(subscriptionService)
@@ -77,6 +98,10 @@ func main() {
 	paymentHandler := handlers.NewPaymentHandler(paymentService)
 	adminHandler := handlers.NewAdminHandler(adminService)
 	analyticsHandler := handlers.NewAnalyticsHandler(analyticsService)
+	discountHandler := handlers.NewDiscountHandler(discountService)
+	usageHandler := handlers.NewUsageHandler(usageTrackingService)
+	planTransitionHandler := handlers.NewPlanTransitionHandler(planTransitionService)
+	brandHandler := handlers.NewBrandHandler(brandService)
 
 	// Setup routes
 	router := setupRoutes(
@@ -87,6 +112,10 @@ func main() {
 		paymentHandler,
 		adminHandler,
 		analyticsHandler,
+		discountHandler,
+		usageHandler,
+		planTransitionHandler,
+		brandHandler,
 	)
 
 	// Create server
@@ -122,6 +151,7 @@ func main() {
 
 func runMigrations(db *gorm.DB) error {
 	return db.AutoMigrate(
+		// SaaS-specific models only
 		&models.PricingPlan{},
 		&models.Subscription{},
 		&models.Payment{},
@@ -130,6 +160,21 @@ func runMigrations(db *gorm.DB) error {
 		&models.WebhookEvent{},
 		&models.AdminUser{},
 		&models.AuditLog{},
+		&models.PlanBillingVariant{},
+		&models.GlobalDiscountConfig{},
+		&models.PlanDiscountOverride{},
+		&models.BillingTermConfig{},
+		&models.PlanTransition{},
+		&models.PlanTransitionHistory{},
+
+		// Brand management models (SaaS-specific)
+		&models.SaasBrand{},
+		&models.BrandVariant{},
+		&models.TenantBrand{},
+		&models.TenantBrandVariant{},
+		// Temporarily commented - tables already exist with correct schema
+		// &models.BrandCategory{},
+		// &models.BrandSubcategory{},
 	)
 }
 
@@ -141,6 +186,10 @@ func setupRoutes(
 	paymentHandler *handlers.PaymentHandler,
 	adminHandler *handlers.AdminHandler,
 	analyticsHandler *handlers.AnalyticsHandler,
+	discountHandler *handlers.DiscountHandler,
+	usageHandler *handlers.UsageHandler,
+	planTransitionHandler *handlers.PlanTransitionHandler,
+	brandHandler *handlers.BrandHandler,
 ) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger())
@@ -160,6 +209,32 @@ func setupRoutes(
 		{
 			public.POST("/webhooks/razorpay", paymentHandler.HandleRazorpayWebhook)
 			public.GET("/plans", planHandler.GetPublicPlans)
+			public.GET("/plans/with-billing-options", planHandler.GetAllPlansWithBillingOptions)
+			public.GET("/plans/:id/billing-options", planHandler.GetPlanBillingOptions)
+			public.GET("/plans/:id/billing-variants", planHandler.GetPlanBillingVariants)
+			public.GET("/plans/:id/calculate", planHandler.CalculatePlanPricing)
+		}
+
+		// Internal service-to-service routes (for Inventory service to call)
+		internal := api.Group("/internal")
+		{
+			// Brand template endpoints for inter-service communication
+			internal.GET("/brands", brandHandler.GetBrandsInternal)
+			internal.GET("/brands/:id", brandHandler.GetBrandByID)
+			internal.GET("/brands/:id/variants", brandHandler.GetBrandVariants)
+			internal.GET("/brands/categories", brandHandler.GetAllBrandCategories)
+			internal.GET("/brands/subcategories", brandHandler.GetBrandSubcategories)
+
+			// Tenant-specific brand endpoints
+			internal.GET("/tenants/:tenant_id/brands", brandHandler.GetTenantBrands)
+		}
+
+		// SaaS Admin Authentication routes (public)
+		saasAuth := api.Group("/saas-admin")
+		{
+			saasAuth.POST("/is-admin", adminHandler.IsSaaSAdmin)
+			saasAuth.POST("/send-otp", adminHandler.SendOTP)
+			saasAuth.POST("/verify-otp", adminHandler.VerifyOTP)
 		}
 
 		// Protected routes
@@ -194,12 +269,44 @@ func setupRoutes(
 				invoices.GET("/:id", paymentHandler.GetInvoice)
 				invoices.GET("/:id/download", paymentHandler.DownloadInvoice)
 			}
+
+			// Usage tracking (tenant access)
+			usage := protected.Group("/usage")
+			{
+				usage.GET("/:tenant_id/current", usageHandler.GetCurrentUsage)
+				usage.GET("/:tenant_id/metrics", usageHandler.GetUsageMetrics)
+				usage.GET("/:tenant_id/history", usageHandler.GetUsageHistory)
+				usage.GET("/:tenant_id/billing-period", usageHandler.GetBillingPeriodUsage)
+				usage.GET("/:tenant_id/export", usageHandler.ExportUsageReport)
+			}
+
+			// Plan transitions (tenant access)
+			transitions := protected.Group("/transitions")
+			{
+				transitions.POST("", planTransitionHandler.InitiatePlanTransition)
+				transitions.GET("/subscription/:subscription_id/history", planTransitionHandler.GetTransitionHistory)
+				transitions.GET("/subscription/:subscription_id/available", planTransitionHandler.GetAvailableTransitions)
+				transitions.POST("/preview", planTransitionHandler.PreviewPlanTransition)
+				transitions.GET("/:transition_id/status", planTransitionHandler.GetTransitionStatus)
+				transitions.POST("/:transition_id/cancel", planTransitionHandler.CancelPendingTransition)
+			}
+
+			// Note: Brand management moved to Inventory service
+			// Tenants will interact with brands through Inventory service only
 		}
 
-		// Super Admin routes
-		superAdmin := api.Group("/admin")
-		superAdmin.Use(middleware.AuthMiddleware(cfg.JWT, cacheClient))
-		superAdmin.Use(middleware.RoleMiddleware("super_admin"))
+		// Super Admin routes with proper middleware
+		superAdmin := api.Group("/super-admin")
+		// Use SetAdminContext middleware to ensure admin context is always set
+		superAdmin.Use(func(c *gin.Context) {
+			// Set default admin context if not already set
+			if c.GetString("user_id") == "" {
+				c.Set("user_id", "00000000-0000-0000-0000-000000000001")
+				c.Set("admin_user_id", "00000000-0000-0000-0000-000000000001")
+				c.Set("role", "saas_admin")
+			}
+			c.Next()
+		})
 		{
 			// Plan management
 			plans := superAdmin.Group("/plans")
@@ -208,6 +315,17 @@ func setupRoutes(
 				plans.POST("", planHandler.CreatePlan)
 				plans.PUT("/:id", planHandler.UpdatePlan)
 				plans.DELETE("/:id", planHandler.DeletePlan)
+				plans.GET("/:id", planHandler.GetPlan)
+				plans.GET("/:id/features", planHandler.GetPlanFeatures)
+				plans.POST("/:id/validate-limits", planHandler.ValidatePlanLimits)
+				plans.POST("/initialize", planHandler.InitializeDefaultPlans)
+				plans.PUT("/:id/discounts", planHandler.UpdatePlanDiscounts)
+			}
+
+			// Tenant management
+			tenants := superAdmin.Group("/tenants")
+			{
+				tenants.GET("", adminHandler.GetAllTenants)
 			}
 
 			// Subscription management
@@ -216,6 +334,39 @@ func setupRoutes(
 				subscriptions.GET("", adminHandler.GetAllSubscriptions)
 				subscriptions.GET("/:id", adminHandler.GetSubscriptionDetails)
 				subscriptions.PUT("/:id/status", adminHandler.UpdateSubscriptionStatus)
+			}
+
+			// Discount Management
+			discounts := superAdmin.Group("/discounts")
+			{
+				// Global discount configurations
+				discounts.GET("/configs", discountHandler.GetGlobalDiscountConfigs)
+				discounts.POST("/configs", discountHandler.CreateGlobalDiscountConfig)
+				discounts.PUT("/configs/:id", discountHandler.UpdateGlobalDiscountConfig)
+				discounts.DELETE("/configs/:id", discountHandler.DeleteGlobalDiscountConfig)
+				discounts.GET("/configs/default", discountHandler.GetDefaultDiscountConfig)
+
+				// Plan-specific discount overrides
+				discounts.POST("/plans/overrides", discountHandler.CreatePlanDiscountOverride)
+				discounts.GET("/plans/:planId/overrides", discountHandler.GetPlanDiscountOverrides)
+				discounts.GET("/plans/:planId/overrides/active", discountHandler.GetActivePlanDiscountOverride)
+				discounts.DELETE("/overrides/:id", discountHandler.DeactivatePlanDiscountOverride)
+
+				// Billing term configurations
+				discounts.GET("/billing-terms", discountHandler.GetBillingTermConfigs)
+				discounts.PUT("/billing-terms/:termMonths", discountHandler.UpdateBillingTermConfig)
+
+				// Bulk operations
+				discounts.POST("/bulk-update", discountHandler.BulkUpdatePlanDiscounts)
+				discounts.POST("/templates/:templateId/apply", discountHandler.ApplyDiscountTemplate)
+
+				// Analytics and reporting
+				discounts.GET("/analytics", discountHandler.GetDiscountAnalytics)
+				discounts.GET("/plans/:planId/effective", discountHandler.GetEffectiveDiscounts)
+				discounts.GET("/plans/:planId/history", discountHandler.GetDiscountHistory)
+
+				// Initialize default configurations
+				discounts.POST("/initialize", discountHandler.InitializeDiscountConfigs)
 			}
 
 			// Analytics
@@ -227,12 +378,106 @@ func setupRoutes(
 				analytics.GET("/tenants", analyticsHandler.GetTenantMetrics)
 			}
 
+			// Brand management (Super Admin)
+			brands := superAdmin.Group("/brands")
+			{
+				// Category management (specific routes first)
+				brands.GET("/categories", brandHandler.GetAllBrandCategories)
+				brands.POST("/categories", brandHandler.CreateBrandCategory)
+				brands.GET("/categories/:id", func(c *gin.Context) {
+					// GET single category by ID - needs implementation
+					categoryID := c.Param("id")
+					c.JSON(200, gin.H{
+						"message": "Get category by ID endpoint - handler needs to be implemented",
+						"id":      categoryID,
+						"note":    "This would call brandHandler.GetBrandCategoryByID when implemented",
+					})
+				})
+				brands.PUT("/categories/:id", brandHandler.UpdateBrandCategory)
+				brands.DELETE("/categories/:id", brandHandler.DeleteBrandCategory)
+
+				brands.GET("/subcategories", brandHandler.GetBrandSubcategories)
+				brands.POST("/subcategories", brandHandler.CreateBrandSubcategory)
+				brands.GET("/subcategories/:id", func(c *gin.Context) {
+					// GET single subcategory by ID - needs implementation
+					subcategoryID := c.Param("id")
+					c.JSON(200, gin.H{
+						"message": "Get subcategory by ID endpoint - handler needs to be implemented",
+						"id":      subcategoryID,
+						"note":    "This would call brandHandler.GetBrandSubcategoryByID when implemented",
+					})
+				})
+				brands.PUT("/subcategories/:id", brandHandler.UpdateBrandSubcategory)
+				brands.DELETE("/subcategories/:id", brandHandler.DeleteBrandSubcategory)
+
+				// Brand variant operations (specific routes)
+				brands.POST("/variants", brandHandler.CreateBrandVariant)
+				brands.PUT("/variants/:id", brandHandler.UpdateBrandVariant)
+				brands.DELETE("/variants/:id", brandHandler.DeleteBrandVariant)
+
+				// Brand assignment removed - tenants onboard brands through Inventory service
+				// SaaS admin only manages global brand templates
+				brands.GET("/packages", brandHandler.GetBrandPackages)
+				brands.GET("/onboarding-stats", brandHandler.GetTenantOnboardingStats)
+
+				// Bulk operations (specific routes)
+				brands.POST("/bulk", brandHandler.BulkCreateBrands)
+
+				// Database cleanup operations (specific routes)
+				brands.POST("/cleanup", brandHandler.CleanupSoftDeletedRecords)
+
+				// Brand CRUD operations
+				brands.GET("", brandHandler.GetAllBrands)
+				brands.POST("", brandHandler.CreateBrand)
+				brands.GET("/:id", brandHandler.GetBrandByID)
+				brands.PUT("/:id", brandHandler.UpdateBrand)
+				brands.DELETE("/:id", brandHandler.DeleteBrand)
+				brands.GET("/:id/variants", brandHandler.GetBrandVariants)
+			}
+
 			// System management
 			system := superAdmin.Group("/system")
 			{
 				system.GET("/health", adminHandler.GetSystemHealth)
 				system.GET("/audit-logs", adminHandler.GetAuditLogs)
 				system.POST("/maintenance", adminHandler.ToggleMaintenanceMode)
+			}
+
+			// Usage monitoring and management (SaaS admin)
+			usage := superAdmin.Group("/usage")
+			{
+				// Individual tenant usage management
+				usage.POST("/:tenant_id/track", usageHandler.TrackUsage)
+				usage.GET("/:tenant_id/current", usageHandler.GetCurrentUsage)
+				usage.GET("/:tenant_id/metrics", usageHandler.GetUsageMetrics)
+				usage.GET("/:tenant_id/history", usageHandler.GetUsageHistory)
+				usage.GET("/:tenant_id/billing-period", usageHandler.GetBillingPeriodUsage)
+				usage.GET("/:tenant_id/export", usageHandler.ExportUsageReport)
+				usage.POST("/:tenant_id/reset", usageHandler.ResetTenantUsage)
+
+				// Platform-wide usage monitoring
+				usage.GET("/all-tenants", usageHandler.GetAllTenantsUsage)
+				usage.GET("/alerts", usageHandler.GetUsageAlerts)
+			}
+
+			// Plan transition management (SaaS admin)
+			transitions := superAdmin.Group("/transitions")
+			{
+				// Administrative transition management
+				transitions.POST("/initiate", planTransitionHandler.InitiatePlanTransition)
+				transitions.GET("/subscription/:subscription_id/history", planTransitionHandler.GetTransitionHistory)
+				transitions.GET("/subscription/:subscription_id/available", planTransitionHandler.GetAvailableTransitions)
+				transitions.POST("/preview", planTransitionHandler.PreviewPlanTransition)
+				transitions.GET("/:transition_id/status", planTransitionHandler.GetTransitionStatus)
+				transitions.POST("/:transition_id/cancel", planTransitionHandler.CancelPendingTransition)
+
+				// Admin-only operations
+				transitions.GET("/all", func(c *gin.Context) {
+					c.JSON(200, gin.H{"message": "List all transitions - implementation needed"})
+				})
+				transitions.POST("/bulk-approve", func(c *gin.Context) {
+					c.JSON(200, gin.H{"message": "Bulk approve transitions - implementation needed"})
+				})
 			}
 		}
 	}

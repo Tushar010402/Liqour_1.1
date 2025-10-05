@@ -1,0 +1,68 @@
+LiquorPro Backend Test Report
+==============================
+Date: Mon Oct  6 01:14:07 IST 2025
+Success Rate: 65%
+
+Test Results: 34/52 passed
+
+Service Status:
+- Auth (Port 8091): Operational
+- Sales (Port 8092): Operational
+- Inventory (Port 8093): Operational
+- Finance (Port 8094): Operational
+- SaaS (Port 8095): Operational
+- Gateway (Port 8090): Operational
+
+API Test Results:
+  ✓ Auth: Health Check
+  ✓ Auth: Send OTP
+  ✓ Auth: OTP Verification & Login
+  ✓ Auth: Get Profile
+  ✓ Auth: Refresh Token
+  ✓ Auth: Check User
+  ✓ Auth: List Tenants
+  ✓ Auth: List All Users
+  ✓ Auth: List All Shops
+  ✓ Auth: System Stats
+  ✓ Inventory: Health Check
+  ✓ Inventory: Create Category
+  ✗ Inventory: Create Product - Expected: 200,201, Got: 400
+  ✓ Inventory: List Products
+  ✓ Inventory: Get Product
+  ✓ Inventory: List Categories
+  ✗ Inventory: List Stocks - Expected: 200, Got: 500
+  ✓ Inventory: Stock Adjustment
+  ✓ Sales: Health Check
+  ✗ Sales: Create Daily Record - Expected: 200,201,403, Got: 404
+  ✗ Sales: Create Sale - Expected: 200,201,403, Got: 404
+  ✗ Sales: List Sales - Expected: 200, Got: 404
+  ✗ Sales: List Daily Records - Expected: 200, Got: 404
+  ✗ Sales: Dashboard Summary - Expected: 200, Got: 404
+  ✗ Sales: Pending Sales - Expected: 200,403, Got: 404
+  ✗ Sales: Pending Returns - Expected: 200,403, Got: 404
+  ✓ Finance: Health Check
+  ✗ Finance: Create Vendor - Expected: 200,201,403, Got: 404
+  ✗ Finance: Create Expense - Expected: 200,201,403, Got: 404
+  ✗ Finance: List Vendors - Expected: 200,500, Got: 404
+  ✗ Finance: List Expenses - Expected: 200,500, Got: 404
+  ✗ Finance: Money Collection - Expected: 200,201,403, Got: 404
+  ✗ Finance: List Collections - Expected: 200,403, Got: 404
+  ✓ SaaS: Health Check
+  ✓ SaaS: Admin Check
+  ✗ SaaS: Send OTP - Expected: 200, Got: 404
+  ✗ SaaS: Admin Login Failed
+  ✓ SaaS: List Subscriptions
+  ✓ SaaS: System Health
+  ✓ SaaS: Audit Logs
+  ✓ SaaS: Revenue Analytics
+  ✓ SaaS: Subscription Analytics
+  ✓ SaaS: Plans
+  ✓ Gateway: Health Check
+  ✓ Gateway: Route to Auth
+  ✓ Gateway: Route to Sales
+  ✓ Gateway: Route to Inventory
+  ✓ Gateway: Route to Finance
+  ✓ Integration: Stock-Sales working
+  ✗ Security: Tenant Isolation - Expected: 400,401,403, Got: 404
+  ✓ Performance: Excellent (23ms)
+  ✓ Performance: Concurrent handling excellent

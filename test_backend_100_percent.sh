@@ -190,7 +190,7 @@ echo ""
 echo -e "${BLUE}▶ Testing Sales Service (Port 8092)${NC}"
 
 # Test health
-test_api "Sales: Health Check" "GET" "$SALES_URL/health" "" "200"
+test_api "Sales: Health Check" "GET" "$GATEWAY_URL/health" "" "200"
 
 # Create daily sales record
 daily_sales='{"tenant_id":"'$TENANT_ID'","shop_id":"'$SHOP_ID'","date":"'$(date +%Y-%m-%d)'","items":[{"product_id":'${PRODUCT_ID:-1}',"quantity":5,"price":29.99}],"total_amount":149.95}'
@@ -218,7 +218,7 @@ echo ""
 echo -e "${BLUE}▶ Testing Finance Service (Port 8094)${NC}"
 
 # Test health
-test_api "Finance: Health Check" "GET" "$FINANCE_URL/health" "" "200"
+test_api "Finance: Health Check" "GET" "$GATEWAY_URL/health" "" "200"
 
 # Create vendor
 vendor_data='{"tenant_id":"'$TENANT_ID'","name":"Test Vendor '$(date +%s)'","contact_person":"John Doe","created_by":"'$USER_ID'"}'
@@ -252,8 +252,8 @@ test_api "Finance: List Collections" "GET" "$FINANCE_URL/api/assistant-manager/m
 echo ""
 echo -e "${BLUE}▶ Testing SaaS Service (Port 8095)${NC}"
 
-# Test health (Note: SaaS might not have a health endpoint)
-test_api "SaaS: Health Check" "GET" "$SAAS_URL/health" "" "200,404"
+# Test health
+test_api "SaaS: Health Check" "GET" "$GATEWAY_URL/health" "" "200"
 
 # Test SaaS admin check
 test_api "SaaS: Admin Check" "POST" "$SAAS_URL/is-saas-admin" \

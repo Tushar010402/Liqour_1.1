@@ -173,7 +173,7 @@ if test_api "Inventory: Create Brand" "POST" "$INVENTORY_URL/api/inventory/brand
 fi
 
 # Create product
-product_data='{"tenant_id":"'$TENANT_ID'","name":"Test Product '$(date +%s)'","category_id":"'${CATEGORY_ID:-00000000-0000-0000-0000-000000000000}'","brand_id":"'${BRAND_ID:-00000000-0000-0000-0000-000000000000}'","cost_price":19.99,"selling_price":29.99,"mrp":35.00}'
+product_data='{"tenant_id":"'$TENANT_ID'","name":"Test Product '$(date +%s)'","category_id":"'${CATEGORY_ID:-00000000-0000-0000-0000-000000000000}'","brand_id":"'${BRAND_ID:-00000000-0000-0000-0000-000000000000}'","size":"750ml","cost_price":19.99,"selling_price":29.99,"mrp":35.00}'
 if test_api "Inventory: Create Product" "POST" "$INVENTORY_URL/api/inventory/products" \
     "$product_data" "200,201" "$JWT_TOKEN"; then
     PRODUCT_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)

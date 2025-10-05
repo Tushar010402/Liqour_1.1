@@ -85,6 +85,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 
 		// Pending sales and returns
 		sales.GET("/pending", gatewayHandlers.ProxyRequest("sales"))
+		sales.GET("/pending/sales", gatewayHandlers.ProxyRequest("sales"))
+		sales.GET("/pending/returns", gatewayHandlers.ProxyRequest("sales"))
 		sales.GET("/returns/pending", gatewayHandlers.ProxyRequest("sales"))
 
 		// Sales summaries and reports

@@ -165,8 +165,15 @@ if test_api "Inventory: Create Category" "POST" "$INVENTORY_URL/api/inventory/ca
     CATEGORY_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
 fi
 
+# Create brand (required for product)
+brand_data='{"tenant_id":"'$TENANT_ID'","name":"Test Brand '$(date +%s)'","manufacturer":"Test Manufacturer","origin_country":"India"}'
+if test_api "Inventory: Create Brand" "POST" "$INVENTORY_URL/api/inventory/brands" \
+    "$brand_data" "200,201" "$JWT_TOKEN"; then
+    BRAND_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+fi
+
 # Create product
-product_data='{"tenant_id":"'$TENANT_ID'","name":"Test Product '$(date +%s)'","category_id":"'${CATEGORY_ID:-}'","price":29.99,"cost":19.99}'
+product_data='{"tenant_id":"'$TENANT_ID'","name":"Test Product '$(date +%s)'","category_id":"'${CATEGORY_ID:-00000000-0000-0000-0000-000000000000}'","brand_id":"'${BRAND_ID:-00000000-0000-0000-0000-000000000000}'","cost_price":19.99,"selling_price":29.99,"mrp":35.00}'
 if test_api "Inventory: Create Product" "POST" "$INVENTORY_URL/api/inventory/products" \
     "$product_data" "200,201" "$JWT_TOKEN"; then
     PRODUCT_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
@@ -194,22 +201,22 @@ test_api "Sales: Health Check" "GET" "$GATEWAY_URL/health" "" "200"
 
 # Create daily sales record
 daily_sales='{"tenant_id":"'$TENANT_ID'","shop_id":"'$SHOP_ID'","date":"'$(date +%Y-%m-%d)'","items":[{"product_id":'${PRODUCT_ID:-1}',"quantity":5,"price":29.99}],"total_amount":149.95}'
-test_api "Sales: Create Daily Record" "POST" "$SALES_URL/api/daily-records" \
+test_api "Sales: Create Daily Record" "POST" "$SALES_URL/api/sales/daily-records" \
     "$daily_sales" "200,201,403" "$JWT_TOKEN"
 
 # Create individual sale
 sale_data='{"tenant_id":"'$TENANT_ID'","shop_id":"'$SHOP_ID'","items":[{"product_id":'${PRODUCT_ID:-1}',"quantity":2,"price":29.99}],"payment_method":"cash","total":59.98}'
-if test_api "Sales: Create Sale" "POST" "$SALES_URL/api/sales" \
+if test_api "Sales: Create Sale" "POST" "$SALES_URL/api/sales/sales" \
     "$sale_data" "200,201,403" "$JWT_TOKEN"; then
     SALE_ID=$(cat /tmp/last_response.json | grep -o '"id":[0-9]*' | cut -d':' -f2)
 fi
 
 # Test sales endpoints
-test_api "Sales: List Sales" "GET" "$SALES_URL/api/sales" "" "200" "$JWT_TOKEN"
-test_api "Sales: List Daily Records" "GET" "$SALES_URL/api/daily-records" "" "200" "$JWT_TOKEN"
-test_api "Sales: Dashboard Summary" "GET" "$SALES_URL/api/dashboard/summary" "" "200" "$JWT_TOKEN"
-test_api "Sales: Pending Sales" "GET" "$SALES_URL/api/pending/sales" "" "200,403" "$JWT_TOKEN"
-test_api "Sales: Pending Returns" "GET" "$SALES_URL/api/pending/returns" "" "200,403" "$JWT_TOKEN"
+test_api "Sales: List Sales" "GET" "$SALES_URL/api/sales/sales" "" "200" "$JWT_TOKEN"
+test_api "Sales: List Daily Records" "GET" "$SALES_URL/api/sales/daily-records" "" "200" "$JWT_TOKEN"
+test_api "Sales: Dashboard Summary" "GET" "$SALES_URL/api/sales/dashboard/summary" "" "200" "$JWT_TOKEN"
+test_api "Sales: Pending Sales" "GET" "$SALES_URL/api/sales/pending" "" "200,403" "$JWT_TOKEN"
+test_api "Sales: Pending Returns" "GET" "$SALES_URL/api/sales/returns/pending" "" "200,403" "$JWT_TOKEN"
 
 # ================================================
 # 4. FINANCE SERVICE TESTING
@@ -222,28 +229,28 @@ test_api "Finance: Health Check" "GET" "$GATEWAY_URL/health" "" "200"
 
 # Create vendor
 vendor_data='{"tenant_id":"'$TENANT_ID'","name":"Test Vendor '$(date +%s)'","contact_person":"John Doe","created_by":"'$USER_ID'"}'
-if test_api "Finance: Create Vendor" "POST" "$FINANCE_URL/api/vendors" \
+if test_api "Finance: Create Vendor" "POST" "$FINANCE_URL/api/finance/vendors" \
     "$vendor_data" "200,201,403" "$JWT_TOKEN"; then
     VENDOR_ID=$(cat /tmp/last_response.json | grep -o '"id":[0-9]*' | cut -d':' -f2)
 fi
 
 # Create expense
 expense_data='{"tenant_id":"'$TENANT_ID'","vendor_id":'${VENDOR_ID:-1}',"amount":500.00,"category":"supplies","description":"Test expense"}'
-if test_api "Finance: Create Expense" "POST" "$FINANCE_URL/api/expenses" \
+if test_api "Finance: Create Expense" "POST" "$FINANCE_URL/api/finance/expenses" \
     "$expense_data" "200,201,403" "$JWT_TOKEN"; then
     EXPENSE_ID=$(cat /tmp/last_response.json | grep -o '"id":[0-9]*' | cut -d':' -f2)
 fi
 
 # Test finance endpoints
-test_api "Finance: List Vendors" "GET" "$FINANCE_URL/api/vendors" "" "200,500" "$JWT_TOKEN"
-test_api "Finance: List Expenses" "GET" "$FINANCE_URL/api/expenses" "" "200,500" "$JWT_TOKEN"
+test_api "Finance: List Vendors" "GET" "$FINANCE_URL/api/finance/vendors" "" "200,500" "$JWT_TOKEN"
+test_api "Finance: List Expenses" "GET" "$FINANCE_URL/api/finance/expenses" "" "200,500" "$JWT_TOKEN"
 
 # Money collection (15-minute approval deadline)
 collection_data='{"tenant_id":"'$TENANT_ID'","shop_id":"'$SHOP_ID'","amount":1000.00,"collected_by":"Test Manager"}'
-test_api "Finance: Money Collection" "POST" "$FINANCE_URL/api/assistant-manager/money-collections" \
+test_api "Finance: Money Collection" "POST" "$FINANCE_URL/api/finance/money-collection" \
     "$collection_data" "200,201,403" "$JWT_TOKEN"
 
-test_api "Finance: List Collections" "GET" "$FINANCE_URL/api/assistant-manager/money-collections" \
+test_api "Finance: List Collections" "GET" "$FINANCE_URL/api/finance/money-collection" \
     "" "200,403" "$JWT_TOKEN"
 
 # ================================================
@@ -256,7 +263,7 @@ echo -e "${BLUE}▶ Testing SaaS Service (Port 8095)${NC}"
 test_api "SaaS: Health Check" "GET" "$GATEWAY_URL/health" "" "200"
 
 # Test SaaS admin check
-test_api "SaaS: Admin Check" "POST" "$SAAS_URL/is-saas-admin" \
+test_api "SaaS: Admin Check" "POST" "$SAAS_URL/api/saas-admin/is-admin" \
     '{"mobile":"+918630668488"}' "200,404"
 
 # Send OTP for SaaS admin
@@ -281,10 +288,10 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 
-# Test SaaS admin endpoints
-test_api "SaaS: List Subscriptions" "GET" "$SAAS_URL/admin/subscriptions" "" "200,404,501" "$SAAS_TOKEN"
-test_api "SaaS: System Health" "GET" "$SAAS_URL/admin/system-health" "" "200,404,501" "$SAAS_TOKEN"
-test_api "SaaS: Audit Logs" "GET" "$SAAS_URL/admin/audit-logs" "" "200,404,501" "$SAAS_TOKEN"
+# Test SaaS super-admin endpoints
+test_api "SaaS: List Subscriptions" "GET" "$SAAS_URL/api/super-admin/subscriptions" "" "200,404,501" "$SAAS_TOKEN"
+test_api "SaaS: System Health" "GET" "$GATEWAY_URL/health" "" "200,404,501" "$SAAS_TOKEN"
+test_api "SaaS: Audit Logs" "GET" "$SAAS_URL/api/super-admin/analytics/audit-logs" "" "200,404,501" "$SAAS_TOKEN"
 
 # Test analytics endpoints
 test_api "SaaS: Revenue Analytics" "GET" "$SAAS_URL/api/super-admin/analytics/revenue?period=monthly" \

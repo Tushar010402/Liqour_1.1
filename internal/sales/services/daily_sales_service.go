@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -103,18 +104,19 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 		return nil, errors.New("total payment amounts do not match total sales amount")
 	}
 
-	// Check if record already exists for this date and shop
-	var existingRecord models.DailySalesRecord
-	if err := s.db.Where("record_date = ? AND shop_id = ? AND tenant_id = ?",
-		utils.StartOfDay(req.RecordDate), req.ShopID, tenantID).First(&existingRecord).Error; err == nil {
-		return nil, errors.New("daily sales record already exists for this date and shop")
-	}
-
-	// Verify shop exists and belongs to tenant
+	// Verify shop exists and belongs to tenant FIRST (before checking duplicates)
 	var shop models.Shop
 	if err := s.db.Where("id = ? AND tenant_id = ?", req.ShopID, tenantID).First(&shop).Error; err != nil {
-		return nil, errors.New("shop not found or doesn't belong to this tenant")
+		log.Printf("❌ [DailySales] Shop not found: shop_id=%s, tenant_id=%s, error=%v", req.ShopID, tenantID, err)
+		return nil, fmt.Errorf("shop not found or doesn't belong to this tenant (shop_id: %s)", req.ShopID)
 	}
+	log.Printf("✅ [DailySales] Shop verified: %s (ID: %s)", shop.Name, shop.ID)
+
+	// Allow multiple daily sales records for the same date and shop
+	// This enables corrections, adjustments, and multiple entries per day
+	checkDate := utils.StartOfDay(req.RecordDate)
+	log.Printf("📅 [DailySales] Processing record for date=%v, shop_id=%s, tenant_id=%s", checkDate, req.ShopID, tenantID)
+	log.Printf("✅ [DailySales] Multiple entries allowed for same date/shop - proceeding with creation")
 
 	// Verify salesman if provided
 	if req.SalesmanID != nil {
@@ -179,6 +181,50 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 
 			if err := tx.Create(&item).Error; err != nil {
 				return fmt.Errorf("failed to create daily sales item: %w", err)
+			}
+
+			// ✅ DEDUCT STOCK - Critical business logic
+			var stock models.Stock
+			err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+				req.ShopID, itemReq.ProductID, tenantID).First(&stock).Error
+
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return fmt.Errorf("stock not found for product %s in this shop", product.Name)
+				}
+				return fmt.Errorf("failed to get stock for product %s: %w", product.Name, err)
+			}
+
+			// Check if sufficient stock available
+			if stock.Quantity < itemReq.Quantity {
+				return fmt.Errorf("insufficient stock for product %s: available %d, requested %d",
+					product.Name, stock.Quantity, itemReq.Quantity)
+			}
+
+			// Deduct stock quantity
+			newQuantity := stock.Quantity - itemReq.Quantity
+			if err := tx.Model(&stock).Update("quantity", newQuantity).Error; err != nil {
+				return fmt.Errorf("failed to update stock for product %s: %w", product.Name, err)
+			}
+
+			// Create stock history for audit trail
+			stockHistory := models.StockHistory{
+				TenantModel:      models.TenantModel{TenantID: &tenantID},
+				StockID:          stock.ID,
+				MovementType:     "daily_sale",
+				Quantity:         -itemReq.Quantity,
+				PreviousQuantity: stock.Quantity,
+				NewQuantity:      newQuantity,
+				UnitCost:         itemReq.UnitPrice,
+				TotalCost:        itemReq.TotalAmount,
+				Reference:        fmt.Sprintf("Daily Sales Record %s", record.ID),
+				ReferenceID:      &record.ID,
+				CreatedByID:      createdByID,
+				Notes:            fmt.Sprintf("Daily sales entry for %s", product.Name),
+			}
+
+			if err := tx.Create(&stockHistory).Error; err != nil {
+				fmt.Printf("Warning: Failed to create stock history: %v\n", err)
 			}
 
 			totalItemsAmount += itemReq.TotalAmount

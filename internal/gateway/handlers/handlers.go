@@ -158,14 +158,29 @@ func (h *GatewayHandlers) ServiceDiscovery(c *gin.Context) {
 func (h *GatewayHandlers) transformPath(path, serviceName string) string {
 	switch strings.ToLower(serviceName) {
 	case "sales":
+		// Sales service uses SetupProtectedRoutes which registers routes at root level
+		// Transform /api/sales/* to /* for sales service
 		if strings.HasPrefix(path, "/api/sales/") {
-			return strings.Replace(path, "/api/sales/", "/api/", 1)
+			return strings.Replace(path, "/api/sales/", "/", 1)
 		}
 	case "inventory":
-		// Keep saas-brands paths intact, strip prefix for others
+		// Keep saas-brands paths intact
 		if strings.HasPrefix(path, "/api/inventory/saas-brands/") {
 			return path // Keep full path for saas-brands
 		}
+		// Keep custom brand paths intact
+		if strings.HasPrefix(path, "/api/inventory/brands/custom") ||
+			strings.HasPrefix(path, "/api/inventory/brands/with-variants") {
+			return path // Keep full path for custom brand endpoints
+		}
+		// Keep brand edit proxy paths intact (for EditBrandVariantScreen)
+		if strings.HasPrefix(path, "/api/inventory/brand-categories") ||
+			strings.HasPrefix(path, "/api/inventory/brand-subcategories") ||
+			strings.HasPrefix(path, "/api/inventory/category-sizes") {
+			return path // Keep full path for brand edit endpoints
+		}
+		// Transform /api/inventory/* to /* for inventory service
+		// Inventory service uses SetupProtectedRoutes which registers at root level
 		if strings.HasPrefix(path, "/api/inventory/") {
 			return strings.Replace(path, "/api/inventory/", "/", 1)
 		}

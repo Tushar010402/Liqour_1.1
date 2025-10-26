@@ -10,7 +10,8 @@ RUN apk add --no-cache git ca-certificates
 # Copy go mod files
 COPY go.mod go.sum ./
 
-# Download dependencies
+# Download dependencies (allow Go to auto-download required toolchain)
+ENV GOTOOLCHAIN=auto
 RUN go mod download
 
 # Copy source code

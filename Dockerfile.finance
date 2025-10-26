@@ -1,6 +1,9 @@
 # Multi-stage build for Finance Service
 FROM golang:1.23-alpine AS builder
 
+# Allow Go to automatically download and use newer toolchain versions
+ENV GOTOOLCHAIN=auto
+
 # Set working directory
 WORKDIR /app
 

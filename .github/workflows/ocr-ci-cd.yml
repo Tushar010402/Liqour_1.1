@@ -1,0 +1,319 @@
+name: OCR System CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'internal/sales/**'
+      - 'liquor_pro_app/lib/features/sales/**'
+      - '.github/workflows/ocr-ci-cd.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'internal/sales/**'
+      - 'liquor_pro_app/lib/features/sales/**'
+
+env:
+  GO_VERSION: '1.21'
+  FLUTTER_VERSION: '3.16.0'
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ocr-service
+
+jobs:
+  # Backend Tests
+  backend-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: liquorpro
+          POSTGRES_PASSWORD: liquorpro_password
+          POSTGRES_DB: liquorpro_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run OCR tests
+      run: |
+        go test -v -race -coverprofile=coverage.out ./internal/sales/services/...
+        go tool cover -html=coverage.out -o coverage.html
+      env:
+        DATABASE_URL: postgres://liquorpro:liquorpro_password@localhost:5432/liquorpro_test?sslmode=disable
+        REDIS_URL: redis://localhost:6379
+
+    - name: Upload coverage
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report
+        path: coverage.html
+
+    - name: Check test coverage
+      run: |
+        coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+        echo "Test coverage: $coverage%"
+        if (( $(echo "$coverage < 70" | bc -l) )); then
+          echo "Test coverage is below 70%"
+          exit 1
+        fi
+
+  # Flutter Tests
+  flutter-test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        cd liquor_pro_app
+        flutter pub get
+
+    - name: Run Flutter tests
+      run: |
+        cd liquor_pro_app
+        flutter test --coverage
+
+    - name: Generate coverage report
+      run: |
+        cd liquor_pro_app
+        flutter pub global activate coverage
+        flutter pub global run coverage:format_coverage \
+          --lcov \
+          --in=coverage \
+          --out=coverage/lcov.info \
+          --packages=.dart_tool/package_config.json
+
+    - name: Upload Flutter coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./liquor_pro_app/coverage/lcov.info
+        flags: flutter
+
+  # Security Scan
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Run Trivy security scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run gosec security scan
+      uses: securego/gosec@master
+      with:
+        args: './internal/sales/...'
+
+  # Linting
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run Go linter
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+        args: --timeout=5m ./internal/sales/...
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+
+    - name: Run Flutter analyzer
+      run: |
+        cd liquor_pro_app
+        flutter analyze
+
+  # Build Docker Image
+  build-docker:
+    needs: [backend-test, security-scan, lint]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.DOCKER_REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: Dockerfile.sales
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          VCS_REF=${{ github.sha }}
+
+  # Performance Test
+  performance-test:
+    needs: [backend-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run performance benchmarks
+      run: |
+        go test -bench=. -benchmem -benchtime=10s ./internal/sales/services/... | tee benchmark.txt
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: benchmark.txt
+
+    - name: Comment PR with benchmark results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const benchmarkResults = fs.readFileSync('benchmark.txt', 'utf8');
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `### Performance Benchmark Results\n\`\`\`\n${benchmarkResults}\n\`\`\``
+          });
+
+  # Deploy to Staging
+  deploy-staging:
+    needs: [build-docker, flutter-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Deploy to staging
+      run: |
+        echo "Deploying to staging environment..."
+        # Add actual deployment commands here
+        # kubectl apply -f k8s/staging/
+        # or use Helm, ArgoCD, etc.
+
+  # Deploy to Production
+  deploy-production:
+    needs: [build-docker, flutter-test, performance-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Deploy to production
+      run: |
+        echo "Deploying to production environment..."
+        # Add actual deployment commands here
+        # kubectl apply -f k8s/production/
+        # or use Helm, ArgoCD, etc.
+
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests..."
+        # Add smoke test commands here
+
+    - name: Notify deployment
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const status = '${{ job.status }}';
+          const emoji = status === 'success' ? '✅' : '❌';
+          const message = `${emoji} Production deployment ${status}`;
+
+          // Add notification logic here (Slack, Discord, etc.)
+          console.log(message);

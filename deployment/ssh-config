@@ -1,0 +1,39 @@
+# SSH Configuration for LiquorPro Production Server
+# Copy this to ~/.ssh/config for easy access
+#
+# Usage: ssh liquorpro-prod
+
+Host liquorpro-prod
+    HostName 72.60.96.174
+    Port 2222
+    User deploy
+    IdentityFile ~/.ssh/liquorpro_prod_rsa
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    Compression yes
+    ForwardAgent no
+
+    # Security settings
+    StrictHostKeyChecking yes
+    PasswordAuthentication no
+    PubkeyAuthentication yes
+
+    # Connection multiplexing for faster subsequent connections
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
+
+# Alternative root access (emergency only - use deploy user instead)
+Host liquorpro-prod-root
+    HostName 72.60.96.174
+    Port 2222
+    User root
+    IdentityFile ~/.ssh/liquorpro_prod_root_rsa
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+# Instructions:
+# 1. Generate SSH key: ssh-keygen -t rsa -b 4096 -f ~/.ssh/liquorpro_prod_rsa -C "deploy@liquorpro"
+# 2. Copy public key to server: ssh-copy-id -i ~/.ssh/liquorpro_prod_rsa.pub -p 2222 deploy@72.60.96.174
+# 3. Test connection: ssh liquorpro-prod
+# 4. Create sockets directory: mkdir -p ~/.ssh/sockets

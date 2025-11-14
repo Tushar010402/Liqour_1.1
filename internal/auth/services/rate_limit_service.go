@@ -66,6 +66,17 @@ func (s *RateLimitService) GetRateLimitByName(name string, tenantID *uuid.UUID) 
 	return &rateLimit, nil
 }
 
+// GetRateLimitByID retrieves a specific rate limit by ID
+func (s *RateLimitService) GetRateLimitByID(id uuid.UUID) (*models.RateLimit, error) {
+	var rateLimit models.RateLimit
+
+	if err := s.db.Where("id = ?", id).First(&rateLimit).Error; err != nil {
+		return nil, fmt.Errorf("rate limit not found: %w", err)
+	}
+
+	return &rateLimit, nil
+}
+
 // CreateRateLimit creates a new rate limit configuration
 func (s *RateLimitService) CreateRateLimit(rateLimit *models.RateLimit) error {
 	if err := s.db.Create(rateLimit).Error; err != nil {

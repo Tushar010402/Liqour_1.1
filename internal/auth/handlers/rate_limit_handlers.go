@@ -117,7 +117,7 @@ func (h *RateLimitHandlers) GetRateLimits(c *gin.Context) {
 
 // GetRateLimit retrieves a specific rate limit by ID
 func (h *RateLimitHandlers) GetRateLimit(c *gin.Context) {
-	_, err := uuid.Parse(c.Param("id"))
+	rateLimitID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Invalid rate limit ID",
@@ -125,9 +125,32 @@ func (h *RateLimitHandlers) GetRateLimit(c *gin.Context) {
 		return
 	}
 
-	// TODO: Implement GetRateLimitByID in service
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error": "Not implemented yet",
+	rateLimit, err := h.rateLimitService.GetRateLimitByID(rateLimitID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "Rate limit not found",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": RateLimitResponse{
+			ID:                   rateLimit.ID,
+			Name:                 rateLimit.Name,
+			Description:          rateLimit.Description,
+			MaxAttempts:          rateLimit.MaxAttempts,
+			TimeWindowSeconds:    int(rateLimit.TimeWindow.Seconds()),
+			BlockDurationSeconds: int(rateLimit.BlockDuration.Seconds()),
+			TenantID:             rateLimit.TenantID,
+			IsActive:             rateLimit.IsActive,
+			IsGlobal:             rateLimit.IsGlobal,
+			Priority:             rateLimit.Priority,
+			Settings:             rateLimit.Settings,
+			CreatedAt:            rateLimit.CreatedAt,
+			UpdatedAt:            rateLimit.UpdatedAt,
+		},
 	})
 }
 

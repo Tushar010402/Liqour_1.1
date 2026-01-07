@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -27,18 +28,23 @@ func NewGatewayHandlers(config *config.Config, httpClient *http.Client) *Gateway
 
 // ProxyRequest proxies requests to appropriate microservices
 func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
+	log.Printf("🔌 [ProxyRequest] Creating handler for service: %s", serviceName)
 	return func(c *gin.Context) {
+		log.Printf("🔌 [ProxyRequest] Handler called for %s: %s %s", serviceName, c.Request.Method, c.Request.URL.Path)
 		// Get service URL
 		serviceURL := h.getServiceURL(serviceName)
 		if serviceURL == "" {
+			log.Printf("❌ [ProxyRequest] Service URL not found for %s", serviceName)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Service not found"})
 			return
 		}
+		log.Printf("✅ [ProxyRequest] Service URL: %s", serviceURL)
 
 		// Build target URL - strip service prefix for microservices
 		path := c.Request.URL.Path
 		targetPath := h.transformPath(path, serviceName)
 		targetURL := serviceURL + targetPath
+		log.Printf("🎯 [ProxyRequest] Proxying to: %s", targetURL)
 		if c.Request.URL.RawQuery != "" {
 			targetURL += "?" + c.Request.URL.RawQuery
 		}
@@ -163,6 +169,10 @@ func (h *GatewayHandlers) transformPath(path, serviceName string) string {
 		if strings.HasPrefix(path, "/api/sales/") {
 			return strings.Replace(path, "/api/sales/", "/", 1)
 		}
+		// Transform /api/reports/* to /reports/* for reports service (purcha reports)
+		if strings.HasPrefix(path, "/api/reports/") {
+			return strings.Replace(path, "/api/reports/", "/reports/", 1)
+		}
 	case "inventory":
 		// Keep saas-brands paths intact
 		if strings.HasPrefix(path, "/api/inventory/saas-brands/") {
@@ -185,10 +195,56 @@ func (h *GatewayHandlers) transformPath(path, serviceName string) string {
 			return strings.Replace(path, "/api/inventory/", "/", 1)
 		}
 	case "finance":
+		// Finance service uses SetupProtectedRoutes which registers routes at root level
+		// Transform /api/finance/* to /* for finance service
 		if strings.HasPrefix(path, "/api/finance/") {
-			return strings.Replace(path, "/api/finance/", "/api/", 1)
+			return strings.Replace(path, "/api/finance/", "/", 1)
+		}
+		// Transform /api/notifications/* to /notifications/* for finance service
+		// Notification routes are handled by finance service
+		if strings.HasPrefix(path, "/api/notifications/") {
+			return strings.Replace(path, "/api/notifications/", "/notifications/", 1)
+		}
+		if path == "/api/notifications" {
+			return "/notifications"
+		}
+		// Transform /api/alarms/* to /alarms/* for finance service
+		if strings.HasPrefix(path, "/api/alarms/") {
+			return strings.Replace(path, "/api/alarms/", "/alarms/", 1)
+		}
+		if path == "/api/alarms" {
+			return "/alarms"
+		}
+		// Transform /api/logs/* to /logs/* for finance service (app logging)
+		if strings.HasPrefix(path, "/api/logs/") {
+			return strings.Replace(path, "/api/logs/", "/logs/", 1)
+		}
+		if path == "/api/logs" {
+			return "/logs"
 		}
 	case "saas":
+		// Transform /api/inventory/brand-categories to /api/internal/brands/categories (for Flutter app)
+		if path == "/api/inventory/brand-categories" {
+			return "/api/internal/brands/categories"
+		}
+		if path == "/api/inventory/brand-subcategories" {
+			return "/api/internal/brands/subcategories"
+		}
+		// Different transformations for different super-admin endpoints
+		if strings.HasPrefix(path, "/api/super-admin/brands/onboarding-stats") ||
+			strings.HasPrefix(path, "/api/super-admin/brands/packages") ||
+			strings.HasPrefix(path, "/api/super-admin/tenants") {
+			// These endpoints exist under /api/super-admin in saas service
+			return path
+		}
+		// Transform other super-admin brand paths to internal paths
+		if strings.HasPrefix(path, "/api/super-admin/brands") {
+			return strings.Replace(path, "/api/super-admin/brands", "/api/internal/brands", 1)
+		}
+		// Transform /api/saas/brands/* to /api/internal/brands/* (for tenant access to brand catalog)
+		if strings.HasPrefix(path, "/api/saas/brands/") {
+			return strings.Replace(path, "/api/saas/brands/", "/api/internal/brands/", 1)
+		}
 		if strings.HasPrefix(path, "/api/saas/") {
 			return strings.Replace(path, "/api/saas/", "/api/", 1)
 		}
@@ -211,7 +267,7 @@ func (h *GatewayHandlers) getServiceURL(serviceName string) string {
 	case "finance":
 		return h.config.Services.Finance.URL
 	case "saas":
-		return "http://localhost:8095"
+		return "http://saas:8095"
 	default:
 		return ""
 	}

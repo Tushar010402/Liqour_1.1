@@ -126,10 +126,12 @@ type Stock struct {
 	ProductID uuid.UUID `json:"product_id" gorm:"type:uuid;not null"`
 	Product   *Product  `json:"product,omitempty" gorm:"foreignKey:ProductID"`
 
-	Quantity         int `json:"quantity" gorm:"default:0"`
-	ReservedQuantity int `json:"reserved_quantity" gorm:"default:0"`
-	MinimumLevel     int `json:"minimum_level" gorm:"default:0"`
-	MaximumLevel     int `json:"maximum_level" gorm:"default:0"`
+	Quantity          int `json:"quantity" gorm:"default:0"`
+	DamagedQuantity   int `json:"damaged_quantity" gorm:"default:0"`
+	ReservedQuantity  int `json:"reserved_quantity" gorm:"default:0"`
+	AvailableQuantity int `json:"available_quantity" gorm:"default:0"`
+	MinimumLevel      int `json:"minimum_level" gorm:"default:0"`
+	MaximumLevel      int `json:"maximum_level" gorm:"default:0"`
 
 	// Costing
 	CostingMethod     string     `json:"costing_method" gorm:"default:'fifo'"`
@@ -144,6 +146,11 @@ type Stock struct {
 	// Relationships
 	StockBatches []StockBatch   `json:"stock_batches,omitempty" gorm:"foreignKey:StockID"`
 	StockHistory []StockHistory `json:"stock_history,omitempty" gorm:"foreignKey:StockID"`
+}
+
+// UpdateAvailableQuantity recalculates available quantity based on current stock levels
+func (s *Stock) UpdateAvailableQuantity() {
+	s.AvailableQuantity = s.Quantity - s.ReservedQuantity - s.DamagedQuantity
 }
 
 // StockBatch represents individual batches of stock with batch-specific details
@@ -203,17 +210,32 @@ type StockPurchase struct {
 
 	SubTotal    float64 `json:"sub_total" gorm:"not null"`
 	TaxAmount   float64 `json:"tax_amount" gorm:"default:0"`
+	RoundOff    float64 `json:"round_off" gorm:"default:0"`
 	TotalAmount float64 `json:"total_amount" gorm:"not null"`
 
-	Status     string     `json:"status" gorm:"default:'pending'"` // pending, received, cancelled
+	Status     string     `json:"status" gorm:"default:'pending'"` // pending, approved, rejected, received
 	ReceivedAt *time.Time `json:"received_at"`
 
 	Notes     string `json:"notes"`
 	ReceiptNo string `json:"receipt_no"`
 
+	// Receipt/Invoice Information
+	ReceiptNumber   *string    `json:"receipt_number" gorm:"type:varchar(100)"`
+	ReceiptDate     *time.Time `json:"receipt_date"`
+	ReceiptImageURL *string    `json:"receipt_image_url" gorm:"type:text"`
+	ReceiptNotes    *string    `json:"receipt_notes" gorm:"type:text"`
+
 	// Created by
 	CreatedBy     uuid.UUID `json:"created_by" gorm:"type:uuid;not null"`
 	CreatedByUser *User     `json:"created_by_user,omitempty" gorm:"foreignKey:CreatedBy"`
+	CreatedByRole string    `json:"created_by_role"` // Role at time of creation
+
+	// Approval workflow
+	SubmittedAt     time.Time  `json:"submitted_at" gorm:"not null"`
+	ApprovedByID    *uuid.UUID `json:"approved_by_id" gorm:"type:uuid"`
+	ApprovedBy      *User      `json:"approved_by,omitempty" gorm:"foreignKey:ApprovedByID"`
+	ApprovedAt      *time.Time `json:"approved_at"`
+	RejectionReason string     `json:"rejection_reason"`
 
 	// Relationships
 	Items    []StockPurchaseItem    `json:"items,omitempty" gorm:"foreignKey:StockPurchaseID"`
@@ -223,33 +245,33 @@ type StockPurchase struct {
 // StockPurchaseItem represents individual items in a purchase order
 type StockPurchaseItem struct {
 	TenantModel
-	StockPurchaseID uuid.UUID      `json:"stock_purchase_id" gorm:"type:uuid;not null"`
+	StockPurchaseID uuid.UUID      `json:"stock_purchase_id" gorm:"column:purchase_id;type:uuid;not null"`
 	StockPurchase   *StockPurchase `json:"stock_purchase,omitempty" gorm:"foreignKey:StockPurchaseID"`
 	ProductID       uuid.UUID      `json:"product_id" gorm:"type:uuid;not null"`
 	Product         *Product       `json:"product,omitempty" gorm:"foreignKey:ProductID"`
 
 	Quantity   int     `json:"quantity" gorm:"not null"`
-	UnitCost   float64 `json:"unit_cost" gorm:"not null"`
-	TotalCost  float64 `json:"total_cost" gorm:"not null"`
-	TotalPrice float64 `json:"total_price" gorm:"not null"`
+	UnitCost   float64 `json:"unit_cost" gorm:"column:unit_price;not null"`
+	TotalCost  float64 `json:"total_cost" gorm:"column:total_price;not null"`
+	TotalPrice float64 `json:"total_price" gorm:"-"`
 
-	BatchNumber     string     `json:"batch_number"`
-	ManufactureDate *time.Time `json:"manufacture_date"`
-	ExpiryDate      *time.Time `json:"expiry_date"`
+	BatchNumber string     `json:"batch_number"`
+	ExpiryDate  *time.Time `json:"expiry_date"`
 }
 
 // StockPurchasePayment represents payments made for stock purchases
 type StockPurchasePayment struct {
 	TenantModel
-	StockPurchaseID uuid.UUID      `json:"stock_purchase_id" gorm:"type:uuid;not null"`
+	StockPurchaseID uuid.UUID      `json:"stock_purchase_id" gorm:"column:purchase_id;type:uuid;not null"`
 	StockPurchase   *StockPurchase `json:"stock_purchase,omitempty" gorm:"foreignKey:StockPurchaseID"`
 
-	Amount        float64   `json:"amount" gorm:"not null"`
-	Method        string    `json:"method" gorm:"not null"`
-	PaymentMethod string    `json:"payment_method" gorm:"not null"`
-	PaymentDate   time.Time `json:"payment_date" gorm:"not null"`
-	Reference     string    `json:"reference"`
-	Notes         string    `json:"notes"`
+	Amount          float64   `json:"amount" gorm:"not null"`
+	Method          string    `json:"method" gorm:"column:payment_method"`
+	PaymentMethod   string    `json:"payment_method" gorm:"column:payment_method"`
+	PaymentDate     time.Time `json:"payment_date"`
+	Reference       string    `json:"reference" gorm:"column:reference_number"`
+	ReferenceNumber string    `json:"reference_number" gorm:"column:reference_number;-"`
+	Notes           string    `json:"notes"`
 }
 
 // StockMovement represents stock movements for tracking
@@ -262,4 +284,26 @@ type StockMovement struct {
 	Reference    string     `json:"reference"`
 	ReferenceID  *uuid.UUID `json:"reference_id" gorm:"type:uuid"`
 	Notes        string     `json:"notes"`
+}
+
+// StockPurchaseDraft represents auto-saved stock purchase data per user per shop
+type StockPurchaseDraft struct {
+	TenantModel
+	ShopID        uuid.UUID  `json:"shop_id" gorm:"type:uuid;not null;index"`
+	UserID        uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	ShopName      string     `json:"shop_name"`
+	DraftData     string     `json:"draft_data" gorm:"type:jsonb;default:'{}'"` // JSON items array
+	VendorID      *uuid.UUID `json:"vendor_id" gorm:"type:uuid"`
+	ReceiptURL    *string    `json:"receipt_url"`
+	ReceiptNumber *string    `json:"receipt_number"`
+	ReceiptDate   *time.Time `json:"receipt_date"`
+	TotalAmount   float64    `json:"total_amount" gorm:"default:0"`
+	ItemCount     int        `json:"item_count" gorm:"default:0"`
+	DeviceID      string     `json:"device_id"`
+	Version       int        `json:"version" gorm:"default:1"`
+}
+
+// TableName specifies the table name for StockPurchaseDraft
+func (StockPurchaseDraft) TableName() string {
+	return "stock_purchase_drafts"
 }

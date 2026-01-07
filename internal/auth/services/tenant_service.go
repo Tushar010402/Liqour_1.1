@@ -126,6 +126,66 @@ func (s *TenantService) GetShops(ctx context.Context, tenantID uuid.UUID) ([]*Sh
 	return shopResponses, nil
 }
 
+// GetSalesmanShopID retrieves the shop_id assigned to a salesman by their user_id
+// Returns nil if user is not a salesman or has no shop assigned
+// Deprecated: Use utils.GetUserShopAccess for new code
+func (s *TenantService) GetSalesmanShopID(ctx context.Context, userID, tenantID uuid.UUID) (*uuid.UUID, error) {
+	var salesman models.Salesman
+	err := s.db.Where("user_id = ? AND tenant_id = ?", userID, tenantID).First(&salesman).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil // User is not a salesman
+		}
+		return nil, fmt.Errorf("failed to lookup salesman: %w", err)
+	}
+	return &salesman.ShopID, nil
+}
+
+// GetShopsByUser returns shops based on user role using centralized access control
+// - Roles with restricted access (salesman): only their assigned shop
+// - Roles with full access (admin, manager, etc.): all tenant shops
+// - Unknown roles: empty list (security default)
+func (s *TenantService) GetShopsByUser(ctx context.Context, tenantID, userID uuid.UUID, userRole string) ([]*ShopResponse, error) {
+	var shops []models.Shop
+
+	// Use centralized shop access control
+	access, err := utils.GetUserShopAccess(ctx, s.db.DB, userID, tenantID, userRole)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine shop access: %w", err)
+	}
+
+	switch access.AccessLevel {
+	case utils.ShopAccessAll:
+		// Full access - return all shops in tenant
+		err = s.db.Where("tenant_id = ?", tenantID).Order("name").Find(&shops).Error
+
+	case utils.ShopAccessAssigned:
+		// Restricted access - return only assigned shop
+		if access.AllowedShopID == nil {
+			// No shop assigned - return empty list
+			return []*ShopResponse{}, nil
+		}
+		err = s.db.Where("id = ? AND tenant_id = ?", *access.AllowedShopID, tenantID).Find(&shops).Error
+
+	case utils.ShopAccessNone:
+		// Unknown role - security default: return empty list
+		return []*ShopResponse{}, nil
+
+	default:
+		return nil, fmt.Errorf("unexpected access level: %d", access.AccessLevel)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get shops: %w", err)
+	}
+
+	shopResponses := make([]*ShopResponse, len(shops))
+	for i, shop := range shops {
+		shopResponses[i] = s.mapShopToResponse(&shop)
+	}
+	return shopResponses, nil
+}
+
 // GetShopByID returns shop by ID
 func (s *TenantService) GetShopByID(ctx context.Context, shopID, tenantID uuid.UUID) (*ShopResponse, error) {
 	var shop models.Shop
@@ -528,4 +588,21 @@ func (s *TenantService) GetAllShops(ctx context.Context) ([]*models.Shop, error)
 		result[i] = &shops[i]
 	}
 	return result, nil
+}
+
+// IsTenantNameAvailable checks if a tenant name is available for registration
+func (s *TenantService) IsTenantNameAvailable(ctx context.Context, name string) (bool, error) {
+	var tenant models.Tenant
+	err := s.db.Where("name = ?", name).First(&tenant).Error
+
+	if err == nil {
+		// Tenant found, name is not available
+		return false, nil
+	} else if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Tenant not found, name is available
+		return true, nil
+	}
+
+	// Database error
+	return false, fmt.Errorf("failed to check tenant name: %w", err)
 }

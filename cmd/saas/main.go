@@ -219,11 +219,12 @@ func setupRoutes(
 		internal := api.Group("/internal")
 		{
 			// Brand template endpoints for inter-service communication
+			// IMPORTANT: Specific routes MUST come BEFORE parameterized routes
 			internal.GET("/brands", brandHandler.GetBrandsInternal)
-			internal.GET("/brands/:id", brandHandler.GetBrandByID)
-			internal.GET("/brands/:id/variants", brandHandler.GetBrandVariants)
 			internal.GET("/brands/categories", brandHandler.GetAllBrandCategories)
 			internal.GET("/brands/subcategories", brandHandler.GetBrandSubcategories)
+			internal.GET("/brands/:id", brandHandler.GetBrandByID)
+			internal.GET("/brands/:id/variants", brandHandler.GetBrandVariants)
 
 			// Tenant-specific brand endpoints
 			internal.GET("/tenants/:tenant_id/brands", brandHandler.GetTenantBrands)

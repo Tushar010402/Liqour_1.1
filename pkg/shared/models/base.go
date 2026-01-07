@@ -35,18 +35,21 @@ const (
 	StatusPending  = "pending"
 	StatusApproved = "approved"
 	StatusRejected = "rejected"
+	StatusReverted = "reverted"
 	StatusActive   = "active"
 	StatusInactive = "inactive"
 )
 
-// User roles
+// User roles - ordered by hierarchy level (lowest to highest)
+// Shop access: salesman = assigned shop only, all others = all shops
 const (
-	RoleAdmin            = "admin"
-	RoleManager          = "manager"
-	RoleExecutive        = "executive"
-	RoleSalesman         = "salesman"
-	RoleAssistantManager = "assistant_manager"
-	RoleSaasAdmin        = "saas_admin"
+	RoleSalesman         = "salesman"          // Level 1 - restricted to assigned shop
+	RoleExecutive        = "executive"         // Level 2 - all shops
+	RoleAssistantManager = "assistant_manager" // Level 3 - all shops
+	RoleManager          = "manager"           // Level 4 - all shops
+	RoleAdmin            = "admin"             // Level 5 - all shops
+	RoleOwner            = "owner"             // Level 6 - all shops (tenant owner)
+	RoleSaasAdmin        = "saas_admin"        // Super user - all tenants, all shops
 )
 
 // Payment methods

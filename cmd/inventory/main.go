@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	exciseRoutes "github.com/liquorpro/go-backend/internal/excise/routes"
 	"github.com/liquorpro/go-backend/internal/inventory/handlers"
 	"github.com/liquorpro/go-backend/internal/inventory/routes"
 	"github.com/liquorpro/go-backend/internal/inventory/services"
-	exciseRoutes "github.com/liquorpro/go-backend/internal/excise/routes"
+	notifservices "github.com/liquorpro/go-backend/internal/notifications/services"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
@@ -66,6 +67,10 @@ func main() {
 	}
 	defer redisCache.Close()
 
+	// Initialize notification services for workflow notifications
+	notificationService := notifservices.NewNotificationService(db, redisCache)
+	workflowNotificationService := notifservices.NewWorkflowNotificationService(db, notificationService)
+
 	// Initialize services
 	productService := services.NewProductService(db, redisCache)
 	stockService := services.NewStockService(db, redisCache)
@@ -75,9 +80,21 @@ func main() {
 	brandOnboardingService := services.NewBrandOnboardingService(db.DB, cfg, nil) // logger will be added
 	enhancedProductService := services.NewEnhancedProductService(db, redisCache)
 
+	// Set up SaaS client for ProductService to enable SaaS category lookups
+	saasClient := services.NewSaaSBrandClient("http://saas:8095", nil)
+	productService.SetSaaSClient(saasClient)
+
+	// Wire up workflow notifications for purchase approval workflows
+	purchaseService.SetWorkflowNotificationService(workflowNotificationService)
+	log.Println("Workflow notifications initialized for inventory service")
+
+	// Initialize purchase draft service
+	purchaseDraftService := services.NewPurchaseDraftService(db, purchaseService)
+
 	// Initialize handlers
 	brandOnboardingHandler := handlers.NewBrandOnboardingHandler(brandOnboardingService)
 	brandCreationHandler := handlers.NewBrandCreationHandler(enhancedProductService)
+	draftHandlers := handlers.NewDraftHandlers(purchaseDraftService)
 	inventoryHandlers := handlers.NewInventoryHandlers(
 		productService,
 		stockService,
@@ -98,7 +115,8 @@ func main() {
 	router.Use(middleware.CORSMiddleware())
 
 	// Setup routes (using protected routes for gateway-style deployment)
-	routes.SetupProtectedRoutes(router, cfg, redisCache, inventoryHandlers)
+	routes.SetupProtectedRoutes(router, cfg, redisCache, inventoryHandlers, draftHandlers)
+	log.Println("Stock purchase draft routes initialized")
 
 	// Setup excise compliance routes with authentication (UP Excise integration)
 	exciseRoutes.SetupExciseRoutes(router, db.DB, cfg.JWT, redisCache)

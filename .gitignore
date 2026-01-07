@@ -286,4 +286,5 @@ coverage/
 # DynamoDB Local files
 .dynamodb/
 
-# End of LiquorPro gitignore
+# End of LiquorPro gitignoreconfig/firebase/service-account.json
+credentials/google-vision-credentials.json

@@ -575,6 +575,7 @@ func (h *BrandHandler) CreateBrandCategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
+		"success": true,
 		"message": "Brand category created successfully",
 		"data":    category,
 	})
@@ -602,6 +603,7 @@ func (h *BrandHandler) CreateBrandSubcategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
+		"success": true,
 		"message": "Brand subcategory created successfully",
 		"data":    subcategory,
 	})
@@ -626,6 +628,7 @@ func (h *BrandHandler) GetAllBrandCategories(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"success": true,
 		"message": "Brand categories retrieved successfully",
 		"data":    categories,
 		"count":   len(categories),
@@ -654,6 +657,7 @@ func (h *BrandHandler) GetBrandSubcategories(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"success": true,
 		"message": "Brand subcategories retrieved successfully",
 		"data":    subcategories,
 		"count":   len(subcategories),
@@ -688,6 +692,7 @@ func (h *BrandHandler) DeleteBrandVariant(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"success": true,
 		"message": "Brand variant deleted successfully",
 	})
 }
@@ -731,6 +736,7 @@ func (h *BrandHandler) UpdateBrandCategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"success": true,
 		"message": "Brand category updated successfully",
 		"data":    category,
 	})
@@ -764,6 +770,7 @@ func (h *BrandHandler) DeleteBrandCategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"success": true,
 		"message": "Brand category deleted successfully",
 	})
 }
@@ -807,6 +814,7 @@ func (h *BrandHandler) UpdateBrandSubcategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"success": true,
 		"message": "Brand subcategory updated successfully",
 		"data":    subcategory,
 	})
@@ -840,6 +848,7 @@ func (h *BrandHandler) DeleteBrandSubcategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"success": true,
 		"message": "Brand subcategory deleted successfully",
 	})
 }

@@ -33,6 +33,7 @@ func AllModels() []interface{} {
 		&StockPurchase{},
 		&StockPurchaseItem{},
 		&StockPurchasePayment{},
+		&StockPurchaseDraft{},
 
 		// Sales models
 		&Sale{},
@@ -42,6 +43,7 @@ func AllModels() []interface{} {
 		&SaleReturnItem{},
 		&DailySalesRecord{},
 		&DailySalesItem{},
+		&DailySalesExpense{}, // NEW: Expense breakdown for daily sales
 		&SaleFinanceLog{},
 		&DailySaleSummary{},
 
@@ -99,6 +101,7 @@ func MigrateDB(db *gorm.DB) error {
 		&StockPurchase{},
 		&StockPurchaseItem{},
 		&StockPurchasePayment{},
+		&StockPurchaseDraft{},
 
 		// Sales models - THESE ARE CRITICAL FOR DASHBOARD
 		&Sale{},
@@ -108,6 +111,7 @@ func MigrateDB(db *gorm.DB) error {
 		&SaleReturnItem{},
 		&DailySalesRecord{}, // This contains total_sales_amount column
 		&DailySalesItem{},
+		&DailySalesExpense{}, // NEW: Expense breakdown for daily sales
 		&SaleFinanceLog{},
 		&DailySaleSummary{},
 
@@ -368,6 +372,41 @@ func CreateIndexes(db *gorm.DB) error {
 	}
 	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_rate_limit_logs_blocked_until ON rate_limit_logs(blocked_until)").Error; err != nil {
 		return err
+	}
+
+	// ====== Auth Service Performance Indexes ======
+	// Critical for CheckDeviceLimit query (user_id + is_active)
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_active ON user_sessions(user_id, is_active) WHERE deleted_at IS NULL").Error; err != nil {
+		// Log but don't fail - partial index syntax might vary
+		fmt.Printf("Warning: idx_user_sessions_user_active: %v\n", err)
+	}
+
+	// Optimize phone-based user lookups (OTP verification)
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_users_tenant_phone ON users(tenant_id, phone) WHERE deleted_at IS NULL").Error; err != nil {
+		fmt.Printf("Warning: idx_users_tenant_phone: %v\n", err)
+	}
+
+	// Optimize email-based user lookups (registration uniqueness check)
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users(tenant_id, email) WHERE deleted_at IS NULL").Error; err != nil {
+		fmt.Printf("Warning: idx_users_tenant_email: %v\n", err)
+	}
+
+	// Composite index for rate limit log queries
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_rate_limit_logs_composite ON rate_limit_logs(rate_limit_id, identifier, window_start)").Error; err != nil {
+		fmt.Printf("Warning: idx_rate_limit_logs_composite: %v\n", err)
+	}
+
+	// Index for active session count queries
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_user_sessions_active_device ON user_sessions(user_id, device_id) WHERE is_active = true AND deleted_at IS NULL").Error; err != nil {
+		fmt.Printf("Warning: idx_user_sessions_active_device: %v\n", err)
+	}
+
+	// Stock Purchase Draft indexes - unique constraint for one draft per user per shop per tenant
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_purchase_drafts_unique ON stock_purchase_drafts(tenant_id, shop_id, user_id) WHERE deleted_at IS NULL").Error; err != nil {
+		fmt.Printf("Warning: idx_stock_purchase_drafts_unique: %v\n", err)
+	}
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_stock_purchase_drafts_lookup ON stock_purchase_drafts(tenant_id, shop_id, user_id)").Error; err != nil {
+		fmt.Printf("Warning: idx_stock_purchase_drafts_lookup: %v\n", err)
 	}
 
 	return nil

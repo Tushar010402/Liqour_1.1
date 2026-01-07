@@ -59,29 +59,37 @@ type OnboardBrandResponse struct {
 	TenantID          uuid.UUID              `json:"tenant_id"`
 	OnboardedBrands   int                    `json:"onboarded_brands"`
 	OnboardedProducts int                    `json:"onboarded_products"`
+	SkippedProducts   int                    `json:"skipped_products"`   // Already onboarded or existing
+	RestoredProducts  int                    `json:"restored_products"`  // Restored from soft-delete
 	CategoriesCreated int                    `json:"categories_created"`
 	BrandDetails      []OnboardedBrandDetail `json:"brand_details"`
 	Errors            []string               `json:"errors,omitempty"`
+	Warnings          []string               `json:"warnings,omitempty"` // Non-fatal issues
 }
 
 type OnboardedBrandDetail struct {
-	SaaSBrandID      uuid.UUID   `json:"saas_brand_id"`
-	SaaSBrandName    string      `json:"saas_brand_name"`
-	ProductsCreated  int         `json:"products_created"`
-	ProductIDs       []uuid.UUID `json:"product_ids"`
-	Success          bool        `json:"success"`
-	Error            string      `json:"error,omitempty"`
+	SaaSBrandID       uuid.UUID   `json:"saas_brand_id"`
+	SaaSBrandName     string      `json:"saas_brand_name"`
+	ProductsCreated   int         `json:"products_created"`
+	ProductsRestored  int         `json:"products_restored"` // Restored from soft-delete
+	ProductsSkipped   int         `json:"products_skipped"`  // Already existed
+	ProductIDs        []uuid.UUID `json:"product_ids"`
+	Success           bool        `json:"success"`
+	Error             string      `json:"error,omitempty"`
+	VariantErrors     []string    `json:"variant_errors,omitempty"` // Per-variant errors
 }
 
 // GetAvailableBrandTemplates returns all available SaaS brand templates with caching
-func (s *BrandOnboardingService) GetAvailableBrandTemplates() ([]SaaSBrandTemplate, error) {
+// and populates IsOnboarded field based on tenant's existing products
+func (s *BrandOnboardingService) GetAvailableBrandTemplates(tenantID uuid.UUID) ([]SaaSBrandTemplate, error) {
 	// Check cache first (read lock)
 	s.cacheMutex.RLock()
 	if time.Now().Before(s.cacheExpiry) && len(s.brandCache) > 0 {
 		cached := s.brandCache
 		s.cacheMutex.RUnlock()
 		s.logger.Info("Returning cached brand templates", zap.Int("count", len(cached)))
-		return cached, nil
+		// Apply onboarded status to cached brands
+		return s.applyOnboardedStatus(cached, tenantID), nil
 	}
 	s.cacheMutex.RUnlock()
 
@@ -102,7 +110,50 @@ func (s *BrandOnboardingService) GetAvailableBrandTemplates() ([]SaaSBrandTempla
 		zap.Int("count", len(brands)),
 		zap.Time("expiry", s.cacheExpiry))
 
-	return brands, nil
+	// Apply onboarded status based on tenant's products
+	return s.applyOnboardedStatus(brands, tenantID), nil
+}
+
+// applyOnboardedStatus populates IsOnboarded field for each brand and variant
+// based on whether the tenant has already imported them
+func (s *BrandOnboardingService) applyOnboardedStatus(brands []SaaSBrandTemplate, tenantID uuid.UUID) []SaaSBrandTemplate {
+	// Get all onboarded variant IDs for this tenant in a single query
+	var onboardedVariantIDs []uuid.UUID
+	s.db.Model(&models.Product{}).
+		Where("tenant_id = ? AND saas_variant_id IS NOT NULL AND deleted_at IS NULL", tenantID).
+		Distinct().
+		Pluck("saas_variant_id", &onboardedVariantIDs)
+
+	// Create lookup map for O(1) checks
+	onboardedMap := make(map[uuid.UUID]bool)
+	for _, id := range onboardedVariantIDs {
+		onboardedMap[id] = true
+	}
+
+	s.logger.Debug("Applying onboarded status",
+		zap.String("tenant_id", tenantID.String()),
+		zap.Int("onboarded_variants", len(onboardedVariantIDs)))
+
+	// Create a copy of brands to avoid modifying cached data
+	result := make([]SaaSBrandTemplate, len(brands))
+	for i := range brands {
+		result[i] = brands[i]
+		// Create a copy of variants slice
+		result[i].BrandVariants = make([]SaaSBrandVariant, len(brands[i].BrandVariants))
+		copy(result[i].BrandVariants, brands[i].BrandVariants)
+
+		brandOnboarded := false
+		for j := range result[i].BrandVariants {
+			variantOnboarded := onboardedMap[result[i].BrandVariants[j].ID]
+			result[i].BrandVariants[j].IsOnboarded = variantOnboarded
+			if variantOnboarded {
+				brandOnboarded = true
+			}
+		}
+		result[i].IsOnboarded = brandOnboarded
+	}
+
+	return result
 }
 
 // ClearCache clears the brand cache (useful for testing or when brands are updated)
@@ -129,7 +180,22 @@ func (s *BrandOnboardingService) OnboardBrandsToTenant(req OnboardBrandRequest) 
 		TenantID:      req.TenantID,
 		BrandDetails:  make([]OnboardedBrandDetail, 0),
 		Errors:        make([]string, 0),
+		Warnings:      make([]string, 0),
 	}
+
+	// Start transaction for atomicity
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, fmt.Errorf("failed to start transaction: %w", tx.Error)
+	}
+
+	// Ensure transaction is rolled back on panic
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			s.logger.Error("Panic during onboarding, transaction rolled back", zap.Any("panic", r))
+		}
+	}()
 
 	// Track unique categories created
 	createdCategories := make(map[uuid.UUID]bool)
@@ -237,8 +303,8 @@ func (s *BrandOnboardingService) OnboardBrandsToTenant(req OnboardBrandRequest) 
 			}
 		}
 
-		// Ensure brand exists for tenant
-		tenantBrand, err := s.ensureBrandExists(req.TenantID, brand)
+		// Ensure brand exists for tenant (using transaction)
+		tenantBrand, err := s.ensureBrandExistsWithTx(tx, req.TenantID, brand)
 		if err != nil {
 			brandDetail.Success = false
 			brandDetail.Error = fmt.Sprintf("Failed to create brand: %v", err)
@@ -249,28 +315,62 @@ func (s *BrandOnboardingService) OnboardBrandsToTenant(req OnboardBrandRequest) 
 
 		// Create products from variants
 		for _, variant := range variantsToOnboard {
-			// Check if this variant has already been onboarded for this tenant
+			// Check if this variant has already been onboarded for this tenant (including soft-deleted)
 			var existingProduct models.Product
-			err := s.db.Where("tenant_id = ? AND saas_variant_id = ?", req.TenantID, variant.ID).First(&existingProduct).Error
+			err := tx.Unscoped().Where("tenant_id = ? AND saas_variant_id = ?", req.TenantID, variant.ID).First(&existingProduct).Error
 			if err == nil {
-				// Product already exists, add it to response but don't create a new one
+				// Product exists (active or soft-deleted)
+				if existingProduct.DeletedAt.Valid {
+					// Restore soft-deleted product - use Unscoped() to bypass soft-delete filter
+					if restoreErr := tx.Unscoped().Model(&existingProduct).Update("deleted_at", nil).Error; restoreErr != nil {
+						s.logger.Error("Failed to restore soft-deleted product",
+							zap.Error(restoreErr),
+							zap.String("product_id", existingProduct.ID.String()))
+						errMsg := fmt.Sprintf("Failed to restore variant %s: %v", variant.Size, restoreErr)
+						brandDetail.VariantErrors = append(brandDetail.VariantErrors, errMsg)
+						continue
+					}
+					s.logger.Info("Restored soft-deleted product",
+						zap.String("tenant_id", req.TenantID.String()),
+						zap.String("variant_id", variant.ID.String()),
+						zap.String("product_id", existingProduct.ID.String()))
+					brandDetail.ProductIDs = append(brandDetail.ProductIDs, existingProduct.ID)
+					brandDetail.ProductsRestored++
+					response.RestoredProducts++
+					continue
+				}
+
+				// Product already exists and is active
 				s.logger.Info("Variant already onboarded, returning existing product",
 					zap.String("tenant_id", req.TenantID.String()),
 					zap.String("variant_id", variant.ID.String()),
 					zap.String("product_id", existingProduct.ID.String()))
-
-				// Add existing product to response
 				brandDetail.ProductIDs = append(brandDetail.ProductIDs, existingProduct.ID)
-				// Don't increment ProductsCreated since we didn't create a new one
+				brandDetail.ProductsSkipped++
+				response.SkippedProducts++
 				continue
 			}
 
-			// Ensure category exists in tenant's inventory
-			category, err := s.ensureCategoryExists(req.TenantID, variant.Category)
+			// Validate category exists on variant
+			if variant.Category == nil {
+				errMsg := fmt.Sprintf("Variant %s has no category assigned", variant.Size)
+				s.logger.Error("Variant has no category",
+					zap.String("variant_id", variant.ID.String()),
+					zap.String("brand_name", brand.Name),
+					zap.String("variant_size", variant.Size))
+				brandDetail.VariantErrors = append(brandDetail.VariantErrors, errMsg)
+				response.Warnings = append(response.Warnings, fmt.Sprintf("Brand %s: %s", brand.Name, errMsg))
+				continue
+			}
+
+			// Ensure category exists in tenant's inventory (using transaction)
+			category, err := s.ensureCategoryExistsWithTx(tx, req.TenantID, variant.Category)
 			if err != nil {
+				errMsg := fmt.Sprintf("Failed to create category %s: %v", variant.Category.Name, err)
 				s.logger.Error("Failed to ensure category exists",
 					zap.Error(err),
 					zap.String("category_name", variant.Category.Name))
+				brandDetail.VariantErrors = append(brandDetail.VariantErrors, errMsg)
 				continue
 			}
 
@@ -306,10 +406,12 @@ func (s *BrandOnboardingService) OnboardBrandsToTenant(req OnboardBrandRequest) 
 				SKU:            fmt.Sprintf("SAAS-%s-%s", brand.ID.String()[:8], variant.ID.String()[:8]),
 			}
 
-			if err := s.db.Create(&product).Error; err != nil {
+			if err := tx.Create(&product).Error; err != nil {
+				errMsg := fmt.Sprintf("Failed to create variant %s: %v", variant.Size, err)
 				s.logger.Error("Failed to create product from variant",
 					zap.Error(err),
 					zap.String("variant_id", variant.ID.String()))
+				brandDetail.VariantErrors = append(brandDetail.VariantErrors, errMsg)
 				continue
 			}
 
@@ -345,9 +447,18 @@ func (s *BrandOnboardingService) OnboardBrandsToTenant(req OnboardBrandRequest) 
 			i, detail.SaaSBrandName, len(detail.ProductIDs), detail.Success)
 	}
 
-	s.logger.Info("OnboardBrandsToTenant completed",
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		s.logger.Error("Failed to commit transaction, rolling back", zap.Error(err))
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	s.logger.Info("OnboardBrandsToTenant completed successfully",
 		zap.Int("onboarded_brands", response.OnboardedBrands),
 		zap.Int("onboarded_products", response.OnboardedProducts),
+		zap.Int("skipped_products", response.SkippedProducts),
+		zap.Int("restored_products", response.RestoredProducts),
 		zap.Int("brand_details_count", len(response.BrandDetails)))
 
 	return response, nil
@@ -427,6 +538,80 @@ func (s *BrandOnboardingService) ensureCategoryExists(tenantID uuid.UUID, saasCa
 	return &newCategory, nil
 }
 
+// ensureBrandExistsWithTx ensures the brand exists in tenant's inventory using transaction
+func (s *BrandOnboardingService) ensureBrandExistsWithTx(tx *gorm.DB, tenantID uuid.UUID, saasBrand *SaaSBrandTemplate) (*models.Brand, error) {
+	if saasBrand == nil {
+		return nil, errors.New("brand is required")
+	}
+
+	// Check if brand already exists for this tenant
+	var existingBrand models.Brand
+	err := tx.Where("tenant_id = ? AND name = ?", tenantID, saasBrand.Name).First(&existingBrand).Error
+
+	if err == nil {
+		// Brand exists
+		return &existingBrand, nil
+	}
+
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("failed to check brand: %w", err)
+	}
+
+	// Create new brand for tenant
+	tenantIDPtr := &tenantID
+	newBrand := models.Brand{
+		TenantModel: models.TenantModel{
+			TenantID: tenantIDPtr,
+		},
+		Name:        saasBrand.Name,
+		Description: saasBrand.Description,
+		IsActive:    true,
+	}
+
+	if err := tx.Create(&newBrand).Error; err != nil {
+		return nil, fmt.Errorf("failed to create brand: %w", err)
+	}
+
+	return &newBrand, nil
+}
+
+// ensureCategoryExistsWithTx ensures the category exists in tenant's inventory using transaction
+func (s *BrandOnboardingService) ensureCategoryExistsWithTx(tx *gorm.DB, tenantID uuid.UUID, saasCategory *SaaSCategory) (*models.Category, error) {
+	if saasCategory == nil {
+		return nil, errors.New("category is required")
+	}
+
+	// Check if category already exists for this tenant
+	var existingCategory models.Category
+	err := tx.Where("tenant_id = ? AND name = ?", tenantID, saasCategory.Name).First(&existingCategory).Error
+
+	if err == nil {
+		// Category exists
+		return &existingCategory, nil
+	}
+
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("failed to check category: %w", err)
+	}
+
+	// Create new category for tenant
+	tenantIDPtr := &tenantID
+	newCategory := models.Category{
+		TenantModel: models.TenantModel{
+			TenantID: tenantIDPtr,
+		},
+		Name:        saasCategory.Name,
+		Description: saasCategory.Description,
+		IsActive:    true,
+	}
+
+	if err := tx.Create(&newCategory).Error; err != nil {
+		return nil, fmt.Errorf("failed to create category: %w", err)
+	}
+
+	return &newCategory, nil
+}
+
 // GetOnboardedBrands returns products that were onboarded from SaaS templates
 func (s *BrandOnboardingService) GetOnboardedBrands(tenantID uuid.UUID) ([]models.Product, error) {
 	var products []models.Product
@@ -464,10 +649,29 @@ func (s *BrandOnboardingService) GetCustomBrands(tenantID uuid.UUID) ([]models.P
 
 // UpdateOnboardedBrand allows tenant to customize an onboarded brand
 func (s *BrandOnboardingService) UpdateOnboardedBrand(tenantID uuid.UUID, productID uuid.UUID, updates map[string]interface{}) error {
+	s.logger.Info("UpdateOnboardedBrand called",
+		zap.String("tenant_id", tenantID.String()),
+		zap.String("product_id", productID.String()))
+
 	var product models.Product
 
 	if err := s.db.Where("id = ? AND tenant_id = ?", productID, tenantID).First(&product).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Check if product exists at all (for better error messaging)
+			var anyProduct models.Product
+			if checkErr := s.db.Unscoped().Where("id = ?", productID).First(&anyProduct).Error; checkErr == nil {
+				if anyProduct.TenantID != nil && *anyProduct.TenantID != tenantID {
+					s.logger.Warn("Tenant mismatch: product belongs to different tenant",
+						zap.String("requested_tenant", tenantID.String()),
+						zap.String("product_tenant", anyProduct.TenantID.String()))
+					return errors.New("product not found for this tenant")
+				}
+				if anyProduct.DeletedAt.Valid {
+					s.logger.Warn("Product has been deleted",
+						zap.String("product_id", productID.String()))
+					return errors.New("product has been deleted")
+				}
+			}
 			return errors.New("product not found")
 		}
 		return fmt.Errorf("failed to fetch product: %w", err)
@@ -475,8 +679,46 @@ func (s *BrandOnboardingService) UpdateOnboardedBrand(tenantID uuid.UUID, produc
 
 	// Update the product with provided fields
 	if err := s.db.Model(&product).Updates(updates).Error; err != nil {
+		s.logger.Error("Failed to update product",
+			zap.String("product_id", productID.String()),
+			zap.Error(err))
 		return fmt.Errorf("failed to update product: %w", err)
 	}
 
+	s.logger.Info("Product updated successfully",
+		zap.String("product_id", productID.String()))
+
 	return nil
+}
+
+// BrandMetadataResponse contains categories and subcategories for brand creation
+type BrandMetadataResponse struct {
+	Categories    []SaaSCategory    `json:"categories"`
+	Subcategories []SaaSSubcategory `json:"subcategories"`
+}
+
+// GetBrandMetadata fetches categories and subcategories from SaaS service
+func (s *BrandOnboardingService) GetBrandMetadata() (*BrandMetadataResponse, error) {
+	s.logger.Info("Fetching brand metadata from SaaS service")
+
+	categories, err := s.saasClient.GetCategories()
+	if err != nil {
+		s.logger.Error("Failed to fetch categories", zap.Error(err))
+		return nil, fmt.Errorf("failed to fetch categories: %w", err)
+	}
+
+	subcategories, err := s.saasClient.GetSubcategories()
+	if err != nil {
+		s.logger.Error("Failed to fetch subcategories", zap.Error(err))
+		return nil, fmt.Errorf("failed to fetch subcategories: %w", err)
+	}
+
+	s.logger.Info("Brand metadata fetched successfully",
+		zap.Int("categories", len(categories)),
+		zap.Int("subcategories", len(subcategories)))
+
+	return &BrandMetadataResponse{
+		Categories:    categories,
+		Subcategories: subcategories,
+	}, nil
 }

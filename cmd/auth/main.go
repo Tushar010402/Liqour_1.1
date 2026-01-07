@@ -17,6 +17,7 @@ import (
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
+	"github.com/liquorpro/go-backend/pkg/shared/logger"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
 )
 
@@ -78,8 +79,15 @@ func main() {
 	userService := services.NewUserService(db, redisCache)
 	tenantService := services.NewTenantService(db, redisCache)
 
-	// Initialize handlers
-	authHandlers := handlers.NewAuthHandlers(authService, userService, tenantService)
+	// Initialize logger for login rate limiter
+	zapLogger, err := logger.NewLogger(cfg.App.Environment)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize logger for rate limiter: %v", err)
+		zapLogger = nil
+	}
+
+	// Initialize handlers with login rate limiter
+	authHandlers := handlers.NewAuthHandlersWithRateLimiter(authService, userService, tenantService, redisCache.Client(), zapLogger)
 	rateLimitHandlers := handlers.NewRateLimitHandlers(rateLimitService)
 
 	// Create router

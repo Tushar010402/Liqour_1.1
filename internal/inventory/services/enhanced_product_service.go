@@ -30,11 +30,13 @@ func NewEnhancedProductService(db *database.DB, cache *cache.Cache) *EnhancedPro
 
 // CreateBrandWithVariantsRequest represents request to create brand with multiple size variants
 type CreateBrandWithVariantsRequest struct {
-	BrandName   string             `json:"brand_name" binding:"required"`
-	Description string             `json:"description"`
-	CategoryID  uuid.UUID          `json:"category_id" binding:"required"`
-	Variants    []ProductVariant   `json:"variants" binding:"required,min=1"`
-	State       string             `json:"state"` // For state-specific pricing rules (e.g., "UP" for Uttar Pradesh)
+	BrandName     string           `json:"brand_name" binding:"required"`
+	Description   string           `json:"description"`
+	CategoryID    uuid.UUID        `json:"category_id" binding:"required"`
+	CategoryName  string           `json:"category_name"`  // Optional: used to auto-create category if needed
+	SubcategoryID *uuid.UUID       `json:"subcategory_id"` // Optional: subcategory for the products
+	Variants      []ProductVariant `json:"variants" binding:"required,min=1"`
+	State         string           `json:"state"` // For state-specific pricing rules (e.g., "UP" for Uttar Pradesh)
 }
 
 // ProductVariant represents a product variant with size and pricing
@@ -97,10 +99,40 @@ func (s *EnhancedProductService) CreateBrandWithVariants(ctx context.Context, re
 		}
 	}
 
-	// Step 2: Verify category exists
-	var category models.Category
-	if err := s.db.Where("id = ? AND tenant_id = ?", req.CategoryID, tenantID).First(&category).Error; err != nil {
-		return nil, errors.New("category not found")
+	// Step 2: Map SaaS category ID to tenant's local category
+	var resolvedCategoryID uuid.UUID = req.CategoryID
+
+	// First, check if this category already exists in tenant's categories
+	var existingCategory models.Category
+	if err := s.db.Where("id = ? AND tenant_id = ?", req.CategoryID, tenantID).First(&existingCategory).Error; err != nil {
+		// Category not found with this ID - it's likely a SaaS category
+		// Look up the SaaS category name from brand_categories table
+		var saasCategoryName string
+		if err := s.db.Table("brand_categories").
+			Select("name").
+			Where("id = ?", req.CategoryID).
+			Scan(&saasCategoryName).Error; err == nil && saasCategoryName != "" {
+
+			// Find matching tenant category by name
+			var tenantCategory models.Category
+			if err := s.db.Where("LOWER(name) = LOWER(?) AND tenant_id = ?", saasCategoryName, tenantID).
+				First(&tenantCategory).Error; err == nil {
+				resolvedCategoryID = tenantCategory.ID
+			} else {
+				// Create the category for this tenant
+				tenantCategory = models.Category{
+					TenantModel: models.TenantModel{TenantID: &tenantID},
+					Name:        saasCategoryName,
+					Description: "Auto-created from SaaS category",
+					IsActive:    true,
+				}
+				if err := s.db.Create(&tenantCategory).Error; err == nil {
+					resolvedCategoryID = tenantCategory.ID
+				}
+			}
+		}
+	} else {
+		resolvedCategoryID = existingCategory.ID
 	}
 
 	// Step 3: Create products for each variant
@@ -120,18 +152,20 @@ func (s *EnhancedProductService) CreateBrandWithVariants(ctx context.Context, re
 			continue
 		}
 
-		// Apply Uttar Pradesh specific duty calculation if needed
+		// Apply duty calculation - use provided value or calculate based on size/cost
 		dutyFee := variant.GovernmentDuty
-		if dutyFee == 0 && req.State == "UP" {
+		if dutyFee == 0 {
+			// Auto-calculate duty based on size and cost price (UP excise duty structure)
 			dutyFee = s.calculateUttarPradeshDuty(variant.Size, variant.AlcoholContent, variant.CostPrice)
 		}
 
-		// Calculate total cost
-		totalCost := variant.CostPrice + dutyFee
+		// Total cost equals cost price (cost price already includes duty)
+		// duty_fee is stored for display/breakdown purposes only
+		totalCost := variant.CostPrice
 
-		// Validate pricing logic
+		// Validate pricing logic - selling price must be greater than cost price for profit
 		if variant.SellingPrice < totalCost {
-			errors = append(errors, fmt.Sprintf("Selling price for %s must be greater than total cost (%.2f)", variant.Size, totalCost))
+			errors = append(errors, fmt.Sprintf("Selling price for %s must be greater than cost price (%.2f)", variant.Size, totalCost))
 			continue
 		}
 
@@ -141,11 +175,18 @@ func (s *EnhancedProductService) CreateBrandWithVariants(ctx context.Context, re
 		// Create product name
 		productName := fmt.Sprintf("%s - %s", req.BrandName, variant.Size)
 
+		// Set MRP equal to selling price if not explicitly provided or if MRP is 0
+		mrp := variant.MRP
+		if mrp == 0 {
+			mrp = variant.SellingPrice
+		}
+
 		// Create product
 		product := models.Product{
 			TenantModel:    models.TenantModel{TenantID: &tenantID},
 			Name:           productName,
-			CategoryID:     req.CategoryID,
+			CategoryID:     resolvedCategoryID, // Use resolved tenant category ID
+			SubcategoryID:  req.SubcategoryID,
 			BrandID:        brand.ID,
 			Size:           variant.Size,
 			AlcoholContent: variant.AlcoholContent,
@@ -158,7 +199,7 @@ func (s *EnhancedProductService) CreateBrandWithVariants(ctx context.Context, re
 			DutyFee:        dutyFee,
 			TotalCost:      totalCost,
 			SellingPrice:   variant.SellingPrice,
-			MRP:            variant.MRP,
+			MRP:            mrp,
 		}
 
 		if err := s.db.Create(&product).Error; err != nil {
@@ -166,23 +207,24 @@ func (s *EnhancedProductService) CreateBrandWithVariants(ctx context.Context, re
 			continue
 		}
 
-		// Create stock record if initial stock provided
-		if variant.InitialStock > 0 {
-			stock := models.Stock{
-				TenantModel:       models.TenantModel{TenantID: &tenantID},
-				ShopID:            shopID,
-				ProductID:         product.ID,
-				Quantity:          variant.InitialStock,
-				ReservedQuantity:  0,
-				MinimumLevel:      10,
-				MaximumLevel:      1000,
-				CostingMethod:     "fifo",
-				AverageCost:       totalCost,
-				LastPurchasePrice: variant.CostPrice,
-			}
-
-			if err := s.db.Create(&stock).Error; err != nil {
-				errors = append(errors, fmt.Sprintf("Failed to create stock for %s: %v", variant.Size, err))
+		// Create stock records for ALL tenant shops (ensures product appears in inventory)
+		var shops []models.Shop
+		if err := s.db.Where("tenant_id = ? AND is_active = ?", tenantID, true).Find(&shops).Error; err == nil {
+			for _, shop := range shops {
+				// Use InitialStock for all shops (typically 0 for new products)
+				stock := models.Stock{
+					TenantModel:       models.TenantModel{TenantID: &tenantID},
+					ShopID:            shop.ID,
+					ProductID:         product.ID,
+					Quantity:          variant.InitialStock,
+					ReservedQuantity:  0,
+					MinimumLevel:      10,
+					MaximumLevel:      1000,
+					CostingMethod:     "fifo",
+					AverageCost:       totalCost,
+					LastPurchasePrice: variant.CostPrice,
+				}
+				s.db.Create(&stock) // Ignore individual errors - stock creation is non-critical
 			}
 		}
 
@@ -301,13 +343,14 @@ func (s *EnhancedProductService) UpdateProductPricing(ctx context.Context, produ
 		product.DutyFee = *req.DutyFee
 	}
 
-	// Recalculate total cost
-	product.TotalCost = product.CostPrice + product.DutyFee
+	// Total cost equals cost price (cost price already includes duty)
+	// duty_fee is stored for display/breakdown purposes only
+	product.TotalCost = product.CostPrice
 
 	if req.SellingPrice != nil {
-		// Validate selling price
+		// Validate selling price - must be greater than cost price for profit
 		if *req.SellingPrice < product.TotalCost {
-			return nil, fmt.Errorf("selling price (%.2f) must be greater than total cost (%.2f)", *req.SellingPrice, product.TotalCost)
+			return nil, fmt.Errorf("selling price (%.2f) must be greater than cost price (%.2f)", *req.SellingPrice, product.TotalCost)
 		}
 		product.SellingPrice = *req.SellingPrice
 	}

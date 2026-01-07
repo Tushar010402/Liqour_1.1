@@ -28,6 +28,16 @@ func NewCache(config Config) (*Cache, error) {
 		Addr:     fmt.Sprintf("%s:%d", config.Host, config.Port),
 		Password: config.Password,
 		DB:       config.DB,
+		// Connection pool settings - optimized for auth service
+		PoolSize:     50,               // Up from default 10
+		MinIdleConns: 10,               // Keep warm connections
+		PoolTimeout:  30 * time.Second, // Wait time for pool connection
+		// Connection timeouts
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		// Retry settings
+		MaxRetries: 3,
 	})
 
 	// Test connection
@@ -103,6 +113,16 @@ func (c *Cache) Increment(ctx context.Context, key string) (int64, error) {
 // Decrement decrements a numeric key
 func (c *Cache) Decrement(ctx context.Context, key string) (int64, error) {
 	return c.client.Decr(ctx, key).Result()
+}
+
+// SetNX sets a key only if it does not exist (for distributed locking)
+// Returns true if the key was set, false if it already existed
+func (c *Cache) SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error) {
+	jsonValue, err := json.Marshal(value)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal value: %w", err)
+	}
+	return c.client.SetNX(ctx, key, jsonValue, expiration).Result()
 }
 
 // SetHash stores a hash field
@@ -185,6 +205,142 @@ func (c *Cache) Unlock(ctx context.Context, key string) error {
 	return c.client.Del(ctx, "lock:"+key).Err()
 }
 
+// Client returns the underlying Redis client for advanced operations
+func (c *Cache) Client() *redis.Client {
+	return c.client
+}
+
+// ============================================================================
+// High-Performance Methods for Sub-20ms Response Times
+// ============================================================================
+
+// IncrementWithExpiry atomically increments a key and sets expiry (single round-trip)
+// Returns the new value after increment
+func (c *Cache) IncrementWithExpiry(ctx context.Context, key string, expiry time.Duration) (int64, error) {
+	pipe := c.client.Pipeline()
+	incrCmd := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, expiry)
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return incrCmd.Val(), nil
+}
+
+// GetMulti retrieves multiple keys in a single round-trip using pipeline
+// Returns a map of key -> raw JSON bytes (caller must unmarshal)
+func (c *Cache) GetMulti(ctx context.Context, keys ...string) (map[string][]byte, error) {
+	if len(keys) == 0 {
+		return make(map[string][]byte), nil
+	}
+
+	pipe := c.client.Pipeline()
+	cmds := make(map[string]*redis.StringCmd, len(keys))
+
+	for _, key := range keys {
+		cmds[key] = pipe.Get(ctx, key)
+	}
+
+	_, err := pipe.Exec(ctx)
+	// Ignore redis.Nil errors - some keys may not exist
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	results := make(map[string][]byte, len(keys))
+	for key, cmd := range cmds {
+		if data, err := cmd.Bytes(); err == nil {
+			results[key] = data
+		}
+	}
+
+	return results, nil
+}
+
+// SetMulti stores multiple key-value pairs in a single round-trip using pipeline
+func (c *Cache) SetMulti(ctx context.Context, items map[string]interface{}, expiration time.Duration) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	pipe := c.client.Pipeline()
+
+	for key, value := range items {
+		jsonData, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("failed to marshal value for key %s: %w", key, err)
+		}
+		pipe.Set(ctx, key, jsonData, expiration)
+	}
+
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// ExistsMulti checks multiple keys existence in a single round-trip
+// Returns a map of key -> exists
+func (c *Cache) ExistsMulti(ctx context.Context, keys ...string) (map[string]bool, error) {
+	if len(keys) == 0 {
+		return make(map[string]bool), nil
+	}
+
+	pipe := c.client.Pipeline()
+	cmds := make(map[string]*redis.IntCmd, len(keys))
+
+	for _, key := range keys {
+		cmds[key] = pipe.Exists(ctx, key)
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make(map[string]bool, len(keys))
+	for key, cmd := range cmds {
+		results[key] = cmd.Val() > 0
+	}
+
+	return results, nil
+}
+
+// GetAndDelete atomically gets and deletes a key (for OTP verification)
+func (c *Cache) GetAndDelete(ctx context.Context, key string, dest interface{}) error {
+	result := c.client.GetDel(ctx, key)
+	if err := result.Err(); err != nil {
+		if err == redis.Nil {
+			return ErrCacheMiss
+		}
+		return fmt.Errorf("failed to get and delete key %s: %w", key, err)
+	}
+
+	data, err := result.Bytes()
+	if err != nil {
+		return fmt.Errorf("failed to get bytes: %w", err)
+	}
+
+	if err := json.Unmarshal(data, dest); err != nil {
+		return fmt.Errorf("failed to unmarshal data: %w", err)
+	}
+
+	return nil
+}
+
+// SetIfNotExistsWithValue sets a key only if it doesn't exist, using raw string value
+// More efficient than SetNX when value doesn't need JSON marshaling
+func (c *Cache) SetIfNotExistsRaw(ctx context.Context, key string, value string, expiration time.Duration) (bool, error) {
+	return c.client.SetNX(ctx, key, value, expiration).Result()
+}
+
+// GetRaw retrieves a raw string value without JSON unmarshaling
+func (c *Cache) GetRaw(ctx context.Context, key string) (string, error) {
+	result, err := c.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return "", ErrCacheMiss
+	}
+	return result, err
+}
+
 // Custom errors
 var (
 	ErrCacheMiss = fmt.Errorf("cache miss")
@@ -198,10 +354,24 @@ const (
 	StockKey            = "stock:%s:%s"          // shop:product
 	DailySalesKey       = "daily_sales:%s:%s"    // shop:date
 	PendingApprovalsKey = "pending_approvals:%s" // user_id
+	DeviceSessionKey    = "session:device:%s"    // session_id
+	UserProfileKey      = "user_profile:%s"      // user_id
+	RateLimitKey        = "ratelimit:%s:%s:%d"   // name:identifier:window
+	ActiveSessionsKey   = "device_sessions:%s"   // user_id
+	RateLimitConfigKey  = "ratelimit_config:%s"  // rate_limit_name
+	UserByPhoneKey      = "user:phone:%s"        // phone number -> user data
+	OTPCounterKey       = "otp_counter:%s"       // phone -> attempt count
+	BlockedNumberKey    = "blocked:mobile:%s"    // blocked phone numbers
 
-	// Cache durations
-	DefaultTTL = 1 * time.Hour
-	SessionTTL = 24 * time.Hour
-	ShortTTL   = 15 * time.Minute
-	LongTTL    = 24 * time.Hour
+	// Cache durations - optimized for sub-20ms response times
+	DefaultTTL         = 1 * time.Hour
+	SessionTTL         = 45 * 24 * time.Hour // 45 days - match JWT token expiration
+	ShortTTL           = 15 * time.Minute
+	LongTTL            = 24 * time.Hour
+	ProfileCacheTTL    = 5 * time.Minute    // User profile cache
+	RateLimitConfigTTL = 1 * time.Hour      // Rate limit config cache (long - rarely changes)
+	RateLimitTTL       = 5 * time.Minute    // Rate limit counter cache
+	DeviceCacheTTL     = 30 * time.Second   // Device session cache
+	UserByPhoneTTL     = 2 * time.Minute    // User lookup by phone (short for consistency)
+	OTPWindowTTL       = 2 * time.Minute    // OTP rate limit window
 )

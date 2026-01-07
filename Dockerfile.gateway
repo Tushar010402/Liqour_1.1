@@ -1,6 +1,9 @@
 # Multi-stage build for API Gateway
 FROM golang:1.23-alpine AS builder
 
+# Allow Go to automatically download and use newer toolchain versions
+ENV GOTOOLCHAIN=auto
+
 # Set working directory
 WORKDIR /app
 
@@ -10,14 +13,12 @@ RUN apk add --no-cache git ca-certificates
 # Copy go mod files
 COPY go.mod go.sum ./
 
-# Download dependencies
-RUN go mod download
-
-# Copy source code
+# Copy source code (moved earlier to ensure build context)
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -mod=mod -a -installsuffix cgo -o gateway ./cmd/gateway/main.go
+# Download dependencies and build in one step to maintain toolchain
+RUN go mod download && \
+    CGO_ENABLED=0 GOOS=linux go build -mod=mod -a -installsuffix cgo -o gateway ./cmd/gateway/main.go
 
 # Final stage
 FROM alpine:latest
@@ -37,9 +38,6 @@ WORKDIR /root/
 
 # Copy binary from builder
 COPY --from=builder /app/gateway .
-
-# Copy config files
-COPY --from=builder /app/config ./config
 
 # Change ownership
 RUN chown -R appuser:appgroup /root/

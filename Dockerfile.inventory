@@ -1,6 +1,9 @@
 # Multi-stage build for Inventory Service
 FROM golang:1.23-alpine AS builder
 
+# Allow Go to automatically download and use newer toolchain versions
+ENV GOTOOLCHAIN=auto
+
 # Set working directory
 WORKDIR /app
 
@@ -37,9 +40,6 @@ WORKDIR /root/
 
 # Copy binary from builder
 COPY --from=builder /app/inventory .
-
-# Copy config files
-COPY --from=builder /app/config ./config
 
 # Change ownership
 RUN chown -R appuser:appgroup /root/

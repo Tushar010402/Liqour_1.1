@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -442,7 +444,45 @@ func (h *AdminHandler) GetTenantStats(c *gin.Context) {
 }
 
 func (h *AdminHandler) GetAllTenants(c *gin.Context) {
-	tenants, err := h.adminService.GetAllTenants(c.Request.Context())
+	// Parse and validate query parameters for pagination
+	page := 1
+	limit := 10
+	search := sanitizeSearchInput(c.Query("search"))
+	status := sanitizeStatusInput(c.Query("status"))
+	sortBy := sanitizeSortInput(c.DefaultQuery("sort_by", "created_at"))
+	order := sanitizeOrderInput(c.DefaultQuery("order", "desc"))
+
+	// Validate and parse page parameter
+	if pageStr := c.Query("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 && p <= 10000 {
+			page = p
+		} else if err != nil || p <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid page number"})
+			return
+		}
+	}
+
+	// Validate and parse limit parameter
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		} else if err != nil || l <= 0 || l > 100 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid limit value. Must be between 1 and 100"})
+			return
+		}
+	}
+
+	// Create filter params
+	params := map[string]interface{}{
+		"page":   page,
+		"limit":  limit,
+		"search": search,
+		"status": status,
+		"sort_by": sortBy,
+		"order":  order,
+	}
+
+	tenants, total, err := h.adminService.GetAllTenantsWithPagination(c.Request.Context(), params)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -450,7 +490,9 @@ func (h *AdminHandler) GetAllTenants(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"tenants": tenants,
-		"total":   len(tenants),
+		"total":   total,
+		"page":    page,
+		"limit":   limit,
 	})
 }
 
@@ -535,4 +577,64 @@ func (h *AdminHandler) DeleteAdminUser(c *gin.Context) {
 		"message": "admin user deletion endpoint - implement based on requirements",
 		"user_id": adminUserID,
 	})
+}
+
+// Sanitization helper functions
+func sanitizeSearchInput(input string) string {
+	// Remove any potentially dangerous characters
+	// Allow alphanumeric, spaces, @, ., +, -, _
+	re := regexp.MustCompile(`[^a-zA-Z0-9\s@.\+\-_]`)
+	sanitized := re.ReplaceAllString(input, "")
+
+	// Trim whitespace and limit length
+	sanitized = strings.TrimSpace(sanitized)
+	if len(sanitized) > 100 {
+		sanitized = sanitized[:100]
+	}
+
+	return sanitized
+}
+
+func sanitizeStatusInput(input string) string {
+	// Only allow valid status values
+	validStatuses := []string{
+		"active", "trial", "no_subscription",
+		"suspended", "cancelled", "expired", "all", "",
+	}
+
+	input = strings.ToLower(strings.TrimSpace(input))
+	for _, valid := range validStatuses {
+		if input == valid {
+			return input
+		}
+	}
+
+	return ""
+}
+
+func sanitizeSortInput(input string) string {
+	// Only allow valid sort fields
+	validSortFields := []string{
+		"name", "created_at", "status",
+		"email", "phone", "updated_at",
+	}
+
+	input = strings.ToLower(strings.TrimSpace(input))
+	for _, valid := range validSortFields {
+		if input == valid {
+			return input
+		}
+	}
+
+	return "created_at"
+}
+
+func sanitizeOrderInput(input string) string {
+	// Only allow asc or desc
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input == "asc" || input == "desc" {
+		return input
+	}
+
+	return "desc"
 }

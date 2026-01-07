@@ -9,7 +9,7 @@ import (
 )
 
 // SetupRoutes configures all inventory service routes
-func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inventoryHandlers *handlers.InventoryHandlers) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inventoryHandlers *handlers.InventoryHandlers, draftHandlers *handlers.DraftHandlers) {
 	// Health check
 	router.GET("/health", inventoryHandlers.Health)
 
@@ -23,6 +23,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inv
 	{
 		products.GET("", inventoryHandlers.GetProducts)
 		products.POST("", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.CreateProduct)
+		products.POST("/validate-batch", inventoryHandlers.BatchValidateProducts) // Batch validation - reduces N API calls to 1
+		products.POST("/by-ids", inventoryHandlers.GetProductsByIDs)              // Fetch multiple products by IDs - reduces N calls to 1
+		products.GET("/sizes", inventoryHandlers.GetDistinctSizes)                // Must be before :id route
 		products.GET("/:id", inventoryHandlers.GetProductByID)
 		products.PUT("/:id", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.UpdateProduct)
 		products.DELETE("/:id", middleware.RoleMiddleware("admin"), inventoryHandlers.DeleteProduct)
@@ -41,9 +44,24 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inv
 	purchases := api.Group("/purchases")
 	{
 		purchases.GET("", inventoryHandlers.GetPurchases)
-		purchases.POST("", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.CreatePurchase)
+		purchases.POST("", inventoryHandlers.CreatePurchase) // All authenticated users can create (approval based on role)
 		purchases.GET("/:id", inventoryHandlers.GetPurchaseByID)
 		purchases.POST("/:id/receive", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.ReceivePurchase)
+		// Approval workflow routes
+		purchases.GET("/pending", middleware.RoleMiddleware("assistant_manager", "manager", "admin"), inventoryHandlers.GetPendingApprovals)
+		purchases.POST("/:id/approve", middleware.RoleMiddleware("assistant_manager", "manager", "admin"), inventoryHandlers.ApprovePurchase)
+		purchases.POST("/:id/reject", middleware.RoleMiddleware("assistant_manager", "manager", "admin"), inventoryHandlers.RejectPurchase)
+	}
+
+	// Stock Purchase Draft Routes (Auto-save for mobile app)
+	if draftHandlers != nil {
+		drafts := api.Group("/drafts/stock-purchase")
+		{
+			drafts.GET("", draftHandlers.GetDraft)
+			drafts.POST("", draftHandlers.SaveDraft)
+			drafts.DELETE("", draftHandlers.DeleteDraft)
+			drafts.GET("/all", draftHandlers.GetUserDrafts)
+		}
 	}
 
 	// Category Management Routes
@@ -80,6 +98,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inv
 		brands.POST("/sync-pricing", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.SyncBrandPricing)
 	}
 
+	// Sizes Route (for filter dropdowns)
+	api.GET("/sizes", inventoryHandlers.GetDistinctSizes)
+
 	// Product Catalog Routes (Templates for stock creation)
 	catalog := api.Group("/catalog")
 	{
@@ -100,7 +121,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inv
 }
 
 // SetupProtectedRoutes sets up routes with gateway-style auth handling
-func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inventoryHandlers *handlers.InventoryHandlers) {
+func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inventoryHandlers *handlers.InventoryHandlers, draftHandlers *handlers.DraftHandlers) {
 	// Health check (no auth required)
 	router.GET("/health", inventoryHandlers.Health)
 
@@ -121,33 +142,67 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	// Product Routes
 	router.GET("/products", inventoryHandlers.GetProducts)
 	router.POST("/products", inventoryHandlers.CreateProduct)
+	router.POST("/products/validate-batch", inventoryHandlers.BatchValidateProducts) // Batch validation - reduces N API calls to 1
+	router.POST("/products/by-ids", inventoryHandlers.GetProductsByIDs)              // Fetch multiple products by IDs - reduces N calls to 1
 
 	// Product-specific routes (before :id to avoid conflicts)
+	router.GET("/products/sizes", inventoryHandlers.GetDistinctSizes) // Must be before :id route
 	router.PUT("/products/:id/pricing", inventoryHandlers.UpdateProductPricing)
 
 	// Standard product CRUD routes
 	router.GET("/products/:id", inventoryHandlers.GetProductByID)
 	router.PUT("/products/:id", inventoryHandlers.UpdateProduct)
-	router.DELETE("/products/:id", inventoryHandlers.DeleteProduct)
+	router.DELETE("/products/:id", middleware.RoleMiddleware("admin", "manager", "assistant_manager"), inventoryHandlers.DeleteProduct)
 
-	// Stock Management Routes
+	// Stock Management Routes (role-restricted for modifications)
 	router.GET("/stocks", inventoryHandlers.GetStocks)
-	router.POST("/stocks/adjust", inventoryHandlers.AdjustStock)
-	router.POST("/stocks/transfer", inventoryHandlers.TransferStock)
-	router.GET("/stocks/movements", inventoryHandlers.GetStockMovements)
+	router.POST("/stocks/adjust", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.AdjustStock)
+	router.POST("/stocks/transfer", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.TransferStock)
+	router.GET("/stocks/movements", middleware.RoleMiddleware("manager", "admin"), inventoryHandlers.GetStockMovements)
+
+	// Legacy compatibility - singular "stock" endpoint
+	router.GET("/stock", inventoryHandlers.GetStocks)
 
 	// Purchase Routes
 	router.GET("/purchases", inventoryHandlers.GetPurchases)
 	router.POST("/purchases", inventoryHandlers.CreatePurchase)
 	router.GET("/purchases/:id", inventoryHandlers.GetPurchaseByID)
 	router.POST("/purchases/:id/receive", inventoryHandlers.ReceivePurchase)
+	// Receipt upload for purchases
+	router.POST("/purchases/upload-receipt", inventoryHandlers.UploadPurchaseReceipt)
+	// Approval workflow routes
+	router.GET("/purchases/pending", inventoryHandlers.GetPendingApprovals)
+	router.POST("/purchases/:id/approve", inventoryHandlers.ApprovePurchase)
+	router.POST("/purchases/:id/reject", inventoryHandlers.RejectPurchase)
+	// Legacy/alternative routes for Flutter app compatibility
+	router.GET("/stock-purchases", inventoryHandlers.GetPurchases)
+	router.POST("/stock-purchases", inventoryHandlers.CreatePurchase)
+	router.GET("/stock-purchases/:id", inventoryHandlers.GetPurchaseByID)
+	router.POST("/stock-purchases/:id/receive", inventoryHandlers.ReceivePurchase)
+	router.POST("/stock-purchases/upload-receipt", inventoryHandlers.UploadPurchaseReceipt)
+	router.GET("/stock-purchases/pending", inventoryHandlers.GetPendingApprovals)
+	router.POST("/stock-purchases/:id/approve", inventoryHandlers.ApprovePurchase)
+	router.POST("/stock-purchases/:id/reject", inventoryHandlers.RejectPurchase)
+
+	// Stock Purchase Draft Routes (Auto-save for mobile app)
+	if draftHandlers != nil {
+		router.GET("/drafts/stock-purchase", draftHandlers.GetDraft)
+		router.POST("/drafts/stock-purchase", draftHandlers.SaveDraft)
+		router.DELETE("/drafts/stock-purchase", draftHandlers.DeleteDraft)
+		router.GET("/drafts/stock-purchase/all", draftHandlers.GetUserDrafts)
+		// Also support /api/inventory prefix for consistency
+		router.GET("/api/inventory/drafts/stock-purchase", draftHandlers.GetDraft)
+		router.POST("/api/inventory/drafts/stock-purchase", draftHandlers.SaveDraft)
+		router.DELETE("/api/inventory/drafts/stock-purchase", draftHandlers.DeleteDraft)
+		router.GET("/api/inventory/drafts/stock-purchase/all", draftHandlers.GetUserDrafts)
+	}
 
 	// Category Routes
 	router.GET("/categories", inventoryHandlers.GetCategories)
 	router.POST("/categories", inventoryHandlers.CreateCategory)
 	router.GET("/categories/:id", inventoryHandlers.GetCategoryByID)
 	router.PUT("/categories/:id", inventoryHandlers.UpdateCategory)
-	router.DELETE("/categories/:id", inventoryHandlers.DeleteCategory)
+	router.DELETE("/categories/:id", middleware.RoleMiddleware("admin", "manager", "assistant_manager"), inventoryHandlers.DeleteCategory)
 
 	// Brand Routes
 	router.GET("/brands", inventoryHandlers.GetBrands)
@@ -161,7 +216,7 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	// Standard brand CRUD routes (with :id parameter)
 	router.GET("/brands/:id", inventoryHandlers.GetBrandByID)
 	router.PUT("/brands/:id", inventoryHandlers.UpdateBrand)
-	router.DELETE("/brands/:id", inventoryHandlers.DeleteBrand)
+	router.DELETE("/brands/:id", middleware.RoleMiddleware("admin", "manager", "assistant_manager"), inventoryHandlers.DeleteBrand)
 	router.GET("/brands/:id/check-duplicate", inventoryHandlers.CheckDuplicateProduct)
 	router.GET("/brands/:id/products", inventoryHandlers.GetProductsByBrand)
 
@@ -175,6 +230,9 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	router.GET("/api/inventory/saas-brands/onboarded", inventoryHandlers.GetOnboardedBrands)
 	router.PUT("/api/inventory/saas-brands/onboarded/:id", inventoryHandlers.UpdateOnboardedBrand)
 	router.GET("/api/inventory/brands/custom", inventoryHandlers.GetCustomBrands)
+	router.POST("/api/inventory/brands/custom", inventoryHandlers.CreateBrandWithVariants)
+	router.GET("/api/inventory/saas-brands/metadata", inventoryHandlers.GetBrandMetadata)
+	router.POST("/api/inventory/saas-brands/refresh-cache", inventoryHandlers.RefreshBrandCache)
 
 	// Legacy SaaS Brand Integration (keeping for backward compatibility)
 	router.GET("/brands/saas/available", inventoryHandlers.GetAvailableBrands)
@@ -193,6 +251,9 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	// Product Catalog Routes
 	router.GET("/api/catalog/product-templates", inventoryHandlers.GetProductTemplates)
 	router.GET("/api/catalog/subcategories", inventoryHandlers.GetSubcategories)
+
+	// Sizes Route (for filter dropdowns - normalized to uppercase)
+	router.GET("/sizes", inventoryHandlers.GetDistinctSizes)
 
 	// Reports Routes
 	router.GET("/reports/low-stock", inventoryHandlers.GetStocks)

@@ -282,18 +282,18 @@ func (s *RateLimitService) GetRateLimitStats(tenantID *uuid.UUID, hours int) (ma
 // Helper methods
 
 func (s *RateLimitService) getRateLimitConfig(name string, tenantID *uuid.UUID) (*models.RateLimit, error) {
-	// Try cache first
+	// Try cache first - cache the ACTUAL config, not just "exists"
 	ctx := context.Background()
 	cacheKey := fmt.Sprintf("rate_limit_config:%s", name)
 	if tenantID != nil {
 		cacheKey = fmt.Sprintf("rate_limit_config:%s:%s", name, tenantID.String())
 	}
 
-	var cached string
+	var cached models.RateLimit
 	err := s.cache.Get(ctx, cacheKey, &cached)
-	if err == nil && cached != "" {
-		// Cache hit - get from database (simplified approach)
-		return s.GetRateLimitByName(name, tenantID)
+	if err == nil && cached.ID != uuid.Nil {
+		// Cache hit - return cached config directly (no DB query)
+		return &cached, nil
 	}
 
 	// Get from database
@@ -302,8 +302,8 @@ func (s *RateLimitService) getRateLimitConfig(name string, tenantID *uuid.UUID) 
 		return nil, err
 	}
 
-	// Cache for 5 minutes
-	s.cache.Set(ctx, cacheKey, "exists", 5*time.Minute)
+	// Cache the full config for 1 hour (rarely changes)
+	s.cache.Set(ctx, cacheKey, rateLimit, cache.RateLimitConfigTTL)
 
 	return rateLimit, nil
 }
@@ -357,4 +357,55 @@ func (s *RateLimitService) ResetRateLimit(rateLimitName string, identifier strin
 	s.cache.Delete(ctx, cacheKey)
 
 	return nil
+}
+
+// ============================================================================
+// Ultra-Fast Rate Limiting (Redis-only, no DB queries)
+// Target: <2ms per check
+// ============================================================================
+
+// CheckRateLimitFast performs rate limiting using only Redis (no DB queries)
+// This is optimized for sub-20ms response times in hot paths like OTP/Login
+// Falls back to allowing request if Redis is unavailable (fail-open)
+func (s *RateLimitService) CheckRateLimitFast(ctx context.Context, rateLimitName string, identifier string, maxAttempts int, windowSeconds int) (bool, int64, error) {
+	// Generate window-based key (resets every window)
+	windowID := time.Now().Unix() / int64(windowSeconds)
+	key := fmt.Sprintf("rl:%s:%s:%d", rateLimitName, identifier, windowID)
+
+	// Single atomic increment + expire operation
+	count, err := s.cache.IncrementWithExpiry(ctx, key, time.Duration(windowSeconds*2)*time.Second)
+	if err != nil {
+		// Redis error - fail open (allow request)
+		return false, 0, nil
+	}
+
+	// Check if limit exceeded
+	isBlocked := count > int64(maxAttempts)
+	return isBlocked, count, nil
+}
+
+// CheckOTPRateLimitFast is a specialized fast rate limiter for OTP requests
+// Defaults: 5 attempts per 60 seconds
+func (s *RateLimitService) CheckOTPRateLimitFast(ctx context.Context, mobile string) (bool, error) {
+	isBlocked, count, err := s.CheckRateLimitFast(ctx, "otp_send", mobile, 5, 60)
+	if err != nil {
+		return false, err
+	}
+	if isBlocked {
+		return true, fmt.Errorf("too many OTP requests (attempt %d of 5). Please wait 60 seconds", count)
+	}
+	return false, nil
+}
+
+// CheckLoginRateLimitFast is a specialized fast rate limiter for login attempts
+// Defaults: 10 attempts per 300 seconds (5 minutes)
+func (s *RateLimitService) CheckLoginRateLimitFast(ctx context.Context, identifier string) (bool, error) {
+	isBlocked, count, err := s.CheckRateLimitFast(ctx, "login", identifier, 10, 300)
+	if err != nil {
+		return false, err
+	}
+	if isBlocked {
+		return true, fmt.Errorf("too many login attempts (attempt %d of 10). Please wait 5 minutes", count)
+	}
+	return false, nil
 }

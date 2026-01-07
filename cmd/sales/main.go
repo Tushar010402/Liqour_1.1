@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	notifservices "github.com/liquorpro/go-backend/internal/notifications/services"
 	"github.com/liquorpro/go-backend/internal/sales/handlers"
 	"github.com/liquorpro/go-backend/internal/sales/routes"
 	"github.com/liquorpro/go-backend/internal/sales/services"
@@ -65,11 +66,39 @@ func main() {
 	}
 	defer redisCache.Close()
 
+	// Initialize notification services for workflow notifications
+	notificationService := notifservices.NewNotificationService(db, redisCache)
+	workflowNotificationService := notifservices.NewWorkflowNotificationService(db, notificationService)
+
 	// Initialize services
 	dailySalesService := services.NewDailySalesService(db, redisCache)
 	salesService := services.NewSalesService(db, redisCache)
 	returnsService := services.NewReturnsService(db, redisCache)
 	dashboardService := services.NewDashboardService(db, redisCache)
+
+	// Wire up workflow notifications for sales approval workflows
+	salesService.SetWorkflowNotificationService(workflowNotificationService)
+	dailySalesService.SetWorkflowNotificationService(workflowNotificationService)
+	log.Println("Workflow notifications initialized for sales service")
+
+	// Initialize OCR service with Gemini AI
+	ocrService, err := services.NewOCRService(db)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize OCR service: %v", err)
+		log.Println("OCR endpoints will not be available")
+	}
+	if ocrService != nil {
+		defer ocrService.Close()
+	}
+
+	// Initialize AI Validation service (requires OCR service for auto-validation)
+	var validationService *services.ValidationService
+	if ocrService != nil {
+		validationService = services.NewValidationService(db, redisCache, ocrService)
+		log.Println("AI Validation service initialized for daily sales records")
+	} else {
+		log.Println("Warning: AI Validation service not available (OCR service required)")
+	}
 
 	// Initialize handlers
 	salesHandlers := handlers.NewSalesHandlers(
@@ -78,6 +107,27 @@ func main() {
 		returnsService,
 		dashboardService,
 	)
+
+	// Wire up validation service for AI-powered validation
+	if validationService != nil {
+		salesHandlers.SetValidationService(validationService)
+	}
+
+	// Initialize OCR handlers (nil-safe)
+	var ocrHandlers *handlers.OCRHandlers
+	if ocrService != nil {
+		ocrHandlers = handlers.NewOCRHandlers(ocrService)
+	}
+
+	// Initialize draft service and handlers (backend-based draft persistence)
+	draftService := services.NewDraftService(db, dailySalesService)
+	draftHandlers := handlers.NewDraftHandlers(draftService)
+	log.Println("Draft persistence service initialized for daily sales")
+
+	// Initialize purcha report service and handlers (daily sales register)
+	purchaReportService := services.NewPurchaReportService(db, redisCache)
+	purchaReportHandler := handlers.NewPurchaReportHandler(purchaReportService)
+	log.Println("Purcha report service initialized for daily sales register")
 
 	// Create router
 	router := gin.New()
@@ -89,7 +139,9 @@ func main() {
 	router.Use(middleware.CORSMiddleware())
 
 	// Setup routes
-	routes.SetupRoutes(router, cfg, redisCache, salesHandlers)
+	// Use SetupProtectedRoutes since this service is behind the API Gateway
+	// The gateway handles authentication and forwards user context via headers
+	routes.SetupProtectedRoutes(router, cfg, redisCache, salesHandlers, ocrHandlers, draftHandlers, purchaReportHandler)
 
 	// Start server
 	srv := &http.Server{

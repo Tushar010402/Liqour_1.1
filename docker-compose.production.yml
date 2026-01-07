@@ -99,6 +99,34 @@ services:
         compress: "true"
 
   # ========================================
+  # Database Migrations (runs first)
+  # ========================================
+
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrations
+    image: liquorpro/migrations:${VERSION:-latest}
+    container_name: liquorpro-migrations-prod
+    restart: "no"  # Run once only
+    environment:
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${DATABASE_USER}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - DATABASE_NAME=${DATABASE_NAME}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - liquorpro-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ========================================
   # Microservices
   # ========================================
 
@@ -138,6 +166,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     networks:
       - liquorpro-network
     volumes:
@@ -197,6 +227,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     networks:
       - liquorpro-network
     volumes:
@@ -261,6 +293,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     networks:
       - liquorpro-network
     healthcheck:
@@ -319,6 +353,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     networks:
       - liquorpro-network
     volumes:
@@ -378,6 +414,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     networks:
       - liquorpro-network
     volumes:
@@ -437,6 +475,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     networks:
       - liquorpro-network
     volumes:

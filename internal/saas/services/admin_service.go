@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -614,12 +615,218 @@ func (s *AdminService) GetAdminByMobile(ctx context.Context, mobile string) (map
 	}, nil
 }
 
+// GetAllTenantsWithPagination returns paginated list of tenants with filtering and search
+func (s *AdminService) GetAllTenantsWithPagination(ctx context.Context, params map[string]interface{}) ([]map[string]interface{}, int, error) {
+	page := params["page"].(int)
+	limit := params["limit"].(int)
+	search := params["search"].(string)
+	status := params["status"].(string)
+	sortBy := params["sort_by"].(string)
+	order := params["order"].(string)
+
+	offset := (page - 1) * limit
+
+	type TenantData struct {
+		ID               string     `json:"id"`
+		Name             string     `json:"name"`
+		Slug             string     `json:"slug"`
+		Email            string     `json:"email"`
+		Phone            string     `json:"phone"`
+		Status           string     `json:"status"`
+		SubscriptionPlan string     `json:"subscription_plan"`
+		LocationsCount   int        `json:"locations_count"`
+		UsersCount       int        `json:"users_count"`
+		ProductsCount    int        `json:"products_count"`
+		CreatedAt        time.Time  `json:"created_at"`
+		LastActive       *time.Time `json:"last_active"`
+	}
+
+	var tenants []TenantData
+	var total int
+
+	// Build WHERE clause for filters
+	whereConditions := []string{"1=1"}
+	queryArgs := []interface{}{}
+	argCount := 0
+
+	// Add search filter
+	if search != "" {
+		argCount++
+		whereConditions = append(whereConditions, fmt.Sprintf("(t.name ILIKE $%d OR admin_user.email ILIKE $%d OR t.phone ILIKE $%d)", argCount, argCount, argCount))
+		searchPattern := "%" + search + "%"
+		queryArgs = append(queryArgs, searchPattern)
+	}
+
+	// Add status filter
+	if status != "" && status != "all" {
+		argCount++
+		whereConditions = append(whereConditions, fmt.Sprintf("COALESCE(latest_sub.status, 'no_subscription') = $%d", argCount))
+		queryArgs = append(queryArgs, status)
+	}
+
+	whereClause := strings.Join(whereConditions, " AND ")
+
+	// First, get the total count
+	countQuery := fmt.Sprintf(`
+		SELECT COUNT(DISTINCT t.id)
+		FROM tenants t
+		LEFT JOIN (
+			SELECT tenant_id, email
+			FROM users
+			WHERE role = 'admin'
+			AND tenant_id IS NOT NULL
+		) admin_user ON admin_user.tenant_id = t.id
+		LEFT JOIN (
+			SELECT DISTINCT ON (tenant_id)
+				tenant_id,
+				status,
+				updated_at
+			FROM subscriptions
+			ORDER BY tenant_id, created_at DESC
+		) latest_sub ON latest_sub.tenant_id = t.id
+		WHERE %s
+	`, whereClause)
+
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get DB connection: %w", err)
+	}
+
+	err = sqlDB.QueryRowContext(ctx, countQuery, queryArgs...).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get total count: %w", err)
+	}
+
+	// Build ORDER BY clause
+	orderClause := "t.created_at DESC" // default
+	validSortFields := map[string]string{
+		"name":       "t.name",
+		"created_at": "t.created_at",
+		"status":     "status",
+		"email":      "email",
+		"phone":      "t.phone",
+	}
+
+	if field, ok := validSortFields[sortBy]; ok {
+		if order == "asc" {
+			orderClause = field + " ASC"
+		} else {
+			orderClause = field + " DESC"
+		}
+	}
+
+	// Add pagination arguments
+	argCount++
+	limitArg := argCount
+	argCount++
+	offsetArg := argCount
+	queryArgs = append(queryArgs, limit, offset)
+
+	// Get paginated tenants with their latest subscription and usage info
+	query := fmt.Sprintf(`
+		SELECT DISTINCT
+			t.id as id,
+			t.name as name,
+			t.name as slug,
+			COALESCE(admin_user.email, '') as email,
+			COALESCE(t.phone, '') as phone,
+			COALESCE(latest_sub.status, 'no_subscription') as status,
+			'No Plan' as subscription_plan,
+			COALESCE(ur.locations, 0) as locations_count,
+			COALESCE(ur.users, 0) as users_count,
+			COALESCE(ur.products, 0) as products_count,
+			t.created_at,
+			COALESCE(ur.updated_at, latest_sub.updated_at, t.updated_at) as last_active
+		FROM tenants t
+		LEFT JOIN (
+			SELECT tenant_id, email
+			FROM users
+			WHERE role = 'admin'
+			AND tenant_id IS NOT NULL
+		) admin_user ON admin_user.tenant_id = t.id
+		LEFT JOIN (
+			SELECT DISTINCT ON (tenant_id)
+				tenant_id,
+				status,
+				plan_id,
+				updated_at
+			FROM subscriptions
+			ORDER BY tenant_id, created_at DESC
+		) latest_sub ON latest_sub.tenant_id = t.id
+		LEFT JOIN (
+			SELECT
+				tenant_id,
+				MAX(locations) as locations,
+				MAX(users) as users,
+				MAX(products) as products,
+				MAX(updated_at) as updated_at
+			FROM usage_records
+			GROUP BY tenant_id
+		) ur ON ur.tenant_id = t.id
+		WHERE %s
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d
+	`, whereClause, orderClause, limitArg, offsetArg)
+
+	rows, err := sqlDB.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query tenants: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tenant TenantData
+		err := rows.Scan(
+			&tenant.ID,
+			&tenant.Name,
+			&tenant.Slug,
+			&tenant.Email,
+			&tenant.Phone,
+			&tenant.Status,
+			&tenant.SubscriptionPlan,
+			&tenant.LocationsCount,
+			&tenant.UsersCount,
+			&tenant.ProductsCount,
+			&tenant.CreatedAt,
+			&tenant.LastActive,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan tenant: %w", err)
+		}
+		tenants = append(tenants, tenant)
+	}
+
+	// Convert to map[string]interface{}
+	var result []map[string]interface{}
+	for _, tenant := range tenants {
+		tenantMap := map[string]interface{}{
+			"id":                tenant.ID,
+			"name":              tenant.Name,
+			"slug":              tenant.Slug,
+			"email":             tenant.Email,
+			"phone":             tenant.Phone,
+			"status":            tenant.Status,
+			"subscription_plan": tenant.SubscriptionPlan,
+			"locations_count":   tenant.LocationsCount,
+			"users_count":       tenant.UsersCount,
+			"products_count":    tenant.ProductsCount,
+			"created_at":        tenant.CreatedAt,
+			"last_active":       tenant.LastActive,
+		}
+		result = append(result, tenantMap)
+	}
+
+	return result, total, nil
+}
+
 // Helper function to generate OTP
 func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interface{}, error) {
 	type TenantData struct {
 		ID               string     `json:"id"`
 		Name             string     `json:"name"`
+		Slug             string     `json:"slug"`
 		Email            string     `json:"email"`
+		Phone            string     `json:"phone"`
 		Status           string     `json:"status"`
 		SubscriptionPlan string     `json:"subscription_plan"`
 		LocationsCount   int        `json:"locations_count"`
@@ -636,9 +843,11 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 		SELECT DISTINCT
 			t.id as id,
 			t.name as name,
-			COALESCE(t.domain, 'no-domain.com') as email,
+			t.name as slug,
+			COALESCE(admin_user.email, '') as email,
+			COALESCE(t.phone, '') as phone,
 			COALESCE(latest_sub.status, 'no_subscription') as status,
-			COALESCE(p.display_name, 'No Plan') as subscription_plan,
+			'No Plan' as subscription_plan,
 			COALESCE(ur.locations, 0) as locations_count,
 			COALESCE(ur.users, 0) as users_count,
 			COALESCE(ur.products, 0) as products_count,
@@ -646,13 +855,18 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 			COALESCE(ur.updated_at, latest_sub.updated_at, t.updated_at) as last_active
 		FROM tenants t
 		LEFT JOIN (
+			SELECT tenant_id, email
+			FROM users
+			WHERE role = 'admin' AND deleted_at IS NULL
+			GROUP BY tenant_id, email
+		) admin_user ON t.id = admin_user.tenant_id
+		LEFT JOIN (
 			SELECT DISTINCT ON (tenant_id)
 				tenant_id, id, status, plan_id, created_at, updated_at
 			FROM subscriptions
 			WHERE deleted_at IS NULL
 			ORDER BY tenant_id, created_at DESC
 		) latest_sub ON t.id = latest_sub.tenant_id
-		LEFT JOIN pricing_plans p ON latest_sub.plan_id = p.id
 		LEFT JOIN (
 			SELECT
 				subscription_id,
@@ -677,7 +891,9 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 		result[i] = map[string]interface{}{
 			"id":                tenant.ID,
 			"name":              tenant.Name,
+			"slug":              tenant.Slug,
 			"email":             tenant.Email,
+			"phone":             tenant.Phone,
 			"status":            tenant.Status,
 			"subscription_plan": tenant.SubscriptionPlan,
 			"locations_count":   tenant.LocationsCount,

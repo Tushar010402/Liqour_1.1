@@ -459,14 +459,35 @@ func (s *ReturnsService) mapSaleReturnToResponse(saleReturn *models.SaleReturn) 
 					response.Items[i].BrandName = item.SaleItem.Product.Brand.Name
 				}
 
+				// Try local category first, then fall back to SaaS brand_categories
 				if item.SaleItem.Product.Category != nil {
 					response.Items[i].CategoryName = item.SaleItem.Product.Category.Name
+				} else if item.SaleItem.Product.CategoryID != uuid.Nil {
+					// Fallback to SaaS brand_categories table for products using SaaS-level category_id
+					if saasCategoryName := s.getSaaSCategoryName(item.SaleItem.Product.CategoryID); saasCategoryName != "" {
+						response.Items[i].CategoryName = saasCategoryName
+					}
 				}
 			}
 		}
 	}
 
 	return response
+}
+
+// getSaaSCategoryName looks up category name from SaaS brand_categories table
+// This is a fallback when the product uses a SaaS-level category_id that doesn't exist in tenant categories
+func (s *ReturnsService) getSaaSCategoryName(categoryID uuid.UUID) string {
+	var category struct {
+		Name string
+	}
+	if err := s.db.Table("brand_categories").
+		Select("name").
+		Where("id = ?", categoryID).
+		First(&category).Error; err == nil {
+		return category.Name
+	}
+	return ""
 }
 
 // clearReturnsCache clears related cache entries

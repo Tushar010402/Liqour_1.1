@@ -98,12 +98,14 @@ type ShopSummary struct {
 
 // TopProductSummary represents top-selling products
 type TopProductSummary struct {
-	ProductID     uuid.UUID `json:"product_id"`
-	ProductName   string    `json:"product_name"`
-	BrandName     string    `json:"brand_name"`
-	CategoryName  string    `json:"category_name"`
-	TotalQuantity int       `json:"total_quantity"`
-	TotalAmount   float64   `json:"total_amount"`
+	ProductID       uuid.UUID `json:"product_id"`
+	ProductName     string    `json:"product_name"`
+	BrandName       string    `json:"brand_name"`
+	CategoryName    string    `json:"category_name"`
+	SubcategoryName string    `json:"subcategory_name,omitempty"`
+	ImageURL        string    `json:"image_url"`
+	TotalQuantity   int       `json:"total_quantity"`
+	TotalAmount     float64   `json:"total_amount"`
 }
 
 // RecentSaleActivity represents recent sale activities

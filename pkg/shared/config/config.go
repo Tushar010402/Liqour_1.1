@@ -136,8 +136,8 @@ func setDefaults() {
 
 	// JWT defaults
 	viper.SetDefault("jwt.secret", "your-secret-key")
-	viper.SetDefault("jwt.expiration_hours", 24)
-	viper.SetDefault("jwt.refresh_hours", 168) // 7 days
+	viper.SetDefault("jwt.expiration_hours", 1440) // 60 days
+	viper.SetDefault("jwt.refresh_hours", 2160)    // 90 days
 	viper.SetDefault("jwt.issuer", "liquorpro")
 
 	// App defaults

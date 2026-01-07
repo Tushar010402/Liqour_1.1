@@ -84,6 +84,7 @@ type SaaSBrandTemplate struct {
 	IsActive      bool                    `json:"is_active"`
 	SortOrder     int                     `json:"sort_order"`
 	BrandVariants []SaaSBrandVariant      `json:"brand_variants,omitempty"`
+	IsOnboarded   bool                    `json:"is_onboarded"` // True if any variant is onboarded for tenant
 	CreatedAt     interface{}             `json:"created_at"`
 	UpdatedAt     interface{}             `json:"updated_at"`
 }
@@ -105,6 +106,7 @@ type SaaSBrandVariant struct {
 	HSNCode        string           `json:"hsn_code"`
 	IsActive       bool             `json:"is_active"`
 	SortOrder      int              `json:"sort_order"`
+	IsOnboarded    bool             `json:"is_onboarded"` // True if this variant exists in tenant's products
 	Category       *SaaSCategory    `json:"category,omitempty"`
 	Subcategory    *SaaSSubcategory `json:"subcategory,omitempty"`
 	CreatedAt      interface{}      `json:"created_at"`

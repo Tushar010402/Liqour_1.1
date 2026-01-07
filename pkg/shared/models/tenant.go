@@ -9,11 +9,17 @@ import (
 // Tenant represents a company/organization in the multi-tenant system
 type Tenant struct {
 	BaseModel
-	Name         string     `json:"name" gorm:"not null"`
-	Domain       string     `json:"domain"`
-	IsActive     bool       `json:"is_active" gorm:"default:true"`
-	SubscribedAt time.Time  `json:"subscribed_at"`
-	ExpiresAt    *time.Time `json:"expires_at"`
+	Name        string    `json:"name" gorm:"not null;uniqueIndex"`
+	CompanyName string    `json:"company_name" gorm:"column:company_name;not null"`
+	Logo        string    `json:"logo"`
+	Phone       string    `json:"phone"`
+	Address     string    `json:"address"`
+	City        string    `json:"city"`
+	State       string    `json:"state"`
+	Country     string    `json:"country"`
+	PostalCode  string    `json:"postal_code" gorm:"column:postal_code"`
+	IsActive    bool      `json:"is_active" gorm:"default:true"`
+	OnboardedAt time.Time `json:"onboarded_at" gorm:"column:onboarded_at;default:now()"`
 
 	// Relationships
 	Shops []Shop `json:"shops,omitempty" gorm:"foreignKey:TenantID"`

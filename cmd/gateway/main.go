@@ -12,10 +12,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/gateway/handlers"
+	gatewayMiddleware "github.com/liquorpro/go-backend/internal/gateway/middleware"
 	"github.com/liquorpro/go-backend/internal/gateway/routes"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
+	"github.com/liquorpro/go-backend/pkg/shared/logger"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
 )
 
@@ -69,8 +71,9 @@ func main() {
 	defer redisCache.Close()
 
 	// Initialize HTTP client for service communication
+	// Extended timeout for OCR batch processing (Vision API + Gemini extraction)
 	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: 300 * time.Second,
 	}
 
 	// Initialize handlers
@@ -79,14 +82,33 @@ func main() {
 	// Create router
 	router := gin.New()
 
+	// Set max multipart memory to 100MB (for large file uploads like OCR images)
+	router.MaxMultipartMemory = 100 << 20 // 100 MB
+
 	// Add middleware
 	router.Use(gin.Recovery())
 	router.Use(middleware.LoggingMiddleware())
 	router.Use(middleware.RequestIDMiddleware())
 	router.Use(middleware.CORSMiddleware())
 
-	// Setup routes
-	routes.SetupRoutes(router, cfg, redisCache, gatewayHandlers)
+	// Initialize logger for rate limiter
+	zapLogger, err := logger.NewLogger(cfg.App.Environment)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize logger for rate limiter: %v", err)
+	}
+
+	// Initialize Redis-based rate limiter (distributed across gateway instances)
+	redisRateLimiter := middleware.NewRedisRateLimiter(redisCache.Client(), zapLogger)
+
+	// Register endpoint-specific limits (validation, auth, OCR, finance, etc.)
+	gatewayMiddleware.RegisterEndpointLimits(redisRateLimiter)
+
+	// Apply endpoint-specific rate limits globally (runs BEFORE auth for public endpoints)
+	// This protects against enumeration attacks on /api/admin/validate/* and OTP bombing
+	router.Use(redisRateLimiter.EndpointMiddleware())
+
+	// Setup routes - pass rate limiter for role-based limiting on protected routes
+	routes.SetupRoutes(router, cfg, redisCache, gatewayHandlers, redisRateLimiter)
 
 	// Start server
 	srv := &http.Server{

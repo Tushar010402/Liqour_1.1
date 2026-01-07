@@ -62,8 +62,10 @@ type StockResponse struct {
 	ProductName       string     `json:"product_name"`
 	BrandName         string     `json:"brand_name"`
 	CategoryName      string     `json:"category_name"`
+	SubcategoryName   string     `json:"subcategory_name,omitempty"`
 	Size              string     `json:"size"`
 	SKU               string     `json:"sku"`
+	ImageURL          string     `json:"image_url"`
 	Quantity          int        `json:"quantity"`
 	ReservedQuantity  int        `json:"reserved_quantity"`
 	AvailableQuantity int        `json:"available_quantity"`
@@ -106,7 +108,8 @@ func (s *StockService) GetStockByShop(ctx context.Context, shopID, tenantID uuid
 		Where("shop_id = ? AND tenant_id = ?", shopID, tenantID).
 		Preload("Shop").
 		Preload("Product.Brand").
-		Preload("Product.Category")
+		Preload("Product.Category").
+		Preload("Product.Subcategory")
 
 	// Apply filters
 	if filters.ProductID != uuid.Nil {
@@ -151,6 +154,7 @@ func (s *StockService) GetStockByProduct(ctx context.Context, productID, tenantI
 		Preload("Shop").
 		Preload("Product.Brand").
 		Preload("Product.Category").
+		Preload("Product.Subcategory").
 		Find(&stocks).Error
 
 	if err != nil {
@@ -206,11 +210,12 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				// Create new stock record
 				stock = models.Stock{
-					TenantModel:   models.TenantModel{TenantID: &tenantID},
-					ShopID:        req.ShopID,
-					ProductID:     req.ProductID,
-					Quantity:      0,
-					CostingMethod: models.CostingFIFO,
+					TenantModel:       models.TenantModel{TenantID: &tenantID},
+					ShopID:            req.ShopID,
+					ProductID:         req.ProductID,
+					Quantity:          0,
+					AvailableQuantity: 0,
+					CostingMethod:     models.CostingFIFO,
 				}
 				if err := tx.Create(&stock).Error; err != nil {
 					return fmt.Errorf("failed to create stock record: %w", err)
@@ -250,6 +255,7 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 
 		// Update stock
 		stock.Quantity = newQuantity
+		stock.UpdateAvailableQuantity()
 		if err := tx.Save(&stock).Error; err != nil {
 			return fmt.Errorf("failed to update stock: %w", err)
 		}
@@ -282,7 +288,7 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 	s.clearStockCache(ctx, tenantID, req.ShopID, req.ProductID)
 
 	// Load related data and return
-	s.db.Preload("Shop").Preload("Product.Brand").Preload("Product.Category").First(&stock, stock.ID)
+	s.db.Preload("Shop").Preload("Product.Brand").Preload("Product.Category").Preload("Product.Subcategory").First(&stock, stock.ID)
 	return s.mapStockToResponse(&stock), nil
 }
 
@@ -330,6 +336,7 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 
 			// Update source stock
 			fromStock.Quantity -= item.Quantity
+			fromStock.UpdateAvailableQuantity()
 			if err := tx.Save(&fromStock).Error; err != nil {
 				return fmt.Errorf("failed to update source stock: %w", err)
 			}
@@ -359,12 +366,13 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					// Create new stock record
 					toStock = models.Stock{
-						TenantModel:   models.TenantModel{TenantID: &tenantID},
-						ShopID:        req.ToShopID,
-						ProductID:     item.ProductID,
-						Quantity:      0,
-						CostingMethod: fromStock.CostingMethod,
-						AverageCost:   fromStock.AverageCost,
+						TenantModel:       models.TenantModel{TenantID: &tenantID},
+						ShopID:            req.ToShopID,
+						ProductID:         item.ProductID,
+						Quantity:          0,
+						AvailableQuantity: 0,
+						CostingMethod:     fromStock.CostingMethod,
+						AverageCost:       fromStock.AverageCost,
 					}
 					if err := tx.Create(&toStock).Error; err != nil {
 						return fmt.Errorf("failed to create destination stock: %w", err)
@@ -377,6 +385,7 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 			// Update destination stock
 			previousToQty := toStock.Quantity
 			toStock.Quantity += item.Quantity
+			toStock.UpdateAvailableQuantity()
 			if err := tx.Save(&toStock).Error; err != nil {
 				return fmt.Errorf("failed to update destination stock: %w", err)
 			}
@@ -587,6 +596,7 @@ func (s *StockService) mapStockToResponse(stock *models.Stock) *StockResponse {
 		response.ProductName = stock.Product.Name
 		response.Size = stock.Product.Size
 		response.SKU = stock.Product.SKU
+		response.ImageURL = stock.Product.ImageURL
 
 		if stock.Product.Brand != nil {
 			response.BrandName = stock.Product.Brand.Name
@@ -594,6 +604,10 @@ func (s *StockService) mapStockToResponse(stock *models.Stock) *StockResponse {
 
 		if stock.Product.Category != nil {
 			response.CategoryName = stock.Product.Category.Name
+		}
+
+		if stock.Product.Subcategory != nil {
+			response.SubcategoryName = stock.Product.Subcategory.Name
 		}
 	}
 
@@ -879,4 +893,92 @@ func (s *StockService) GetStockAgingReport(ctx context.Context, tenantID uuid.UU
 		RiskItems:  riskItems,
 		TotalValue: totalValue,
 	}, nil
+}
+
+// GetStockMovements retrieves stock movement history with filtering and pagination
+func (s *StockService) GetStockMovements(ctx context.Context, tenantID uuid.UUID, shopID, productID *uuid.UUID, movementType string, limit, offset int) ([]*StockHistoryResponse, int64, error) {
+	var movements []models.StockMovement
+	var total int64
+
+	// Build base query
+	query := s.db.Model(&models.StockMovement{}).
+		Where("stock_movements.tenant_id = ?", tenantID).
+		Joins("JOIN stocks ON stocks.id = stock_movements.stock_id").
+		Joins("JOIN products ON products.id = stocks.product_id").
+		Joins("JOIN shops ON shops.id = stocks.shop_id")
+
+	// Apply filters
+	if shopID != nil {
+		query = query.Where("stocks.shop_id = ?", *shopID)
+	}
+
+	if productID != nil {
+		query = query.Where("stocks.product_id = ?", *productID)
+	}
+
+	if movementType != "" {
+		query = query.Where("stock_movements.movement_type = ?", movementType)
+	}
+
+	// Get total count
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to count stock movements: %w", err)
+	}
+
+	// Get movements with pagination
+	if err := s.db.
+		Where("stock_movements.tenant_id = ?", tenantID).
+		Joins("JOIN stocks ON stocks.id = stock_movements.stock_id").
+		Joins("JOIN products ON products.id = stocks.product_id").
+		Joins("JOIN shops ON shops.id = stocks.shop_id").
+		Preload("Stock").
+		Preload("Stock.Product").
+		Preload("Stock.Shop").
+		Order("stock_movements.created_at DESC").
+		Limit(limit).
+		Offset(offset).
+		Find(&movements).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to get stock movements: %w", err)
+	}
+
+	// Build response
+	var responses []*StockHistoryResponse
+	for _, movement := range movements {
+		response := &StockHistoryResponse{
+			ID:           movement.ID,
+			StockID:      movement.StockID,
+			MovementType: movement.MovementType,
+			Quantity:     movement.Quantity,
+			Reference:    movement.Reference,
+			Notes:        movement.Notes,
+			CreatedAt:    movement.CreatedAt,
+		}
+
+		if movement.Stock != nil {
+			if movement.Stock.Product != nil {
+				response.ProductName = movement.Stock.Product.Name
+			}
+			if movement.Stock.Shop != nil {
+				response.ShopName = movement.Stock.Shop.Name
+			}
+		}
+
+		responses = append(responses, response)
+	}
+
+	return responses, total, nil
+}
+
+// GetSalesmanShopID retrieves the shop_id assigned to a salesman by their user_id
+// Returns nil if user is not a salesman or has no shop assigned
+func (s *StockService) GetSalesmanShopID(ctx context.Context, userID, tenantID uuid.UUID) (*uuid.UUID, error) {
+	var salesman models.Salesman
+	err := s.db.Where("user_id = ? AND tenant_id = ?", userID, tenantID).First(&salesman).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil // User is not a salesman
+		}
+		return nil, fmt.Errorf("failed to lookup salesman: %w", err)
+	}
+	return &salesman.ShopID, nil
 }

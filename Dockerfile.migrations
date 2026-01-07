@@ -1,0 +1,18 @@
+# Migration Runner Container
+# Runs database migrations before application services start
+FROM postgres:15-alpine
+
+# Install bash for migration script
+RUN apk add --no-cache bash coreutils
+
+# Copy migration files
+COPY migrations/ /migrations/
+
+# Make migration script executable
+RUN chmod +x /migrations/run_migrations.sh
+
+# Set working directory
+WORKDIR /migrations
+
+# Run migrations
+CMD ["/migrations/run_migrations.sh"]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/google/uuid"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
@@ -29,23 +30,26 @@ func NewUserService(db *database.DB, cache *cache.Cache) *UserService {
 
 // CreateUserRequest represents user creation request
 type CreateUserRequest struct {
-	Username  string `json:"username" binding:"required,min=3,max=50"`
-	Email     string `json:"email" binding:"required,email"`
-	Password  string `json:"password" binding:"required,min=8"`
-	FirstName string `json:"first_name" binding:"required"`
-	LastName  string `json:"last_name" binding:"required"`
-	Phone     string `json:"phone"`
-	Role      string `json:"role" binding:"required"`
-	IsActive  bool   `json:"is_active"`
+	Username  string     `json:"username" binding:"required,min=3,max=50"`
+	Email     string     `json:"email" binding:"omitempty,email"` // Optional, but must be valid email format if provided
+	Password  string     `json:"password" binding:"required,min=8"`
+	FirstName string     `json:"first_name" binding:"required"`
+	LastName  string     `json:"last_name" binding:"required"`
+	Phone     string     `json:"phone"`
+	Role      string     `json:"role" binding:"required"`
+	IsActive  bool       `json:"is_active"`
+	ShopID    *uuid.UUID `json:"shop_id"`
 }
 
 // UpdateUserRequest represents user update request
 type UpdateUserRequest struct {
-	FirstName    *string `json:"first_name"`
-	LastName     *string `json:"last_name"`
-	Phone        *string `json:"phone"`
-	ProfileImage *string `json:"profile_image"`
-	IsActive     *bool   `json:"is_active"`
+	FirstName    *string    `json:"first_name"`
+	LastName     *string    `json:"last_name"`
+	Phone        *string    `json:"phone"`
+	ProfileImage *string    `json:"profile_image"`
+	IsActive     *bool      `json:"is_active"`
+	Role         *string    `json:"role"`
+	ShopID       *uuid.UUID `json:"shop_id"`
 }
 
 // ChangePasswordRequest represents password change request
@@ -64,22 +68,29 @@ type UserListResponse struct {
 }
 
 // GetUsers returns paginated list of users for a tenant
-func (s *UserService) GetUsers(ctx context.Context, tenantID uuid.UUID, page, pageSize int) (*UserListResponse, error) {
+func (s *UserService) GetUsers(ctx context.Context, tenantID uuid.UUID, page, pageSize int, roleFilter []string) (*UserListResponse, error) {
 	var users []models.User
 	var totalCount int64
 
 	offset := (page - 1) * pageSize
 
+	// Build query with optional role filter
+	query := s.db.Model(&models.User{}).Where("tenant_id = ?", tenantID)
+	if len(roleFilter) > 0 {
+		query = query.Where("role IN ?", roleFilter)
+	}
+
 	// Count total users
-	if err := s.db.Model(&models.User{}).
-		Where("tenant_id = ?", tenantID).
-		Count(&totalCount).Error; err != nil {
+	if err := query.Count(&totalCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count users: %w", err)
 	}
 
 	// Get users with pagination
-	if err := s.db.Where("tenant_id = ?", tenantID).
-		Preload("Salesman").
+	dataQuery := s.db.Where("tenant_id = ?", tenantID)
+	if len(roleFilter) > 0 {
+		dataQuery = dataQuery.Where("role IN ?", roleFilter)
+	}
+	if err := dataQuery.Preload("Salesman.Shop").
 		Offset(offset).
 		Limit(pageSize).
 		Order("created_at DESC").
@@ -90,16 +101,31 @@ func (s *UserService) GetUsers(ctx context.Context, tenantID uuid.UUID, page, pa
 	// Convert to response format
 	userResponses := make([]*UserResponse, len(users))
 	for i, user := range users {
-		userResponses[i] = &UserResponse{
+		response := &UserResponse{
 			ID:           user.ID,
 			Username:     user.Username,
 			Email:        user.Email,
 			FirstName:    user.FirstName,
 			LastName:     user.LastName,
+			Phone:        user.Phone,
 			Role:         user.Role,
 			IsActive:     user.IsActive,
 			ProfileImage: user.ProfileImage,
 		}
+
+		// Debug logging
+		log.Printf("[GetUsers] User %s (%s): Salesman=%v", user.Username, user.ID, user.Salesman != nil)
+
+		if user.Salesman != nil {
+			log.Printf("[GetUsers] User %s has Salesman: ShopID=%s", user.Username, user.Salesman.ShopID)
+			response.ShopID = &user.Salesman.ShopID
+			if user.Salesman.Shop != nil {
+				log.Printf("[GetUsers] User %s has Shop: Name=%s", user.Username, user.Salesman.Shop.Name)
+				response.ShopName = user.Salesman.Shop.Name
+			}
+		}
+
+		userResponses[i] = response
 	}
 
 	totalPages := int((totalCount + int64(pageSize) - 1) / int64(pageSize))
@@ -118,7 +144,7 @@ func (s *UserService) GetUserByID(ctx context.Context, userID, tenantID uuid.UUI
 	var user models.User
 
 	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).
-		Preload("Salesman").
+		Preload("Salesman.Shop").
 		First(&user).Error
 
 	if err != nil {
@@ -128,25 +154,50 @@ func (s *UserService) GetUserByID(ctx context.Context, userID, tenantID uuid.UUI
 		return nil, fmt.Errorf("failed to get user: %w", err)
 	}
 
-	return &UserResponse{
+	response := &UserResponse{
 		ID:           user.ID,
 		Username:     user.Username,
 		Email:        user.Email,
 		FirstName:    user.FirstName,
 		LastName:     user.LastName,
+		Phone:        user.Phone,
 		Role:         user.Role,
 		IsActive:     user.IsActive,
 		ProfileImage: user.ProfileImage,
-	}, nil
+	}
+
+	if user.Salesman != nil {
+		response.ShopID = &user.Salesman.ShopID
+		if user.Salesman.Shop != nil {
+			response.ShopName = user.Salesman.Shop.Name
+		}
+	}
+
+	return response, nil
 }
 
 // CreateUser creates a new user
 func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, tenantID uuid.UUID) (*UserResponse, error) {
-	// Check if username or email already exists
+	// Check if username already exists
 	var existingUser models.User
-	if err := s.db.Where("(username = ? OR email = ?) AND tenant_id = ?",
-		req.Username, req.Email, tenantID).First(&existingUser).Error; err == nil {
-		return nil, errors.New("username or email already exists")
+	if err := s.db.Where("username = ? AND tenant_id = ?", req.Username, tenantID).First(&existingUser).Error; err == nil {
+		return nil, errors.New("username already exists")
+	}
+
+	// If email is provided, check if it already exists
+	if req.Email != "" {
+		if err := s.db.Where("email = ? AND tenant_id = ?", req.Email, tenantID).First(&existingUser).Error; err == nil {
+			return nil, errors.New("email already exists")
+		}
+	}
+
+	// Check if phone already exists (GLOBAL - across all tenants)
+	// Phone numbers must be unique across the entire system for OTP-based login
+	if req.Phone != "" {
+		var existingUserByPhone models.User
+		if err := s.db.Where("phone = ?", req.Phone).First(&existingUserByPhone).Error; err == nil {
+			return nil, errors.New("phone number already registered")
+		}
 	}
 
 	// Hash password
@@ -172,23 +223,58 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, ten
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
-	return &UserResponse{
+	// Handle shop assignment - create Salesman record if shop_id is provided
+	response := &UserResponse{
 		ID:           user.ID,
 		Username:     user.Username,
 		Email:        user.Email,
 		FirstName:    user.FirstName,
 		LastName:     user.LastName,
+		Phone:        user.Phone,
 		Role:         user.Role,
 		IsActive:     user.IsActive,
 		ProfileImage: user.ProfileImage,
-	}, nil
+	}
+
+	if req.ShopID != nil && *req.ShopID != uuid.Nil {
+		log.Printf("[CreateUser] Creating Salesman record for user %s with shop %s", user.ID, *req.ShopID)
+		salesman := &models.Salesman{
+			UserID:   user.ID,
+			ShopID:   *req.ShopID,
+			Name:     user.FirstName + " " + user.LastName,
+			Phone:    user.Phone,
+			IsActive: user.IsActive,
+		}
+		salesman.TenantID = &tenantID
+
+		if err := s.db.Create(salesman).Error; err != nil {
+			log.Printf("[CreateUser] Warning: failed to create salesman record: %v", err)
+			// Don't fail the user creation, just log the warning
+		} else {
+			response.ShopID = &salesman.ShopID
+			// Load the shop name
+			var shop models.Shop
+			if err := s.db.Where("id = ?", *req.ShopID).First(&shop).Error; err == nil {
+				response.ShopName = shop.Name
+			}
+		}
+	}
+
+	return response, nil
 }
 
 // UpdateUser updates user information
 func (s *UserService) UpdateUser(ctx context.Context, userID, tenantID uuid.UUID, req UpdateUserRequest) (*UserResponse, error) {
+	// Debug logging
+	log.Printf("[UpdateUser] Called for userID=%s, tenantID=%s", userID, tenantID)
+	log.Printf("[UpdateUser] Request: FirstName=%v, LastName=%v, Phone=%v, Role=%v, ShopID=%v",
+		req.FirstName, req.LastName, req.Phone, req.Role, req.ShopID)
+
 	var user models.User
 
-	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).First(&user).Error
+	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).
+		Preload("Salesman.Shop").
+		First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("user not found")
@@ -219,6 +305,10 @@ func (s *UserService) UpdateUser(ctx context.Context, userID, tenantID uuid.UUID
 		updates["is_active"] = *req.IsActive
 		user.IsActive = *req.IsActive
 	}
+	if req.Role != nil {
+		updates["role"] = *req.Role
+		user.Role = *req.Role
+	}
 
 	if len(updates) > 0 {
 		if err := s.db.Model(&user).Updates(updates).Error; err != nil {
@@ -232,16 +322,69 @@ func (s *UserService) UpdateUser(ctx context.Context, userID, tenantID uuid.UUID
 		}
 	}
 
-	return &UserResponse{
+	// Handle shop assignment via Salesman record
+	if req.ShopID != nil {
+		if *req.ShopID == uuid.Nil {
+			// Remove shop assignment - delete Salesman record if exists
+			if user.Salesman != nil {
+				if err := s.db.Delete(&models.Salesman{}, "user_id = ?", userID).Error; err != nil {
+					return nil, fmt.Errorf("failed to remove shop assignment: %w", err)
+				}
+				user.Salesman = nil
+			}
+		} else {
+			// Assign or update shop
+			if user.Salesman != nil {
+				// Update existing Salesman record
+				if err := s.db.Model(&models.Salesman{}).Where("user_id = ?", userID).
+					Update("shop_id", *req.ShopID).Error; err != nil {
+					return nil, fmt.Errorf("failed to update shop assignment: %w", err)
+				}
+				user.Salesman.ShopID = *req.ShopID
+			} else {
+				// Create new Salesman record
+				salesman := &models.Salesman{
+					UserID:   userID,
+					ShopID:   *req.ShopID,
+					Name:     user.FirstName + " " + user.LastName,
+					Phone:    user.Phone,
+					IsActive: user.IsActive,
+				}
+				salesman.TenantID = &tenantID
+				if err := s.db.Create(salesman).Error; err != nil {
+					return nil, fmt.Errorf("failed to create shop assignment: %w", err)
+				}
+				user.Salesman = salesman
+			}
+
+			// Reload the shop data
+			var shop models.Shop
+			if err := s.db.Where("id = ?", *req.ShopID).First(&shop).Error; err == nil {
+				user.Salesman.Shop = &shop
+			}
+		}
+	}
+
+	response := &UserResponse{
 		ID:           user.ID,
 		Username:     user.Username,
 		Email:        user.Email,
 		FirstName:    user.FirstName,
 		LastName:     user.LastName,
+		Phone:        user.Phone,
 		Role:         user.Role,
 		IsActive:     user.IsActive,
 		ProfileImage: user.ProfileImage,
-	}, nil
+	}
+
+	if user.Salesman != nil {
+		response.ShopID = &user.Salesman.ShopID
+		if user.Salesman.Shop != nil {
+			response.ShopName = user.Salesman.Shop.Name
+		}
+	}
+
+	return response, nil
 }
 
 // ChangePassword changes user password

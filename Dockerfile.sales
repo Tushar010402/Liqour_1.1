@@ -10,7 +10,8 @@ RUN apk add --no-cache git ca-certificates
 # Copy go mod files
 COPY go.mod go.sum ./
 
-# Download dependencies
+# Download dependencies (allow Go to auto-download required toolchain)
+ENV GOTOOLCHAIN=auto
 RUN go mod download
 
 # Copy source code
@@ -38,9 +39,6 @@ WORKDIR /root/
 # Copy binary from builder
 COPY --from=builder /app/sales .
 
-# Copy config files
-COPY --from=builder /app/config ./config
-
 # Change ownership
 RUN chown -R appuser:appgroup /root/
 
@@ -48,11 +46,11 @@ RUN chown -R appuser:appgroup /root/
 USER appuser
 
 # Expose port
-EXPOSE 8082
+EXPOSE 8092
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8082/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8092/health || exit 1
 
 # Run the application
 CMD ["./sales"]

@@ -1,6 +1,9 @@
 # SaaS Service Dockerfile
 FROM golang:1.23-alpine AS builder
 
+# Allow Go to automatically download and use newer toolchain versions
+ENV GOTOOLCHAIN=auto
+
 # Install git and build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
 
@@ -34,9 +37,6 @@ WORKDIR /app
 
 # Copy binary from builder stage
 COPY --from=builder /app/saas .
-
-# Copy config files if they exist
-COPY --from=builder /app/config ./config
 
 # Change ownership
 RUN chown -R appuser:appuser /app

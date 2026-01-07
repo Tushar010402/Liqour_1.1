@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -22,14 +23,33 @@ func NewBrandOnboardingHandler(brandOnboardingService *services.BrandOnboardingS
 
 // GetAvailableBrandTemplates returns all SaaS brand templates available for onboarding
 // @Summary Get available SaaS brand templates
-// @Description Get all active brand templates from SaaS admin for onboarding
+// @Description Get all active brand templates from SaaS admin for onboarding, with is_onboarded status
 // @Tags Brand Onboarding
 // @Produce json
 // @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
 // @Failure 500 {object} map[string]interface{}
 // @Router /api/inventory/saas-brands/available [get]
 func (h *BrandOnboardingHandler) GetAvailableBrandTemplates(c *gin.Context) {
-	templates, err := h.brandOnboardingService.GetAvailableBrandTemplates()
+	// Get tenant ID from context (set by auth middleware)
+	tenantIDStr := c.GetString("tenant_id")
+	if tenantIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Tenant ID not found in context",
+		})
+		return
+	}
+
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid tenant ID",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	templates, err := h.brandOnboardingService.GetAvailableBrandTemplates(tenantID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to fetch brand templates",
@@ -39,9 +59,9 @@ func (h *BrandOnboardingHandler) GetAvailableBrandTemplates(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "Brand templates retrieved successfully",
-		"data":      templates,
-		"count":     len(templates),
+		"message": "Brand templates retrieved successfully",
+		"data":    templates,
+		"count":   len(templates),
 	})
 }
 
@@ -214,6 +234,7 @@ func (h *BrandOnboardingHandler) UpdateOnboardedBrand(c *gin.Context) {
 	if tenantIDStr == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Tenant ID not found in context",
+			"code":  "MISSING_TENANT_ID",
 		})
 		return
 	}
@@ -222,6 +243,7 @@ func (h *BrandOnboardingHandler) UpdateOnboardedBrand(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Invalid tenant ID",
+			"code":    "INVALID_TENANT_ID",
 			"details": err.Error(),
 		})
 		return
@@ -231,6 +253,7 @@ func (h *BrandOnboardingHandler) UpdateOnboardedBrand(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Invalid product ID",
+			"code":    "INVALID_PRODUCT_ID",
 			"details": err.Error(),
 		})
 		return
@@ -240,20 +263,76 @@ func (h *BrandOnboardingHandler) UpdateOnboardedBrand(c *gin.Context) {
 	if err := c.ShouldBindJSON(&updates); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Invalid request data",
+			"code":    "INVALID_REQUEST",
 			"details": err.Error(),
 		})
 		return
 	}
 
 	if err := h.brandOnboardingService.UpdateOnboardedBrand(tenantID, productID, updates); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "Failed to update onboarded brand",
+		statusCode := http.StatusBadRequest
+		errorCode := "UPDATE_FAILED"
+
+		if strings.Contains(err.Error(), "not found") {
+			statusCode = http.StatusNotFound
+			errorCode = "PRODUCT_NOT_FOUND"
+		} else if strings.Contains(err.Error(), "deleted") {
+			statusCode = http.StatusGone
+			errorCode = "PRODUCT_DELETED"
+		}
+
+		c.JSON(statusCode, gin.H{
+			"error":      "Failed to update onboarded brand",
+			"code":       errorCode,
+			"details":    err.Error(),
+			"tenant_id":  tenantID.String(),
+			"product_id": productID.String(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Onboarded brand updated successfully",
+		"product_id": productID.String(),
+	})
+}
+
+// GetBrandMetadata returns categories and subcategories for brand creation
+// @Summary Get brand metadata (categories and subcategories)
+// @Description Fetches categories and subcategories from SaaS service for brand creation forms
+// @Tags Brand Onboarding
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /api/inventory/saas-brands/metadata [get]
+func (h *BrandOnboardingHandler) GetBrandMetadata(c *gin.Context) {
+	metadata, err := h.brandOnboardingService.GetBrandMetadata()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Failed to fetch brand metadata",
 			"details": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Onboarded brand updated successfully",
+		"success": true,
+		"data":    metadata,
+	})
+}
+
+// RefreshBrandCache clears the brand template cache to fetch fresh data from SaaS
+// @Summary Refresh brand cache
+// @Description Clears the cached brand templates to force fresh fetch from SaaS service
+// @Tags Brand Onboarding
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router /api/inventory/saas-brands/refresh-cache [post]
+func (h *BrandOnboardingHandler) RefreshBrandCache(c *gin.Context) {
+	h.brandOnboardingService.ClearCache()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Brand cache cleared successfully. Next request will fetch fresh data from SaaS.",
 	})
 }

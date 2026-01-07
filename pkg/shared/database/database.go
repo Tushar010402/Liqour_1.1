@@ -47,10 +47,11 @@ func NewDatabase(config Config) (*DB, error) {
 		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
 	}
 
-	// Connection pool settings
-	sqlDB.SetMaxOpenConns(25)
-	sqlDB.SetMaxIdleConns(25)
-	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	// Connection pool settings - optimized for production
+	sqlDB.SetMaxOpenConns(100)                    // Increased from 25 for concurrent auth requests
+	sqlDB.SetMaxIdleConns(25)                     // Keep baseline idle connections
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)    // Increased from 5min to reduce reconnection overhead
+	sqlDB.SetConnMaxIdleTime(10 * time.Minute)    // Close idle connections after 10 min
 
 	return &DB{db}, nil
 }

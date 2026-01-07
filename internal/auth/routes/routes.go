@@ -22,7 +22,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, aut
 		auth.POST("/send-otp", authHandlers.SendOTP)
 		auth.POST("/send-otp-registration", authHandlers.SendOTPForRegistration)
 		auth.POST("/verify-otp", authHandlers.VerifyOTP)
+		auth.POST("/force-login-otp", authHandlers.ForceLoginWithOTP) // Swiggy/Zomato style force login
 		// TODO: Add forgot-password, reset-password, verify-email endpoints
+	}
+
+	// Public admin routes (no auth required - for registration flow)
+	publicAdmin := router.Group("/api/admin")
+	{
+		// Phone validation (called during registration before user has account)
+		publicAdmin.GET("/validate/phone", authHandlers.ValidatePhone)
+		// Email validation (called during registration before user has account)
+		publicAdmin.GET("/validate/email", authHandlers.ValidateEmail)
+		// Tenant name validation (called during registration before user has account)
+		publicAdmin.GET("/validate/tenant", authHandlers.ValidateTenantName)
 	}
 
 	// Protected authentication routes
@@ -35,6 +47,29 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, aut
 		authProtected.GET("/profile", authHandlers.GetProfile)
 		authProtected.PUT("/profile", authHandlers.UpdateProfile)
 		authProtected.PUT("/change-password", authHandlers.ChangePassword)
+
+		// Device Session Management (2-device limit like Swiggy/Zomato)
+		authProtected.GET("/sessions", authHandlers.GetActiveSessions)           // Get all active sessions
+		authProtected.DELETE("/sessions/:session_id", authHandlers.LogoutDevice) // Logout specific device
+		authProtected.DELETE("/sessions", authHandlers.LogoutAllDevices)         // Logout all devices
+		authProtected.POST("/sessions/force-login", authHandlers.ForceLogin)     // Force login by removing a session
+
+		// Account Deletion (App Store Guideline 5.1.1(v) Compliance)
+		authProtected.POST("/account/delete/request-otp", authHandlers.RequestDeleteAccountOTP) // Request OTP for deletion
+		authProtected.POST("/account/delete/send-otp", authHandlers.RequestDeleteAccountOTP)    // Alias for Flutter app
+		authProtected.DELETE("/account", authHandlers.DeleteAccount)                            // Delete account with OTP
+		authProtected.POST("/account/delete", authHandlers.DeleteAccount)                       // POST alias for Flutter app
+		authProtected.POST("/account/delete/cancel", authHandlers.CancelAccountDeletion)        // Cancel pending deletion
+	}
+
+	// Protected routes accessible to all authenticated users
+	protected := router.Group("/api")
+	protected.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	protected.Use(middleware.TenantMiddleware())
+	{
+		// Shops - all users can view shops in their tenant
+		protected.GET("/shops", authHandlers.GetShops)
+		protected.GET("/shops/:id", authHandlers.GetShopByID)
 	}
 
 	// Admin routes for user management
@@ -106,6 +141,12 @@ func SetupPublicRoutes(router *gin.Engine, authHandlers *handlers.AuthHandlers) 
 	router.POST("/send-otp", authHandlers.SendOTP)
 	router.POST("/send-otp-registration", authHandlers.SendOTPForRegistration)
 	router.POST("/verify-otp", authHandlers.VerifyOTP)
+	router.POST("/force-login-otp", authHandlers.ForceLoginWithOTP) // Swiggy/Zomato style force login
+
+	// Public admin validation routes (for registration flow)
+	router.GET("/admin/validate/phone", authHandlers.ValidatePhone)
+	router.GET("/admin/validate/email", authHandlers.ValidateEmail)
+	router.GET("/admin/validate/tenant", authHandlers.ValidateTenantName)
 }
 
 // SetupProtectedRoutes sets up only protected routes (for gateway routing)
@@ -120,6 +161,19 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	router.GET("/profile", authHandlers.GetProfile)
 	router.PUT("/profile", authHandlers.UpdateProfile)
 	router.PUT("/change-password", authHandlers.ChangePassword)
+
+	// Device Session Management (2-device limit like Swiggy/Zomato)
+	router.GET("/sessions", authHandlers.GetActiveSessions)
+	router.DELETE("/sessions/:session_id", authHandlers.LogoutDevice)
+	router.DELETE("/sessions", authHandlers.LogoutAllDevices)
+	router.POST("/sessions/force-login", authHandlers.ForceLogin)
+
+	// Account Deletion (App Store Guideline 5.1.1(v) Compliance)
+	router.POST("/account/delete/request-otp", authHandlers.RequestDeleteAccountOTP)
+	router.POST("/account/delete/send-otp", authHandlers.RequestDeleteAccountOTP) // Alias for Flutter app
+	router.DELETE("/account", authHandlers.DeleteAccount)
+	router.POST("/account/delete", authHandlers.DeleteAccount) // POST alias for Flutter app
+	router.POST("/account/delete/cancel", authHandlers.CancelAccountDeletion)
 
 	// Admin routes
 	admin := router.Group("/admin")

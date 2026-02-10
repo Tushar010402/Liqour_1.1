@@ -257,10 +257,21 @@ func (s *DashboardMetricsService) GetShopName(ctx context.Context, tenantID uuid
 	return shop.Name
 }
 
-// GetDashboardMetrics returns the aggregated dashboard metrics
+// GetDashboardMetrics returns the aggregated dashboard metrics (cached for 2 minutes)
 func (s *DashboardMetricsService) GetDashboardMetrics(ctx context.Context, tenantID uuid.UUID, req DashboardMetricsRequest) (*DashboardMetricsResponse, error) {
 	// Resolve date range
 	startDate, endDate := s.ResolveDateRange(req.DateFilter, req.StartDate, req.EndDate)
+
+	// Check cache first
+	shopIDStr := "all"
+	if req.ShopID != nil {
+		shopIDStr = req.ShopID.String()
+	}
+	cacheKey := fmt.Sprintf("dashboard_metrics:%s:%s:%s:%s", tenantID.String(), shopIDStr, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	var cached DashboardMetricsResponse
+	if err := s.cache.Get(ctx, cacheKey, &cached); err == nil {
+		return &cached, nil
+	}
 
 	// Get shop name
 	shopName := s.GetShopName(ctx, tenantID, req.ShopID)
@@ -289,7 +300,7 @@ func (s *DashboardMetricsService) GetDashboardMetrics(ctx context.Context, tenan
 		return nil, fmt.Errorf("failed to get expense total: %w", err)
 	}
 
-	return &DashboardMetricsResponse{
+	result := &DashboardMetricsResponse{
 		DateRange: DateRangeInfo{
 			StartDate:     startDate,
 			EndDate:       endDate,
@@ -306,7 +317,12 @@ func (s *DashboardMetricsService) GetDashboardMetrics(ctx context.Context, tenan
 			Expense:  MetricSummary{TotalAmount: expenseTotal},
 		},
 		GeneratedAt: time.Now(),
-	}, nil
+	}
+
+	// Cache for 2 minutes
+	s.cache.Set(ctx, cacheKey, result, 2*time.Minute)
+
+	return result, nil
 }
 
 // getPaymentTotal returns the total cash collections for the given filters

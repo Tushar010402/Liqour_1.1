@@ -159,7 +159,8 @@ func NewAuthService(db *database.DB, cache *cache.Cache, jwtConfig *config.JWTCo
 
 // LoginRequest represents login request data with device information
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
+	Username string `json:"username"` // Username for login
+	Email    string `json:"email"`    // Email for login (alternative to username)
 	Password string `json:"password" binding:"required"`
 
 	// Device Information (sent by client for device tracking)
@@ -844,10 +845,6 @@ func (s *AuthService) sendSMSOTP(mobile, otp string) error {
 	apiURL := fmt.Sprintf("https://fast.confirmsms.in/api/push.json?apikey=%s&sender=%s&mobileno=%s&text=%s",
 		apiKey, sender, phoneNumber, messageText)
 
-	// TEMPORARY DEBUG: Log API URL (with masked OTP for security)
-	maskedURL := strings.Replace(apiURL, otp, "******", 1)
-	fmt.Printf("📤 SMS API Request: %s\n", maskedURL)
-
 	// Create HTTP client with SSL verification disabled for this specific API
 	// (certificate mismatch: cert is for mysmsapp.in but domain is fast.confirmsms.in)
 	tr := &http.Transport{
@@ -874,23 +871,13 @@ func (s *AuthService) sendSMSOTP(mobile, otp string) error {
 		return fmt.Errorf("failed to parse SMS response: %w", err)
 	}
 
-	// Log response for debugging
-	fmt.Printf("✅ SMS API Response for %s: %s\n", mobile, string(body))
-
 	// Check for success status in response
 	if status, ok := result["status"].(string); ok && status == "success" {
-		// Extract batch ID if available
-		if desc, ok := result["description"].(map[string]interface{}); ok {
-			if batchID, ok := desc["batchid"].(string); ok {
-				fmt.Printf("✅ SMS sent successfully! Batch ID: %s\n", batchID)
-			}
-		}
 		return nil
 	}
 
 	// Legacy check for request_id (backward compatibility)
-	if requestID, ok := result["request_id"]; ok {
-		fmt.Printf("✅ SMS sent successfully! Request ID: %v\n", requestID)
+	if _, ok := result["request_id"]; ok {
 		return nil
 	}
 
@@ -1022,14 +1009,7 @@ func (s *AuthService) SendOTP(ctx context.Context, req SendOTPRequest) (*SendOTP
 
 	// Send SMS OTP (async - returns immediately for fast response)
 	if s.isProduction() {
-		// Production: Send SMS asynchronously (non-blocking)
-		fmt.Printf("🔐 OTP Generated for %s: %s (Valid for 10 minutes)\n", s.maskMobileNumber(mobile), otp)
-		// Use async SMS - OTP is already stored in Redis, SMS sends in background
 		s.sendSMSOTPAsync(mobile, otp)
-		fmt.Printf("📤 SMS queued for %s (async)\n", s.maskMobileNumber(mobile))
-	} else {
-		// Development: Just log it
-		fmt.Printf("📱 OTP for %s: %s (Development Mode)\n", s.maskMobileNumber(mobile), otp)
 	}
 
 	// Update rate limiting counter
@@ -1703,16 +1683,6 @@ func (s *AuthService) LogSecurityEvent(ctx context.Context, event *models.Securi
 		log.Printf("Security event buffer full, dropping event: %s for user %s", event.EventType, event.UserID)
 	}
 
-	// Also log to console for real-time monitoring
-	emoji := "ℹ️"
-	switch event.Severity {
-	case models.SeverityWarning:
-		emoji = "⚠️"
-	case models.SeverityCritical:
-		emoji = "🚨"
-	}
-	fmt.Printf("%s [Security] User: %s, Event: %s, IP: %s, Device: %s\n",
-		emoji, event.UserID, event.EventType, event.IPAddress, event.DeviceID)
 }
 
 // ============================================================================

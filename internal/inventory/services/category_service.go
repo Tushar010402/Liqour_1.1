@@ -139,13 +139,19 @@ func (s *CategoryService) GetCategoriesWithShopFilter(ctx context.Context, tenan
 		}
 	}
 
-	// Get product counts for each category
+	// Get product counts for all categories in one query (eliminates N+1)
 	productCounts := make(map[uuid.UUID]int64)
-	for _, category := range categories {
-		var count int64
-		// Count all products in category (regardless of stock)
-		s.db.Model(&models.Product{}).Where("category_id = ? AND tenant_id = ?", category.ID, tenantID).Count(&count)
-		productCounts[category.ID] = count
+	var countResults []struct {
+		CategoryID uuid.UUID `gorm:"column:category_id"`
+		Count      int64     `gorm:"column:count"`
+	}
+	s.db.Model(&models.Product{}).
+		Select("category_id, COUNT(*) as count").
+		Where("tenant_id = ?", tenantID).
+		Group("category_id").
+		Scan(&countResults)
+	for _, cr := range countResults {
+		productCounts[cr.CategoryID] = cr.Count
 	}
 
 	// Build hierarchical response
@@ -328,12 +334,19 @@ func (s *CategoryService) GetBrands(ctx context.Context, tenantID uuid.UUID, inc
 		return nil, fmt.Errorf("failed to get brands: %w", err)
 	}
 
-	// Get product counts for each brand
+	// Get product counts for all brands in one query (eliminates N+1)
 	productCounts := make(map[uuid.UUID]int64)
-	for _, brand := range brands {
-		var count int64
-		s.db.Model(&models.Product{}).Where("brand_id = ? AND tenant_id = ?", brand.ID, tenantID).Count(&count)
-		productCounts[brand.ID] = count
+	var countResults []struct {
+		BrandID uuid.UUID `gorm:"column:brand_id"`
+		Count   int64     `gorm:"column:count"`
+	}
+	s.db.Model(&models.Product{}).
+		Select("brand_id, COUNT(*) as count").
+		Where("tenant_id = ?", tenantID).
+		Group("brand_id").
+		Scan(&countResults)
+	for _, cr := range countResults {
+		productCounts[cr.BrandID] = cr.Count
 	}
 
 	var responses []BrandResponse

@@ -307,16 +307,30 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 		return errors.New("cannot transfer to the same shop")
 	}
 
+	// Batch-load products and source stocks before transaction (eliminates N+1)
+	productIDs := make([]uuid.UUID, len(req.Items))
+	for i, item := range req.Items {
+		productIDs[i] = item.ProductID
+	}
+
+	var products []models.Product
+	if err := s.db.Where("id IN ? AND tenant_id = ?", productIDs, tenantID).Find(&products).Error; err != nil {
+		return fmt.Errorf("failed to verify products: %w", err)
+	}
+	productMap := make(map[uuid.UUID]models.Product, len(products))
+	for _, p := range products {
+		productMap[p.ID] = p
+	}
+	if len(productMap) != len(productIDs) {
+		return errors.New("one or more products not found")
+	}
+
 	// Start transaction
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		transferRef := fmt.Sprintf("TRANSFER-%s-%d", time.Now().Format("20060102"), time.Now().Unix()%10000)
 
 		for _, item := range req.Items {
-			// Verify product exists
-			var product models.Product
-			if err := tx.Where("id = ? AND tenant_id = ?", item.ProductID, tenantID).First(&product).Error; err != nil {
-				return fmt.Errorf("product %s not found", item.ProductID)
-			}
+			product := productMap[item.ProductID]
 
 			// Get source stock
 			var fromStock models.Stock

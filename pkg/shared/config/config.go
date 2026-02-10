@@ -15,6 +15,14 @@ type Config struct {
 	JWT      JWTConfig      `mapstructure:"jwt"`
 	App      AppConfig      `mapstructure:"app"`
 	Services ServicesConfig `mapstructure:"services"`
+	Kafka    KafkaConfig    `mapstructure:"kafka"`
+}
+
+// KafkaConfig holds Kafka messaging configuration
+type KafkaConfig struct {
+	Brokers string `mapstructure:"brokers"`
+	Enabled bool   `mapstructure:"enabled"`
+	GroupID string `mapstructure:"group_id"`
 }
 
 // ServerConfig holds server configuration
@@ -94,6 +102,25 @@ func LoadConfig(configPath string) (*Config, error) {
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
+	// Explicit bindings for commonly used env vars that don't match the pattern
+	// docker-compose uses DATABASE_NAME, but viper expects DATABASE_DBNAME
+	viper.BindEnv("database.dbname", "DATABASE_NAME")
+	viper.BindEnv("database.host", "DATABASE_HOST")
+	viper.BindEnv("database.port", "DATABASE_PORT")
+	viper.BindEnv("database.user", "DATABASE_USER")
+	viper.BindEnv("database.password", "DATABASE_PASSWORD")
+	viper.BindEnv("redis.host", "REDIS_HOST")
+	viper.BindEnv("redis.port", "REDIS_PORT")
+	viper.BindEnv("redis.password", "REDIS_PASSWORD")
+	viper.BindEnv("jwt.secret", "JWT_SECRET")
+	viper.BindEnv("jwt.expiration_hours", "JWT_EXPIRATION_HOURS")
+	viper.BindEnv("jwt.refresh_hours", "JWT_REFRESH_HOURS")
+	viper.BindEnv("server.host", "SERVER_HOST")
+	viper.BindEnv("app.environment", "APP_ENVIRONMENT")
+	viper.BindEnv("kafka.brokers", "KAFKA_BROKERS")
+	viper.BindEnv("kafka.enabled", "KAFKA_ENABLED")
+	viper.BindEnv("kafka.group_id", "KAFKA_GROUP_ID")
+
 	if err := viper.ReadInConfig(); err != nil {
 		// Config file not found, use defaults and env vars
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -136,9 +163,14 @@ func setDefaults() {
 
 	// JWT defaults
 	viper.SetDefault("jwt.secret", "your-secret-key")
-	viper.SetDefault("jwt.expiration_hours", 1440) // 60 days
-	viper.SetDefault("jwt.refresh_hours", 2160)    // 90 days
+	viper.SetDefault("jwt.expiration_hours", 24)  // 24 hours
+	viper.SetDefault("jwt.refresh_hours", 168)    // 7 days
 	viper.SetDefault("jwt.issuer", "liquorpro")
+
+	// Kafka defaults
+	viper.SetDefault("kafka.brokers", "")
+	viper.SetDefault("kafka.enabled", false)
+	viper.SetDefault("kafka.group_id", "liquorpro")
 
 	// App defaults
 	viper.SetDefault("app.name", "LiquorPro")

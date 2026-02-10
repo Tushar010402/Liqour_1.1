@@ -212,11 +212,11 @@ deploy_stack() {
     
     # Stop any existing containers
     log_info "Stopping existing containers..."
-    docker-compose -f docker-compose.prod.yml down || true
+    docker compose --env-file .env.production -f docker-compose.production.yml down || true
     
     # Start production stack
     log_info "Starting production services..."
-    docker-compose -f docker-compose.prod.yml up -d
+    docker compose --env-file .env.production -f docker-compose.production.yml up -d
     
     # Wait for services to be healthy
     log_info "Waiting for services to be healthy..."
@@ -236,7 +236,7 @@ check_service_health() {
     local all_healthy=true
     
     for service in "${services[@]}"; do
-        if docker-compose -f docker-compose.prod.yml ps --services --filter "status=running" | grep -q "$service"; then
+        if docker compose --env-file .env.production -f docker-compose.production.yml ps --services --filter "status=running" | grep -q "$service"; then
             log_success "$service is running"
         else
             log_error "$service is not running"
@@ -309,19 +309,19 @@ show_deployment_info() {
     echo "Useful Commands:"
     echo "==============="
     echo "# View all service logs"
-    echo "docker-compose -f docker-compose.prod.yml logs -f"
+    echo "docker compose --env-file .env.production -f docker-compose.production.yml logs -f"
     echo ""
     echo "# View specific service logs"
-    echo "docker-compose -f docker-compose.prod.yml logs -f gateway"
+    echo "docker compose --env-file .env.production -f docker-compose.production.yml logs -f gateway"
     echo ""
     echo "# Check service status"
-    echo "docker-compose -f docker-compose.prod.yml ps"
+    echo "docker compose --env-file .env.production -f docker-compose.production.yml ps"
     echo ""
     echo "# Restart all services"
-    echo "docker-compose -f docker-compose.prod.yml restart"
+    echo "docker compose --env-file .env.production -f docker-compose.production.yml restart"
     echo ""
     echo "# Stop all services"
-    echo "docker-compose -f docker-compose.prod.yml down"
+    echo "docker compose --env-file .env.production -f docker-compose.production.yml down"
     echo ""
     echo "# Run database backup"
     echo "./scripts/backup-db.sh"

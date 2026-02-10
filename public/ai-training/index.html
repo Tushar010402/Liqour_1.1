@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Training - Size Detection | LiquorPro</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+        }
+
+        .header {
+            background: rgba(0,0,0,0.3);
+            padding: 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            color: #fff;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            color: #888;
+            font-size: 14px;
+        }
+
+        .stats-bar {
+            display: flex;
+            gap: 15px;
+            padding: 15px 20px;
+            background: rgba(0,0,0,0.2);
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #2d2d44 0%, #1f1f30 100%);
+            padding: 12px 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .stat-card h3 {
+            font-size: 24px;
+            color: #4ade80;
+        }
+
+        .stat-card p {
+            font-size: 11px;
+            color: #888;
+            margin-top: 3px;
+        }
+
+        .stat-card.warning h3 { color: #fbbf24; }
+        .stat-card.danger h3 { color: #f87171; }
+        .stat-card.info h3 { color: #3b82f6; }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+            color: #000;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(74,222,128,0.3);
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+            color: #fff;
+        }
+
+        .btn-secondary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(139,92,246,0.3);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #f87171 0%, #ef4444 100%);
+            color: #fff;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        /* Action Bar */
+        .action-bar {
+            display: flex;
+            gap: 10px;
+            padding: 15px 20px;
+            background: rgba(139, 92, 246, 0.1);
+            border-bottom: 1px solid rgba(139, 92, 246, 0.3);
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        /* Size Filter */
+        .size-filter {
+            display: flex;
+            gap: 8px;
+            padding: 10px 20px;
+            background: rgba(0,0,0,0.2);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .size-filter label {
+            color: #888;
+            font-size: 13px;
+            margin-right: 10px;
+        }
+
+        .size-btn {
+            padding: 8px 16px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px;
+            background: transparent;
+            color: #fff;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .size-btn:hover { background: rgba(255,255,255,0.1); }
+        .size-btn.active { background: #3b82f6; border-color: #3b82f6; }
+
+        /* Progress Bar */
+        .progress-container {
+            display: none;
+            padding: 15px 20px;
+            background: rgba(0,0,0,0.3);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .progress-container.active { display: block; }
+
+        .progress-bar {
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4ade80, #22c55e);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        /* Image Grid */
+        .image-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            padding: 20px;
+        }
+
+        .image-card {
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .image-card:hover {
+            transform: translateY(-5px);
+            border-color: #4ade80;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .image-card img {
+            width: 100%;
+            height: 220px;
+            object-fit: cover;
+            cursor: pointer;
+        }
+
+        .image-card .info {
+            padding: 12px 15px;
+        }
+
+        .image-card .filename {
+            font-size: 10px;
+            color: #666;
+            word-break: break-all;
+            margin-bottom: 8px;
+        }
+
+        /* Badges */
+        .badge {
+            position: absolute;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .badge-size {
+            top: 10px;
+            left: 10px;
+            background: rgba(59, 130, 246, 0.9);
+            color: #fff;
+        }
+
+        .badge-size.beer {
+            background: rgba(251, 191, 36, 0.9);
+            color: #000;
+        }
+
+        .badge-size.pending {
+            background: rgba(156, 163, 175, 0.7);
+            color: #fff;
+        }
+
+        .badge-status {
+            top: 10px;
+            right: 10px;
+        }
+
+        .badge-status.processed {
+            background: rgba(74, 222, 128, 0.9);
+            color: #000;
+        }
+
+        .badge-status.pending {
+            background: rgba(248, 113, 113, 0.7);
+            color: #fff;
+        }
+
+        .process-btn {
+            position: absolute;
+            bottom: 70px;
+            right: 10px;
+            padding: 6px 12px;
+            border: none;
+            border-radius: 6px;
+            background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+            color: #fff;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            opacity: 0;
+        }
+
+        .image-card:hover .process-btn { opacity: 1; }
+        .process-btn:hover { transform: scale(1.05); }
+        .process-btn.processing { background: #666; cursor: wait; }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.95);
+            z-index: 1000;
+            overflow-y: auto;
+        }
+
+        .modal.active { display: block; }
+
+        .modal-content {
+            max-width: 900px;
+            margin: 30px auto;
+            padding: 20px;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 15px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 20px;
+        }
+
+        .modal-header h3 {
+            color: #4ade80;
+            font-size: 18px;
+        }
+
+        .modal-close {
+            font-size: 32px;
+            color: #fff;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 5px 10px;
+        }
+
+        .modal-close:hover { color: #f87171; }
+
+        .modal-image {
+            width: 100%;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .detection-result {
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .detection-result h4 {
+            color: #4ade80;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+
+        .result-item {
+            background: rgba(255,255,255,0.05);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .result-item label {
+            display: block;
+            color: #888;
+            font-size: 11px;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+        }
+
+        .result-item .value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .result-item .value.success { color: #4ade80; }
+        .result-item .value.warning { color: #fbbf24; }
+
+        /* Pagination */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            padding: 20px;
+            flex-wrap: wrap;
+        }
+
+        .pagination button {
+            padding: 10px 20px;
+            border: 1px solid rgba(255,255,255,0.2);
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .pagination button:hover {
+            background: rgba(74,222,128,0.2);
+            border-color: #4ade80;
+        }
+
+        .pagination button.active {
+            background: #4ade80;
+            color: #000;
+        }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            background: #4ade80;
+            color: #000;
+            border-radius: 8px;
+            font-weight: 600;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s ease;
+            z-index: 1001;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast.error {
+            background: #f87171;
+            color: #fff;
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 50px;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top-color: #4ade80;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Tabs */
+        .tab-bar {
+            display: flex;
+            gap: 5px;
+            padding: 0 20px;
+            background: rgba(0,0,0,0.2);
+            overflow-x: auto;
+        }
+
+        .tab {
+            padding: 15px 20px;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s ease;
+            white-space: nowrap;
+            font-size: 14px;
+        }
+
+        .tab:hover { background: rgba(255,255,255,0.05); }
+        .tab.active { border-bottom-color: #4ade80; color: #4ade80; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>AI Size Detection Training</h1>
+        <p>Process images to detect liquor sizes (90ML, 180ML, 375ML, 650ML, 750ML) for OCR training</p>
+    </div>
+
+    <div class="stats-bar">
+        <div class="stat-card">
+            <h3 id="totalImages">0</h3>
+            <p>Total Images</p>
+        </div>
+        <div class="stat-card">
+            <h3 id="processedCount">0</h3>
+            <p>Processed</p>
+        </div>
+        <div class="stat-card warning">
+            <h3 id="pendingCount">0</h3>
+            <p>Pending</p>
+        </div>
+        <div class="stat-card info">
+            <h3 id="beerCount">0</h3>
+            <p>Beer Pages</p>
+        </div>
+    </div>
+
+    <div class="tab-bar">
+        <div class="tab active" data-filter="all">All Images</div>
+        <div class="tab" data-filter="processed">Processed</div>
+        <div class="tab" data-filter="pending">Pending</div>
+        <div class="tab" data-filter="beer">Beer Pages</div>
+    </div>
+
+    <div class="action-bar">
+        <button class="btn btn-secondary" onclick="processAllImages()" id="processAllBtn">
+            Process All Pending Images
+        </button>
+        <button class="btn btn-primary" onclick="exportTrainingData()">
+            Export Training Data (JSONL)
+        </button>
+        <button class="btn btn-danger" onclick="reprocessAll()" id="reprocessBtn">
+            Re-process All Images
+        </button>
+    </div>
+
+    <div class="size-filter">
+        <label>Filter by Size:</label>
+        <button class="size-btn active" data-size="">All</button>
+        <button class="size-btn" data-size="90ML">90ML</button>
+        <button class="size-btn" data-size="180ML">180ML</button>
+        <button class="size-btn" data-size="375ML">375ML</button>
+        <button class="size-btn" data-size="650ML">650ML</button>
+        <button class="size-btn" data-size="750ML">750ML</button>
+    </div>
+
+    <div class="progress-container" id="progressContainer">
+        <div id="progressText">Processing images...</div>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+    </div>
+
+    <div class="image-grid" id="imageGrid">
+        <div class="loading">
+            <div class="spinner"></div>
+        </div>
+    </div>
+
+    <div class="pagination" id="pagination"></div>
+
+    <!-- Image Detail Modal -->
+    <div class="modal" id="imageModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Image Details</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <img id="modalImage" class="modal-image" src="" alt="Receipt Image">
+
+            <div class="detection-result" id="detectionResult">
+                <h4>Size Detection Result</h4>
+                <div class="result-grid">
+                    <div class="result-item">
+                        <label>Detected Size</label>
+                        <div class="value" id="detectedSize">-</div>
+                    </div>
+                    <div class="result-item">
+                        <label>Page Type</label>
+                        <div class="value" id="pageType">-</div>
+                    </div>
+                    <div class="result-item">
+                        <label>Confidence</label>
+                        <div class="value" id="confidence">-</div>
+                    </div>
+                    <div class="result-item">
+                        <label>Status</label>
+                        <div class="value" id="detectionStatus">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button class="btn btn-secondary" onclick="processCurrentImage()">
+                    Re-detect Size
+                </button>
+                <button class="btn btn-primary" onclick="exportCurrentImage()">
+                    Export This Image
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // State
+        let allImages = [];
+        let filteredImages = [];
+        let imageMappings = {}; // filename -> detection data
+        let currentPage = 1;
+        let currentFilter = 'all';
+        let currentSizeFilter = '';
+        let currentModalImage = null;
+        const imagesPerPage = 48;
+
+        // Load images from V2 API
+        async function loadImages() {
+            try {
+                const response = await fetch('/api/training/images/v2');
+                const data = await response.json();
+
+                if (data.success && data.data) {
+                    allImages = data.data.images.map(img => img.image_filename);
+
+                    // Build mappings
+                    imageMappings = {};
+                    let beerCount = 0;
+                    data.data.images.forEach(img => {
+                        imageMappings[img.image_filename] = {
+                            size: img.detected_size || '',
+                            sizes: img.size_mapping?.sizes || [img.detected_size].filter(Boolean),
+                            isBeerPage: img.is_beer_page || false,
+                            processed: img.processing_status === 'processed',
+                            method: img.detection_method || '',
+                            confidence: img.size_mapping?.detection_confidence || 0,
+                            recordId: img.record_id || '',
+                            recordDate: img.record_date || '',
+                            shopName: img.shop_name || ''
+                        };
+                        if (img.is_beer_page) beerCount++;
+                    });
+
+                    // Update stats
+                    document.getElementById('totalImages').textContent = data.data.total_images;
+                    document.getElementById('processedCount').textContent = data.data.processed_images;
+                    document.getElementById('pendingCount').textContent = data.data.pending_images;
+                    document.getElementById('beerCount').textContent = beerCount;
+
+                    // Update tab counts
+                    updateTabCounts(data.data);
+
+                    applyFilters();
+                    showToast(`Loaded ${allImages.length} images`);
+                }
+            } catch (error) {
+                console.error('Error loading images:', error);
+                showToast('Failed to load images', true);
+            }
+        }
+
+        function updateTabCounts(data) {
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(tab => {
+                const filter = tab.dataset.filter;
+                let count = 0;
+                if (filter === 'all') count = data.total_images;
+                else if (filter === 'processed') count = data.processed_images;
+                else if (filter === 'pending') count = data.pending_images;
+                else if (filter === 'beer') {
+                    count = data.images.filter(img => img.is_beer_page).length;
+                }
+
+                const text = tab.textContent.split(' (')[0];
+                tab.textContent = `${text} (${count})`;
+            });
+        }
+
+        function applyFilters() {
+            // Filter by status
+            if (currentFilter === 'processed') {
+                filteredImages = allImages.filter(f => imageMappings[f]?.processed);
+            } else if (currentFilter === 'pending') {
+                filteredImages = allImages.filter(f => !imageMappings[f]?.processed);
+            } else if (currentFilter === 'beer') {
+                filteredImages = allImages.filter(f => imageMappings[f]?.isBeerPage);
+            } else {
+                filteredImages = [...allImages];
+            }
+
+            // Filter by size
+            if (currentSizeFilter) {
+                filteredImages = filteredImages.filter(f => {
+                    const mapping = imageMappings[f];
+                    return mapping && mapping.size === currentSizeFilter;
+                });
+            }
+
+            currentPage = 1;
+            renderImages();
+        }
+
+        function renderImages() {
+            const grid = document.getElementById('imageGrid');
+            const start = (currentPage - 1) * imagesPerPage;
+            const end = start + imagesPerPage;
+            const pageImages = filteredImages.slice(start, end);
+
+            if (pageImages.length === 0) {
+                grid.innerHTML = '<div style="padding: 50px; text-align: center; color: #888; grid-column: 1/-1;">No images found matching the filters</div>';
+                renderPagination();
+                return;
+            }
+
+            grid.innerHTML = pageImages.map(filename => {
+                const mapping = imageMappings[filename] || {};
+                const imageUrl = `/uploads/daily_sales/${filename}`;
+
+                // Size badge
+                let sizeBadgeClass = 'pending';
+                let sizeBadgeText = 'Pending';
+                if (mapping.processed) {
+                    sizeBadgeClass = mapping.isBeerPage ? 'beer' : '';
+                    sizeBadgeText = mapping.size || 'Unknown';
+                    if (mapping.isBeerPage) sizeBadgeText += ' (Beer)';
+                }
+
+                // Status badge
+                const statusClass = mapping.processed ? 'processed' : 'pending';
+                const statusText = mapping.processed ? 'Processed' : 'Pending';
+
+                return `
+                    <div class="image-card" data-filename="${filename}">
+                        <span class="badge badge-size ${sizeBadgeClass}">${sizeBadgeText}</span>
+                        <span class="badge badge-status ${statusClass}">${statusText}</span>
+                        <img src="${imageUrl}" alt="${filename}" onclick="openModal('${filename}')" loading="lazy">
+                        <button class="process-btn" onclick="event.stopPropagation(); processImage('${filename}', this)">
+                            ${mapping.processed ? 'Re-detect' : 'Detect Size'}
+                        </button>
+                        <div class="info">
+                            <div class="filename">${filename}</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            renderPagination();
+        }
+
+        function renderPagination() {
+            const totalPages = Math.ceil(filteredImages.length / imagesPerPage);
+            const pagination = document.getElementById('pagination');
+
+            if (totalPages <= 1) {
+                pagination.innerHTML = `<span style="color: #888;">${filteredImages.length} images</span>`;
+                return;
+            }
+
+            let html = '';
+            if (currentPage > 1) {
+                html += `<button onclick="goToPage(${currentPage - 1})">Prev</button>`;
+            }
+
+            const startPage = Math.max(1, currentPage - 2);
+            const endPage = Math.min(totalPages, currentPage + 2);
+
+            for (let i = startPage; i <= endPage; i++) {
+                html += `<button class="${i === currentPage ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
+            }
+
+            if (currentPage < totalPages) {
+                html += `<button onclick="goToPage(${currentPage + 1})">Next</button>`;
+            }
+
+            html += `<span style="color: #888; margin-left: 15px;">Page ${currentPage} of ${totalPages} (${filteredImages.length} images)</span>`;
+            pagination.innerHTML = html;
+        }
+
+        function goToPage(page) {
+            currentPage = page;
+            renderImages();
+            window.scrollTo({ top: 300, behavior: 'smooth' });
+        }
+
+        // Modal functions
+        function openModal(filename) {
+            currentModalImage = filename;
+            const mapping = imageMappings[filename] || {};
+            const imageUrl = `/uploads/daily_sales/${filename}`;
+
+            document.getElementById('modalTitle').textContent = filename;
+            document.getElementById('modalImage').src = imageUrl;
+
+            // Update detection results
+            document.getElementById('detectedSize').textContent = mapping.size || '-';
+            document.getElementById('detectedSize').className = `value ${mapping.processed ? 'success' : ''}`;
+
+            document.getElementById('pageType').textContent = mapping.isBeerPage ? 'Beer Page' : 'IMFL/CL';
+            document.getElementById('pageType').className = `value ${mapping.isBeerPage ? 'warning' : 'success'}`;
+
+            document.getElementById('confidence').textContent = mapping.confidence ? `${mapping.confidence}%` : '-';
+
+            document.getElementById('detectionStatus').textContent = mapping.processed ? 'Processed' : 'Pending';
+            document.getElementById('detectionStatus').className = `value ${mapping.processed ? 'success' : ''}`;
+
+            document.getElementById('imageModal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('imageModal').classList.remove('active');
+            currentModalImage = null;
+        }
+
+        // Process single image
+        async function processImage(filename, buttonEl) {
+            if (buttonEl) {
+                buttonEl.classList.add('processing');
+                buttonEl.textContent = 'Processing...';
+            }
+
+            try {
+                const response = await fetch(`/api/training/images/process/${encodeURIComponent(filename)}`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    const result = data.data.detection_result;
+                    imageMappings[filename] = {
+                        size: result.sizes[0] || '',
+                        sizes: result.sizes,
+                        isBeerPage: result.is_beer_page,
+                        processed: true,
+                        method: 'fomoa_vision',
+                        confidence: result.confidence
+                    };
+
+                    renderImages();
+                    showToast(`Detected: ${result.sizes.join(', ')} ${result.is_beer_page ? '(Beer Page)' : ''}`);
+
+                    // Update stats
+                    await loadImages();
+                } else {
+                    showToast(`Detection failed: ${data.error || 'Unknown error'}`, true);
+                }
+            } catch (error) {
+                console.error('Error processing image:', error);
+                showToast('Processing failed: ' + error.message, true);
+            }
+
+            if (buttonEl) {
+                buttonEl.classList.remove('processing');
+                buttonEl.textContent = imageMappings[filename]?.processed ? 'Re-detect' : 'Detect Size';
+            }
+        }
+
+        async function processCurrentImage() {
+            if (currentModalImage) {
+                await processImage(currentModalImage);
+                openModal(currentModalImage); // Refresh modal
+            }
+        }
+
+        // Process all pending images
+        async function processAllImages() {
+            const btn = document.getElementById('processAllBtn');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressText = document.getElementById('progressText');
+            const progressFill = document.getElementById('progressFill');
+
+            btn.disabled = true;
+            progressContainer.classList.add('active');
+
+            try {
+                const response = await fetch('/api/training/images/process-all', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    progressText.textContent = `Done: ${data.processed} processed, ${data.failed} failed`;
+                    progressFill.style.width = '100%';
+                    showToast(`Processed ${data.processed} images`);
+
+                    // Reload data
+                    await loadImages();
+                } else {
+                    showToast('Batch processing failed', true);
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('Processing error: ' + error.message, true);
+            }
+
+            btn.disabled = false;
+            setTimeout(() => {
+                progressContainer.classList.remove('active');
+                progressFill.style.width = '0%';
+            }, 3000);
+        }
+
+        // Re-process all images
+        async function reprocessAll() {
+            if (!confirm('This will re-process ALL images. Continue?')) return;
+
+            const btn = document.getElementById('reprocessBtn');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressText = document.getElementById('progressText');
+            const progressFill = document.getElementById('progressFill');
+
+            btn.disabled = true;
+            progressContainer.classList.add('active');
+
+            const pending = allImages.filter(f => true); // Process all
+            let processed = 0;
+            let failed = 0;
+
+            for (const filename of pending) {
+                progressText.textContent = `Processing ${processed + 1} of ${pending.length}...`;
+                progressFill.style.width = `${((processed + failed) / pending.length) * 100}%`;
+
+                try {
+                    const response = await fetch(`/api/training/images/process/${encodeURIComponent(filename)}`, {
+                        method: 'POST'
+                    });
+                    const data = await response.json();
+
+                    if (data.success) {
+                        processed++;
+                    } else {
+                        failed++;
+                    }
+                } catch (e) {
+                    failed++;
+                }
+            }
+
+            progressText.textContent = `Done: ${processed} processed, ${failed} failed`;
+            progressFill.style.width = '100%';
+            showToast(`Re-processed ${processed} images`);
+
+            await loadImages();
+
+            btn.disabled = false;
+            setTimeout(() => {
+                progressContainer.classList.remove('active');
+                progressFill.style.width = '0%';
+            }, 3000);
+        }
+
+        // Export training data
+        async function exportTrainingData() {
+            showToast('Exporting training data...');
+            try {
+                const response = await fetch('/api/training/images/export-v2');
+                if (!response.ok) throw new Error('Export failed');
+
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `training_data_${new Date().toISOString().split('T')[0]}.jsonl`;
+                a.click();
+                URL.revokeObjectURL(url);
+                showToast('Training data exported');
+            } catch (error) {
+                showToast('Export failed: ' + error.message, true);
+            }
+        }
+
+        function exportCurrentImage() {
+            if (!currentModalImage) return;
+
+            const mapping = imageMappings[currentModalImage] || {};
+            const exportData = {
+                image: currentModalImage,
+                image_url: `/uploads/daily_sales/${currentModalImage}`,
+                detected_size: mapping.size,
+                is_beer_page: mapping.isBeerPage,
+                confidence: mapping.confidence,
+                processed: mapping.processed,
+                method: mapping.method
+            };
+
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `detection_${currentModalImage.replace(/\.[^/.]+$/, '')}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast('Exported image detection data');
+        }
+
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `toast show ${isError ? 'error' : ''}`;
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // Event listeners
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                currentFilter = tab.dataset.filter;
+                applyFilters();
+            });
+        });
+
+        document.querySelectorAll('.size-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentSizeFilter = btn.dataset.size;
+                applyFilters();
+            });
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+
+        // Initialize
+        loadImages();
+    </script>
+</body>
+</html>

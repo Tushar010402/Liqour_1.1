@@ -155,24 +155,24 @@ docker:
 
 docker-up:
 	@echo "🐳 Starting production environment..."
-	docker-compose up -d
+	docker compose --env-file .env.production -f docker-compose.production.yml up -d
 	@echo "Production environment started!"
 	@echo "Frontend: http://localhost:8095"
 	@echo "API: http://localhost:8090"
 
 docker-down:
 	@echo "🐳 Stopping production environment..."
-	docker-compose down
+	docker compose --env-file .env.production -f docker-compose.production.yml down
 
 docker-logs:
 	@echo "📋 Showing production logs..."
-	docker-compose logs -f
+	docker compose --env-file .env.production -f docker-compose.production.yml logs -f
 
 docker-rebuild:
 	@echo "🔄 Rebuilding production environment..."
-	docker-compose down
-	docker-compose build --no-cache
-	docker-compose up -d
+	docker compose --env-file .env.production -f docker-compose.production.yml down
+	docker compose --env-file .env.production -f docker-compose.production.yml build --no-cache
+	docker compose --env-file .env.production -f docker-compose.production.yml up -d
 
 # Kubernetes Commands
 k8s-deploy:

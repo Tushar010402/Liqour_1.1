@@ -3,6 +3,7 @@ package routes
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/auth/handlers"
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
@@ -10,6 +11,10 @@ import (
 
 // SetupRoutes configures all auth service routes
 func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, authHandlers *handlers.AuthHandlers, rateLimitHandlers *handlers.RateLimitHandlers) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("auth"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Health check
 	router.GET("/health", authHandlers.Health)
 

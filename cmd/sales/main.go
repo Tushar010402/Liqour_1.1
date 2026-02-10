@@ -81,6 +81,11 @@ func main() {
 	dailySalesService.SetWorkflowNotificationService(workflowNotificationService)
 	log.Println("Workflow notifications initialized for sales service")
 
+	// Initialize and start pending sales reminder scheduler
+	pendingSalesScheduler := services.NewPendingSalesScheduler(db, workflowNotificationService)
+	pendingSalesScheduler.Start()
+	defer pendingSalesScheduler.Stop()
+
 	// Initialize OCR service with Gemini AI
 	ocrService, err := services.NewOCRService(db)
 	if err != nil {
@@ -129,6 +134,22 @@ func main() {
 	purchaReportHandler := handlers.NewPurchaReportHandler(purchaReportService)
 	log.Println("Purcha report service initialized for daily sales register")
 
+	// Initialize training image service and handlers (AI training data preparation)
+	trainingImageService := services.NewTrainingImageService(db)
+	trainingHandlers := handlers.NewTrainingHandlers(trainingImageService)
+	log.Println("Training image service initialized for AI training data preparation")
+
+	// Initialize AI Training V2 service and handlers (generic document extraction training)
+	var aiTrainingHandlers *handlers.AITrainingHandlers
+	aiTrainingService, err := services.NewAITrainingService(db)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize AI Training V2 service: %v", err)
+		log.Println("AI Training V2 endpoints will not be available")
+	} else {
+		aiTrainingHandlers = handlers.NewAITrainingHandlers(aiTrainingService)
+		log.Println("AI Training V2 service initialized for generic document extraction training")
+	}
+
 	// Create router
 	router := gin.New()
 
@@ -141,7 +162,7 @@ func main() {
 	// Setup routes
 	// Use SetupProtectedRoutes since this service is behind the API Gateway
 	// The gateway handles authentication and forwards user context via headers
-	routes.SetupProtectedRoutes(router, cfg, redisCache, salesHandlers, ocrHandlers, draftHandlers, purchaReportHandler)
+	routes.SetupProtectedRoutes(router, cfg, redisCache, salesHandlers, ocrHandlers, draftHandlers, purchaReportHandler, trainingHandlers, aiTrainingHandlers)
 
 	// Start server
 	srv := &http.Server{

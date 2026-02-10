@@ -364,14 +364,14 @@ func (s *PurchaseService) GetPurchases(ctx context.Context, tenantID uuid.UUID, 
 	var purchases []models.StockPurchase
 	var total int64
 
-	query := s.db.Where("tenant_id = ?", tenantID)
+	query := s.db.Where("stock_purchases.tenant_id = ?", tenantID)
 
 	if shopID != nil {
-		query = query.Where("shop_id = ?", *shopID)
+		query = query.Where("stock_purchases.shop_id = ?", *shopID)
 	}
 
 	if status != "" {
-		query = query.Where("status = ?", status)
+		query = query.Where("stock_purchases.status = ?", status)
 	}
 
 	// Get total count
@@ -379,16 +379,16 @@ func (s *PurchaseService) GetPurchases(ctx context.Context, tenantID uuid.UUID, 
 		return nil, 0, fmt.Errorf("failed to count purchases: %w", err)
 	}
 
-	// Get purchases with pagination
+	// Get purchases with pagination (Joins for direct relations, Preload for collections)
 	if err := query.
-		Preload("Vendor").
-		Preload("Shop").
+		Joins("Vendor").
+		Joins("Shop").
+		Joins("CreatedByUser").
 		Preload("Items").
 		Preload("Items.Product").
 		Preload("Items.Product.Brand").
 		Preload("Payments").
-		Preload("CreatedByUser").
-		Order("created_at DESC").
+		Order("stock_purchases.created_at DESC").
 		Limit(limit).
 		Offset(offset).
 		Find(&purchases).Error; err != nil {
@@ -409,8 +409,8 @@ func (s *PurchaseService) GetPurchaseByID(ctx context.Context, id, tenantID uuid
 
 	if err := s.db.
 		Where("id = ? AND tenant_id = ?", id, tenantID).
-		Preload("Vendor").
-		Preload("Shop").
+		Joins("Vendor").
+		Joins("Shop").
 		Preload("Items").
 		Preload("Items.Product").
 		Preload("Items.Product.Brand").

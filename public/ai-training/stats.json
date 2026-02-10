@@ -1,0 +1,50 @@
+{
+  "success": true,
+  "stats": {
+    "total_images": 592,
+    "clean_images": 475,
+    "rejected_images": 117,
+    "by_source": {
+      "56b447a5": {
+        "clean": 82,
+        "rejected": 5,
+        "quality": "good"
+      },
+      "d48f1870": {
+        "clean": 212,
+        "rejected": 0,
+        "quality": "excellent"
+      },
+      "dd7ecd20": {
+        "clean": 93,
+        "rejected": 0,
+        "quality": "good"
+      },
+      "e69b9bdc": {
+        "clean": 25,
+        "rejected": 0,
+        "quality": "excellent"
+      },
+      "f64c6ee1": {
+        "clean": 63,
+        "rejected": 0,
+        "quality": "good"
+      },
+      "87b7b422": {
+        "clean": 0,
+        "rejected": 10,
+        "quality": "rejected"
+      },
+      "92917f90": {
+        "clean": 0,
+        "rejected": 88,
+        "quality": "rejected"
+      },
+      "1d2b384f": {
+        "clean": 0,
+        "rejected": 14,
+        "quality": "rejected"
+      }
+    }
+  }
+}

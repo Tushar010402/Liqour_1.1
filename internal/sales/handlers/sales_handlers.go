@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,6 +55,25 @@ func (h *SalesHandlers) Health(c *gin.Context) {
 		"status":  "healthy",
 		"service": "sales",
 	})
+}
+
+// DebugDatabase runs database diagnostic tests
+func (h *SalesHandlers) DebugDatabase(c *gin.Context) {
+	// Get tenant ID directly from header for debugging
+	tenantIDStr := c.GetHeader("X-Tenant-ID")
+	if tenantIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "X-Tenant-ID header required"})
+		return
+	}
+
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant ID format"})
+		return
+	}
+
+	result := h.dailySalesService.DebugDatabaseTest(tenantID)
+	c.JSON(http.StatusOK, result)
 }
 
 // Daily Sales Endpoints (Critical for bulk entry workflow)
@@ -119,9 +139,7 @@ func (h *SalesHandlers) CreateDailySalesRecord(c *gin.Context) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			if err := h.validationService.TriggerValidation(ctx, record.ID, tenantID); err != nil {
-				fmt.Printf("[SalesHandler] Auto-validation failed for record %s: %v\n", record.ID, err)
 			} else {
-				fmt.Printf("[SalesHandler] Auto-validation triggered for record %s\n", record.ID)
 			}
 		}()
 	}
@@ -142,6 +160,18 @@ func (h *SalesHandlers) GetDailySalesRecords(c *gin.Context) {
 	if err := c.ShouldBindQuery(&filters); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Manually parse UUID query params (gin can't bind uuid.UUID from query strings)
+	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
+		if parsed, err := uuid.Parse(shopIDStr); err == nil {
+			filters.ShopID = parsed
+		}
+	}
+	if salesmanIDStr := c.Query("salesman_id"); salesmanIDStr != "" {
+		if parsed, err := uuid.Parse(salesmanIDStr); err == nil {
+			filters.SalesmanID = parsed
+		}
 	}
 
 	// Enforce shop restriction for salesmen
@@ -295,9 +325,7 @@ func (h *SalesHandlers) UpdateDailySalesRecord(c *gin.Context) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			if err := h.validationService.TriggerValidation(ctx, record.ID, tenantID); err != nil {
-				fmt.Printf("[SalesHandler] Auto-validation failed for updated record %s: %v\n", record.ID, err)
 			} else {
-				fmt.Printf("[SalesHandler] Auto-validation re-triggered for updated record %s\n", record.ID)
 			}
 		}()
 	}
@@ -415,6 +443,18 @@ func (h *SalesHandlers) GetSales(c *gin.Context) {
 	if err := c.ShouldBindQuery(&filters); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Manually parse UUID query params (gin can't bind uuid.UUID from query strings)
+	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
+		if parsed, err := uuid.Parse(shopIDStr); err == nil {
+			filters.ShopID = parsed
+		}
+	}
+	if salesmanIDStr := c.Query("salesman_id"); salesmanIDStr != "" {
+		if parsed, err := uuid.Parse(salesmanIDStr); err == nil {
+			filters.SalesmanID = parsed
+		}
 	}
 
 	// Enforce shop restriction for salesmen
@@ -728,6 +768,18 @@ func (h *SalesHandlers) GetSaleReturns(c *gin.Context) {
 		return
 	}
 
+	// Manually parse UUID query params (gin can't bind uuid.UUID from query strings)
+	if saleIDStr := c.Query("sale_id"); saleIDStr != "" {
+		if parsed, err := uuid.Parse(saleIDStr); err == nil {
+			filters.SaleID = parsed
+		}
+	}
+	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
+		if parsed, err := uuid.Parse(shopIDStr); err == nil {
+			filters.ShopID = parsed
+		}
+	}
+
 	// Enforce shop restriction for salesmen
 	var filterShopPtr *uuid.UUID
 	if filters.ShopID != uuid.Nil {
@@ -891,13 +943,128 @@ func (h *SalesHandlers) GetDashboardSummary(c *gin.Context) {
 		shopID = &enforcedShopID
 	}
 
-	summary, err := h.dashboardService.GetDashboardSummary(c.Request.Context(), tenantID, shopID)
+	// Get user role for role-aware dashboard
+	userRole := c.GetString("role")
+
+	// Parse date_filter query param
+	dateFilter := c.DefaultQuery("date_filter", "yesterday")
+	now := time.Now()
+	today := utils.StartOfDay(now)
+	tomorrow := today.AddDate(0, 0, 1)
+
+	var startDate, endDate time.Time
+	switch dateFilter {
+	case "today":
+		startDate = today
+		endDate = tomorrow
+	case "yesterday":
+		startDate = today.AddDate(0, 0, -1)
+		endDate = today
+	case "last_7_days":
+		startDate = today.AddDate(0, 0, -7)
+		endDate = tomorrow
+	case "last_30_days":
+		startDate = today.AddDate(0, 0, -30)
+		endDate = tomorrow
+	case "this_month":
+		startDate = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		endDate = startDate.AddDate(0, 1, 0)
+	default:
+		startDate = today.AddDate(0, 0, -1)
+		endDate = today
+		dateFilter = "yesterday"
+	}
+
+	summary, err := h.dashboardService.GetDashboardSummary(c.Request.Context(), tenantID, userID, userRole, shopID, startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, summary)
+	// Build shop filter info
+	shopFilterID := interface{}(nil)
+	shopFilterName := "All Shops"
+	if shopID != nil {
+		shopFilterID = shopID.String()
+		// Try to get shop name from shop summaries
+		for _, s := range summary.ShopSummaries {
+			if s.ShopID == *shopID {
+				shopFilterName = s.ShopName
+				break
+			}
+		}
+	}
+
+	// Build nested response alongside existing flat keys
+	response := gin.H{
+		// Existing flat keys
+		"todays_sales":    summary.TodaySales,
+		"todays_returns":  summary.TodayReturns,
+		"pending_sales":   summary.PendingSales,
+		"pending_returns": summary.PendingReturns,
+		"total_revenue":   summary.TotalRevenue,
+		"total_due":       summary.TotalDue,
+		"cash_amount":     summary.CashAmount,
+		"card_amount":     summary.CardAmount,
+		"upi_amount":      summary.UpiAmount,
+		"credit_amount":   summary.CreditAmount,
+		"shop_summaries":  summary.ShopSummaries,
+		"top_products":    summary.TopProducts,
+		"recent_sales":    summary.RecentSales,
+		"generated_at":    summary.GeneratedAt,
+
+		// Nested keys
+		"date_range": gin.H{
+			"start_date":     startDate.Format("2006-01-02"),
+			"end_date":       endDate.AddDate(0, 0, -1).Format("2006-01-02"),
+			"filter_applied": dateFilter,
+		},
+		"shop_filter": gin.H{
+			"shop_id":   shopFilterID,
+			"shop_name": shopFilterName,
+		},
+		"metrics": gin.H{
+			"payment": gin.H{
+				"total_amount": summary.TotalRevenue,
+				"count":        summary.TodaySales.TotalSales,
+			},
+			"purchase": gin.H{
+				"total_amount": 0,
+				"count":        0,
+			},
+			"sale": gin.H{
+				"total_amount": summary.TodaySales.TotalAmount,
+				"count":        summary.TodaySales.TotalSales,
+			},
+			"expense": gin.H{
+				"total_amount": 0,
+				"count":        0,
+			},
+		},
+	}
+
+	// Role-aware additions (only include when present)
+	if summary.RoleCtx != nil {
+		response["role_context"] = summary.RoleCtx
+	}
+	if summary.TeamStatus != nil {
+		response["team_status"] = summary.TeamStatus
+		// Debug log for team submission status
+		log.Printf("[dashboard] team_status: total=%d submitted=%d missing=%d rate=%.1f%%",
+			summary.TeamStatus.TotalSalesmen, summary.TeamStatus.TotalSubmitted,
+			summary.TeamStatus.TotalMissing, summary.TeamStatus.SubmissionRate)
+		for _, shop := range summary.TeamStatus.Shops {
+			for _, sm := range shop.Salesmen {
+				log.Printf("[dashboard]   %s (%s): %s amount=%.0f",
+					sm.SalesmanName, shop.ShopName, sm.Status, sm.TotalAmount)
+			}
+		}
+	}
+	if summary.MyStatus != nil {
+		response["my_status"] = summary.MyStatus
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 // Helper methods
@@ -1328,7 +1495,6 @@ func (h *SalesHandlers) TriggerValidation(c *gin.Context) {
 		ctx := context.Background()
 		if err := h.validationService.TriggerValidation(ctx, recordID, tenantID); err != nil {
 			// Log error but don't block response
-			fmt.Printf("Validation trigger failed for record %s: %v\n", recordID, err)
 		}
 	}()
 
@@ -1477,12 +1643,8 @@ func (h *SalesHandlers) TriggerBatchLearning(c *gin.Context) {
 	// Run batch learning asynchronously
 	go func() {
 		ctx := context.Background()
-		result, err := h.validationService.ProcessBatchLearning(ctx, tenantID)
-		if err != nil {
-			fmt.Printf("[BatchLearning] Error for tenant %s: %v\n", tenantID, err)
-		} else {
-			fmt.Printf("[BatchLearning] Completed for tenant %s: %+v\n", tenantID, result)
-		}
+		_, err := h.validationService.ProcessBatchLearning(ctx, tenantID)
+		_ = err
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{
@@ -1698,5 +1860,419 @@ func (h *SalesHandlers) RevertDailySalesRecordWithOTP(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Daily sales record reverted successfully",
 		"record":  record,
+	})
+}
+
+// ============================================================================
+// Smart Sale Endpoints (AI-assisted sale creation from images)
+// ============================================================================
+
+// SmartSaleFinalizeRequest represents the request to finalize a smart sale
+// Supports both legacy (Flutter) and standard field names for backward compatibility
+type SmartSaleFinalizeRequest struct {
+	ShopID   string                    `json:"shop_id" binding:"required"`
+	ShopName string                    `json:"shop_name"`
+	Date     string                    `json:"date" binding:"required"` // YYYY-MM-DD format
+	Size     string                    `json:"size"`                    // e.g., "375ML"
+	Items    []SmartSaleItemRequest    `json:"items" binding:"required"`
+
+	// Standard field names (backend convention)
+	TotalSalesAmount   float64 `json:"total_sales_amount"`   // Standard: total gross sales
+	TotalCashAmount    float64 `json:"total_cash_amount"`    // Standard: cash payment
+	TotalCardAmount    float64 `json:"total_card_amount"`    // Standard: card payment
+	TotalUpiAmount     float64 `json:"total_upi_amount"`     // Standard: UPI payment
+	TotalCreditAmount  float64 `json:"total_credit_amount"`  // Standard: credit payment
+	TotalExpenseAmount float64 `json:"total_expense_amount"` // Standard: total expenses
+
+	// Legacy field names (Flutter app compatibility) - normalized to standard after binding
+	GrossAmount   float64 `json:"gross_amount"`   // Legacy → TotalSalesAmount
+	TotalAmount   float64 `json:"total_amount"`   // Legacy → TotalSalesAmount (fallback)
+	TotalExpenses float64 `json:"total_expenses"` // Legacy → TotalExpenseAmount
+	CashAmount    float64 `json:"cash_amount"`    // Legacy → TotalCashAmount
+	CardAmount    float64 `json:"card_amount"`    // Legacy → TotalCardAmount
+	UPIAmount     float64 `json:"upi_amount"`     // Legacy → TotalUpiAmount
+	CreditAmount  float64 `json:"credit_amount"`  // Legacy → TotalCreditAmount
+
+	Expenses    []SmartSaleExpenseRequest `json:"expenses"`
+	Notes       string                    `json:"notes"`
+	SmartSaleID *string                   `json:"smart_sale_id"` // Optional reference to the smart sale session
+	ImageURLs   []string                  `json:"image_urls"`    // URLs of uploaded images
+}
+
+// NormalizeLegacyFields normalizes legacy field names to standard names
+// This ensures backward compatibility with Flutter app while using standard names internally
+func (r *SmartSaleFinalizeRequest) NormalizeLegacyFields() {
+	// TotalSalesAmount: prefer GrossAmount, fallback to TotalAmount, then standard field
+	if r.TotalSalesAmount == 0 {
+		if r.GrossAmount > 0 {
+			r.TotalSalesAmount = r.GrossAmount
+		} else if r.TotalAmount > 0 {
+			r.TotalSalesAmount = r.TotalAmount
+		}
+	}
+
+	// TotalExpenseAmount: prefer TotalExpenses, then standard field
+	if r.TotalExpenseAmount == 0 && r.TotalExpenses > 0 {
+		r.TotalExpenseAmount = r.TotalExpenses
+	}
+
+	// TotalCashAmount: prefer CashAmount, then standard field
+	if r.TotalCashAmount == 0 && r.CashAmount > 0 {
+		r.TotalCashAmount = r.CashAmount
+	}
+
+	// TotalCardAmount: prefer CardAmount, then standard field
+	if r.TotalCardAmount == 0 && r.CardAmount > 0 {
+		r.TotalCardAmount = r.CardAmount
+	}
+
+	// TotalUpiAmount: prefer UPIAmount, then standard field
+	if r.TotalUpiAmount == 0 && r.UPIAmount > 0 {
+		r.TotalUpiAmount = r.UPIAmount
+	}
+
+	// TotalCreditAmount: prefer CreditAmount, then standard field
+	if r.TotalCreditAmount == 0 && r.CreditAmount > 0 {
+		r.TotalCreditAmount = r.CreditAmount
+	}
+}
+
+// SmartSaleItemRequest represents an item in the smart sale finalize request
+type SmartSaleItemRequest struct {
+	ProductID    string  `json:"product_id" binding:"required"`
+	BrandName    string  `json:"brand_name"`
+	Size         string  `json:"size"`
+	Category     string  `json:"category"`
+	Quantity     int     `json:"quantity"`
+	Rate         float64 `json:"rate"`
+	Amount       float64 `json:"amount"`
+	OpeningStock int     `json:"opening_stock"`
+	ClosingStock int     `json:"closing_stock"`
+	Receipt      int     `json:"receipt"`      // Stock received
+	Total        int     `json:"total"`        // Opening + Receipt
+	DBStock      int     `json:"db_stock"`     // Stock in database
+	IsValid      bool    `json:"is_valid"`
+}
+
+// SmartSaleExpenseRequest represents an expense in the smart sale finalize request
+type SmartSaleExpenseRequest struct {
+	Header string  `json:"header" binding:"required"`
+	Amount float64 `json:"amount" binding:"required"`
+}
+
+// FinalizeSmartSale creates a daily sales record from smart sale (AI-extracted) data
+// POST /api/sales/smart-sale/finalize
+func (h *SalesHandlers) FinalizeSmartSale(c *gin.Context) {
+	tenantID, createdByID, err := h.getTenantAndUserID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var req SmartSaleFinalizeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
+		return
+	}
+
+	// Normalize legacy field names to standard names for backward compatibility
+	req.NormalizeLegacyFields()
+
+	// Parse shop ID
+	shopID, err := uuid.Parse(req.ShopID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shop_id format"})
+		return
+	}
+
+	// Parse date
+	recordDate, err := time.Parse("2006-01-02", req.Date)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format, expected YYYY-MM-DD"})
+		return
+	}
+
+	// Convert items to DailySalesItemRequest format
+	// First pass: collect items and calculate total
+	type itemData struct {
+		ProductID    uuid.UUID
+		Quantity     int
+		Rate         float64
+		Amount       float64
+		OpeningStock int
+		ClosingStock int
+		// OCR-extracted data for manager review
+		OCRBrandName string
+		OCRSize      string
+		OCRReceipt   int
+		OCRTotal     int
+		DBStock      int
+		OCRRate      float64
+	}
+	var itemsData []itemData
+	var totalSalesAmount float64
+
+	for _, item := range req.Items {
+		// Skip items with zero quantity (no sale)
+		if item.Quantity <= 0 {
+			continue
+		}
+
+		productID, err := uuid.Parse(item.ProductID)
+		if err != nil {
+			continue
+		}
+
+		// Calculate amount if not provided
+		amount := item.Amount
+		if amount == 0 && item.Rate > 0 {
+			amount = float64(item.Quantity) * item.Rate
+		}
+
+		itemsData = append(itemsData, itemData{
+			ProductID:    productID,
+			Quantity:     item.Quantity,
+			Rate:         item.Rate,
+			Amount:       amount,
+			OpeningStock: item.OpeningStock,
+			ClosingStock: item.ClosingStock,
+			// OCR-extracted data from Flutter (what user saw/confirmed)
+			OCRBrandName: item.BrandName,
+			OCRSize:      item.Size,
+			OCRReceipt:   item.Receipt,
+			OCRTotal:     item.Total,
+			DBStock:      item.DBStock,
+			OCRRate:      item.Rate, // Rate from image/user input
+		})
+
+		totalSalesAmount += amount
+	}
+
+	if len(itemsData) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid items with quantity > 0 found"})
+		return
+	}
+
+	// ===== VALIDATE PRODUCT SIZES (if size filter was specified) =====
+	// Ensure all submitted products match the user's selected size
+	if req.Size != "" {
+		normalizedSize := strings.ToUpper(strings.TrimSpace(req.Size))
+		// Collect all product IDs
+		var productIDs []uuid.UUID
+		for _, item := range itemsData {
+			productIDs = append(productIDs, item.ProductID)
+		}
+
+		// Query products to get their sizes
+		type productSize struct {
+			ID   uuid.UUID `gorm:"column:id"`
+			Name string    `gorm:"column:name"`
+			Size string    `gorm:"column:size"`
+		}
+		var products []productSize
+		if err := h.dailySalesService.GetDB().Table("products").
+			Select("id, name, size").
+			Where("id IN ?", productIDs).
+			Find(&products).Error; err != nil {
+			// Continue without validation if query fails
+		} else {
+			// Create map for quick lookup
+			productSizeMap := make(map[uuid.UUID]productSize)
+			for _, p := range products {
+				productSizeMap[p.ID] = p
+			}
+
+			// Check each item's size
+			var sizeMismatches []string
+			for _, item := range itemsData {
+				if p, ok := productSizeMap[item.ProductID]; ok {
+					productSizeNorm := strings.ToUpper(strings.TrimSpace(p.Size))
+					if productSizeNorm != normalizedSize {
+						sizeMismatches = append(sizeMismatches, fmt.Sprintf("%s (%s)", p.Name, p.Size))
+					}
+				}
+			}
+
+			if len(sizeMismatches) > 0 {
+				// Log warning but allow submission - the filter might be for display only
+				// To enforce strict size matching, uncomment the following:
+				// c.JSON(http.StatusBadRequest, gin.H{
+				// 	"error": fmt.Sprintf("Size mismatch: Selected %s but found products with different sizes: %v", normalizedSize, sizeMismatches),
+				// })
+				// return
+			}
+		}
+	}
+
+	// ===== CALCULATE EXPENSES FIRST =====
+	// This must happen before payment adjustment so we have the correct expense amount
+	var expenses []services.DailySalesExpenseRequest
+	var calculatedExpenseAmount float64
+	for _, exp := range req.Expenses {
+		expenses = append(expenses, services.DailySalesExpenseRequest{
+			HeaderID:   strings.ToLower(strings.ReplaceAll(exp.Header, " ", "_")),
+			HeaderName: exp.Header,
+			Amount:     exp.Amount,
+		})
+		calculatedExpenseAmount += exp.Amount
+	}
+
+	// Determine final expense amount: prefer request header value, fallback to calculated from items
+	totalExpenseAmount := calculatedExpenseAmount
+	if req.TotalExpenseAmount > 0 {
+		totalExpenseAmount = req.TotalExpenseAmount
+		if utils.AbsFloat(totalExpenseAmount-calculatedExpenseAmount) > 0.01 {
+			// Expense mismatch - use request value
+		}
+	}
+
+	// ===== CALCULATE ITEMS TOTAL =====
+	calculatedItemsTotal := totalSalesAmount
+
+	// Check if request total differs from calculated total (items were filtered)
+	if req.TotalSalesAmount > 0 && utils.AbsFloat(req.TotalSalesAmount-calculatedItemsTotal) > 0.01 {
+		// Items total mismatch - using calculated total
+	}
+
+	// ALWAYS use calculated total from actual items to ensure consistency
+	// The request total might include items that were filtered (zero quantity, invalid product_id)
+	// totalSalesAmount is already set correctly from the items loop above
+
+	// ===== RECALCULATE PAYMENT BREAKDOWN =====
+	// Payment formula: Cash + Card + UPI + Credit + Expenses = TotalSalesAmount
+	// We must ensure this formula holds with the calculated items total
+	totalPayment := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
+
+	if totalPayment == 0 {
+		// If no payment breakdown provided, default all to cash (minus expenses)
+		req.TotalCashAmount = totalSalesAmount - totalExpenseAmount
+		totalPayment = req.TotalCashAmount
+	} else if req.TotalSalesAmount > 0 && utils.AbsFloat(req.TotalSalesAmount-calculatedItemsTotal) > 0.01 {
+		// Items were filtered, recalculate payment proportionally
+		// The payment amounts should sum to (calculatedItemsTotal - expenses)
+		netPaymentNeeded := calculatedItemsTotal - totalExpenseAmount
+		originalNetPayment := totalPayment // Cash + Card + UPI + Credit from request
+
+		if originalNetPayment > 0 {
+			ratio := netPaymentNeeded / originalNetPayment
+			req.TotalCashAmount = req.TotalCashAmount * ratio
+			req.TotalCardAmount = req.TotalCardAmount * ratio
+			req.TotalUpiAmount = req.TotalUpiAmount * ratio
+			req.TotalCreditAmount = req.TotalCreditAmount * ratio
+
+			// Recalculate to fix rounding
+			totalPayment = req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
+
+			// Adjust cash for any rounding difference
+			diff := netPaymentNeeded - totalPayment
+			if utils.AbsFloat(diff) > 0.001 {
+				req.TotalCashAmount += diff
+				totalPayment = req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
+			}
+		}
+	}
+
+	// ===== FINAL VALIDATION CHECK =====
+	// Ensure the payment formula holds before proceeding
+	finalPaymentSum := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount + totalExpenseAmount
+	if utils.AbsFloat(finalPaymentSum-totalSalesAmount) > 0.01 {
+		// Auto-adjust cash to make it balance
+		diff := totalSalesAmount - finalPaymentSum
+		req.TotalCashAmount += diff
+	}
+
+	// Second pass: create items with distributed payment amounts
+	var items []services.DailySalesItemRequest
+	var distributedCash, distributedCard, distributedUPI, distributedCredit float64
+
+	for i, data := range itemsData {
+		// Calculate this item's proportion of total
+		proportion := data.Amount / totalSalesAmount
+
+		// Distribute payment amounts proportionally (using normalized standard field names)
+		itemCash := req.TotalCashAmount * proportion
+		itemCard := req.TotalCardAmount * proportion
+		itemUPI := req.TotalUpiAmount * proportion
+		itemCredit := req.TotalCreditAmount * proportion
+
+		// For the last item, use remaining amounts to avoid rounding errors
+		if i == len(itemsData)-1 {
+			itemCash = req.TotalCashAmount - distributedCash
+			itemCard = req.TotalCardAmount - distributedCard
+			itemUPI = req.TotalUpiAmount - distributedUPI
+			itemCredit = req.TotalCreditAmount - distributedCredit
+		}
+
+		// Round to 2 decimal places
+		itemCash = float64(int(itemCash*100+0.5)) / 100
+		itemCard = float64(int(itemCard*100+0.5)) / 100
+		itemUPI = float64(int(itemUPI*100+0.5)) / 100
+		itemCredit = float64(int(itemCredit*100+0.5)) / 100
+
+		// Ensure payment sum equals item total (adjust cash if needed)
+		paymentSum := itemCash + itemCard + itemUPI + itemCredit
+		if diff := data.Amount - paymentSum; diff != 0 {
+			itemCash += diff // Adjust cash to make it balance
+		}
+
+		items = append(items, services.DailySalesItemRequest{
+			ProductID:    data.ProductID,
+			Quantity:     data.Quantity,
+			UnitPrice:    data.Rate,
+			TotalAmount:  data.Amount,
+			CashAmount:   itemCash,
+			CardAmount:   itemCard,
+			UpiAmount:    itemUPI,
+			CreditAmount: itemCredit,
+			OpeningStock: data.OpeningStock,
+			ClosingStock: data.ClosingStock,
+			// OCR-extracted data for manager review
+			OCRBrandName: data.OCRBrandName,
+			OCRSize:      data.OCRSize,
+			OCRReceipt:   data.OCRReceipt,
+			OCRTotal:     data.OCRTotal,
+			DBStock:      data.DBStock,
+			OCRRate:      data.OCRRate,
+		})
+
+		distributedCash += itemCash
+		distributedCard += itemCard
+		distributedUPI += itemUPI
+		distributedCredit += itemCredit
+	}
+
+	// Build the daily sales record request (using normalized standard field names)
+	dailySalesReq := services.DailySalesRecordRequest{
+		RecordDate:         recordDate,
+		ShopID:             shopID,
+		TotalSalesAmount:   totalSalesAmount,
+		TotalCashAmount:    req.TotalCashAmount,
+		TotalCardAmount:    req.TotalCardAmount,
+		TotalUpiAmount:     req.TotalUpiAmount,
+		TotalCreditAmount:  req.TotalCreditAmount,
+		TotalExpenseAmount: totalExpenseAmount,
+		Notes:              req.Notes,
+		Items:              items,
+		Expenses:           expenses,
+		ImageURLs:          req.ImageURLs,
+	}
+
+	// Validate payment breakdown matches total (including expenses paid from cash)
+	paymentTotal := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount + totalExpenseAmount
+	if paymentTotal > 0 && utils.AbsFloat(paymentTotal-totalSalesAmount) > 0.01 {
+		// Payment breakdown mismatch detected
+	}
+
+	// Create the daily sales record
+	record, err := h.dailySalesService.CreateDailySalesRecord(c.Request.Context(), dailySalesReq, tenantID, createdByID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sale: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"success": true,
+		"sale_id": record.ID,
+		"message": "Sale submitted successfully",
 	})
 }

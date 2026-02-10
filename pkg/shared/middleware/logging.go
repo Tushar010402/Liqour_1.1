@@ -35,8 +35,10 @@ func generateRequestID() string {
 func randomString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	result := make([]byte, n)
+	seed := uint64(time.Now().UnixNano())
 	for i := range result {
-		result[i] = letters[time.Now().UnixNano()%int64(len(letters))]
+		result[i] = letters[seed%uint64(len(letters))]
+		seed = seed*1103515245 + 12345 // LCG for fast pseudo-random
 	}
 	return string(result)
 }

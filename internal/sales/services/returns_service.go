@@ -386,8 +386,8 @@ func (s *ReturnsService) GetPendingReturns(ctx context.Context, tenantID uuid.UU
 
 // ReturnsFilters represents filters for returns
 type ReturnsFilters struct {
-	SaleID    uuid.UUID `form:"sale_id"`
-	ShopID    uuid.UUID `form:"shop_id"`
+	SaleID    uuid.UUID `form:"-"`
+	ShopID    uuid.UUID `form:"-"`
 	Status    string    `form:"status"`
 	StartDate time.Time `form:"start_date" time_format:"2006-01-02"`
 	EndDate   time.Time `form:"end_date" time_format:"2006-01-02"`
@@ -438,6 +438,25 @@ func (s *ReturnsService) mapSaleReturnToResponse(saleReturn *models.SaleReturn) 
 
 	// Add items
 	if len(saleReturn.Items) > 0 {
+		// Batch-load SaaS category names (eliminates N+1)
+		saasCategories := make(map[uuid.UUID]string)
+		var missingCatIDs []uuid.UUID
+		for _, item := range saleReturn.Items {
+			if item.SaleItem != nil && item.SaleItem.Product != nil && item.SaleItem.Product.Category == nil && item.SaleItem.Product.CategoryID != uuid.Nil {
+				missingCatIDs = append(missingCatIDs, item.SaleItem.Product.CategoryID)
+			}
+		}
+		if len(missingCatIDs) > 0 {
+			var catResults []struct {
+				ID   uuid.UUID `gorm:"column:id"`
+				Name string    `gorm:"column:name"`
+			}
+			s.db.Table("brand_categories").Select("id, name").Where("id IN ?", missingCatIDs).Scan(&catResults)
+			for _, cr := range catResults {
+				saasCategories[cr.ID] = cr.Name
+			}
+		}
+
 		response.Items = make([]SaleReturnItemResponse, len(saleReturn.Items))
 		for i, item := range saleReturn.Items {
 			response.Items[i] = SaleReturnItemResponse{
@@ -449,7 +468,6 @@ func (s *ReturnsService) mapSaleReturnToResponse(saleReturn *models.SaleReturn) 
 				Reason:      item.Reason,
 			}
 
-			// Add product info from sale item
 			if item.SaleItem != nil && item.SaleItem.Product != nil {
 				response.Items[i].ProductID = item.SaleItem.Product.ID
 				response.Items[i].ProductName = item.SaleItem.Product.Name
@@ -459,14 +477,10 @@ func (s *ReturnsService) mapSaleReturnToResponse(saleReturn *models.SaleReturn) 
 					response.Items[i].BrandName = item.SaleItem.Product.Brand.Name
 				}
 
-				// Try local category first, then fall back to SaaS brand_categories
 				if item.SaleItem.Product.Category != nil {
 					response.Items[i].CategoryName = item.SaleItem.Product.Category.Name
-				} else if item.SaleItem.Product.CategoryID != uuid.Nil {
-					// Fallback to SaaS brand_categories table for products using SaaS-level category_id
-					if saasCategoryName := s.getSaaSCategoryName(item.SaleItem.Product.CategoryID); saasCategoryName != "" {
-						response.Items[i].CategoryName = saasCategoryName
-					}
+				} else if name, ok := saasCategories[item.SaleItem.Product.CategoryID]; ok {
+					response.Items[i].CategoryName = name
 				}
 			}
 		}

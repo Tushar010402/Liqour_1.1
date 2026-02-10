@@ -69,6 +69,11 @@ func AllModels() []interface{} {
 		// Rate Limiting models
 		&RateLimit{},
 		&RateLimitLog{},
+
+		// Documentation models
+		&DocsAccess{},
+		&DocsComment{},
+		&DocsEdit{},
 	}
 }
 
@@ -137,6 +142,11 @@ func MigrateDB(db *gorm.DB) error {
 		// Rate Limiting models
 		&RateLimit{},
 		&RateLimitLog{},
+
+		// Documentation models
+		&DocsAccess{},
+		&DocsComment{},
+		&DocsEdit{},
 	}
 
 	// Auto-migrate all models

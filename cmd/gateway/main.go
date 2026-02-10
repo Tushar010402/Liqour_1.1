@@ -108,7 +108,7 @@ func main() {
 	router.Use(redisRateLimiter.EndpointMiddleware())
 
 	// Setup routes - pass rate limiter for role-based limiting on protected routes
-	routes.SetupRoutes(router, cfg, redisCache, gatewayHandlers, redisRateLimiter)
+	routes.SetupRoutes(router, cfg, redisCache, db, gatewayHandlers, redisRateLimiter)
 
 	// Start server
 	srv := &http.Server{

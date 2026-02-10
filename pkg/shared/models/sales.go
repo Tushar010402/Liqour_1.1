@@ -58,6 +58,10 @@ type Sale struct {
 	// OCR and image processing
 	ParchaImage string `json:"parcha_image"` // Receipt/bill image
 
+	// Reminder tracking (prevents duplicate notifications)
+	LastReminderLevel  int        `json:"last_reminder_level" gorm:"default:0"`
+	LastReminderSentAt *time.Time `json:"last_reminder_sent_at"`
+
 	// Relationships
 	Items       []SaleItem       `json:"items,omitempty" gorm:"foreignKey:SaleID"`
 	Payments    []SalePayment    `json:"payments,omitempty" gorm:"foreignKey:SaleID"`
@@ -203,6 +207,10 @@ type DailySalesRecord struct {
 	RevertedBy    *User      `json:"reverted_by,omitempty" gorm:"foreignKey:RevertedByID"`
 	RevertReason  string     `json:"revert_reason,omitempty"`
 
+	// Reminder tracking (prevents duplicate notifications)
+	LastReminderLevel  int        `json:"last_reminder_level" gorm:"default:0"`
+	LastReminderSentAt *time.Time `json:"last_reminder_sent_at"`
+
 	// Relationships
 	Items    []DailySalesItem    `json:"items,omitempty" gorm:"foreignKey:DailySalesRecordID"`
 	Expenses []DailySalesExpense `json:"expenses,omitempty" gorm:"foreignKey:DailySalesRecordID"` // NEW: Expense breakdown
@@ -240,6 +248,15 @@ type DailySalesItem struct {
 	// Stock audit trail - captured at creation time for inventory tracking
 	OpeningStock int `json:"opening_stock" gorm:"default:0"` // Stock BEFORE this sale was recorded
 	ClosingStock int `json:"closing_stock" gorm:"default:0"` // Expected stock AFTER (opening - quantity)
+
+	// OCR-extracted data (from Smart Sale / GPT-5.2) - for manager review
+	// These fields store what was extracted from the image so managers can compare with system data
+	OCRBrandName string  `json:"ocr_brand_name" gorm:"size:255"`        // Brand name extracted from image
+	OCRSize      string  `json:"ocr_size" gorm:"size:50"`               // Size extracted from image (e.g., "375ML")
+	OCRReceipt   int     `json:"ocr_receipt" gorm:"default:0"`          // New stock received (from image)
+	OCRTotal     int     `json:"ocr_total" gorm:"default:0"`            // Opening + Receipt (from image)
+	DBStock      int     `json:"db_stock" gorm:"default:0"`             // Stock in database at time of submission (for comparison)
+	OCRRate      float64 `json:"ocr_rate" gorm:"default:0"`             // Rate from image (for comparison with UnitPrice)
 }
 
 // SaleFinanceLog tracks financial transactions related to sales

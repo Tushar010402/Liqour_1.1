@@ -16,6 +16,7 @@ import (
 	"github.com/liquorpro/go-backend/internal/saas/handlers"
 	"github.com/liquorpro/go-backend/internal/saas/models"
 	"github.com/liquorpro/go-backend/internal/saas/services"
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
@@ -167,6 +168,11 @@ func runMigrations(db *gorm.DB) error {
 		&models.PlanTransition{},
 		&models.PlanTransitionHistory{},
 
+		// Usage tracking models
+		&models.TenantUser{},
+		&models.Shop{},
+		&models.Product{},
+
 		// Brand management models (SaaS-specific)
 		&models.SaasBrand{},
 		&models.BrandVariant{},
@@ -195,6 +201,10 @@ func setupRoutes(
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 	router.Use(middleware.CORSMiddleware())
+	router.Use(monitoring.PrometheusMiddleware("saas"))
+
+	// Prometheus metrics endpoint
+	router.GET("/metrics", monitoring.PrometheusHandler())
 
 	// Health check
 	router.GET("/health", func(c *gin.Context) {

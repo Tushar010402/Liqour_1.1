@@ -3,6 +3,7 @@ package routes
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/inventory/handlers"
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
@@ -10,6 +11,10 @@ import (
 
 // SetupRoutes configures all inventory service routes
 func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inventoryHandlers *handlers.InventoryHandlers, draftHandlers *handlers.DraftHandlers) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("inventory"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Health check
 	router.GET("/health", inventoryHandlers.Health)
 
@@ -122,6 +127,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inv
 
 // SetupProtectedRoutes sets up routes with gateway-style auth handling
 func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, inventoryHandlers *handlers.InventoryHandlers, draftHandlers *handlers.DraftHandlers) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("inventory"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Health check (no auth required)
 	router.GET("/health", inventoryHandlers.Health)
 

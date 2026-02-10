@@ -88,6 +88,10 @@ if [ ! -f ".env.production" ]; then
 fi
 echo -e "${GREEN}   ✅ Environment configuration found${NC}"
 
+# Source database credentials from .env.production
+DB_USER=$(grep '^DATABASE_USER=' .env.production | cut -d= -f2)
+DB_NAME=$(grep '^DATABASE_NAME=' .env.production | cut -d= -f2)
+
 # Check disk space (need at least 10GB free)
 FREE_SPACE=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
 if [ "$FREE_SPACE" -lt 10 ]; then
@@ -117,7 +121,7 @@ if [ "$SKIP_BACKUP" != "true" ]; then
 
         echo -e "${YELLOW}   Creating backup at: $BACKUP_FILE${NC}"
 
-        if $DOCKER_COMPOSE -f docker-compose.production.yml exec -T postgres pg_dump -U liquorpro liquorpro 2>/dev/null | gzip > "$BACKUP_FILE"; then
+        if $DOCKER_COMPOSE -f docker-compose.production.yml exec -T postgres pg_dump -U "$DB_USER" "$DB_NAME" 2>/dev/null | gzip > "$BACKUP_FILE"; then
             BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
             echo -e "${GREEN}   ✅ Backup created successfully ($BACKUP_SIZE)${NC}"
         else
@@ -164,8 +168,27 @@ echo -e "${CYAN}   - Build Date: ${GREEN}$BUILD_DATE${NC}"
 echo -e "${CYAN}   - Git Commit: ${GREEN}$GIT_COMMIT${NC}"
 echo ""
 
-if $DOCKER_COMPOSE -f docker-compose.production.yml build --no-cache; then
+# Tag current images as :previous for rollback
+echo -e "${YELLOW}   Tagging current images as :previous...${NC}"
+for svc in gateway auth sales inventory finance saas migrations; do
+    if docker image inspect "liquorpro/$svc:${VERSION:-latest}" > /dev/null 2>&1; then
+        docker tag "liquorpro/$svc:${VERSION:-latest}" "liquorpro/$svc:previous" 2>/dev/null || true
+    fi
+done
+
+DEPLOY_TAG="deploy-$(date +%Y%m%d-%H%M%S)"
+BUILD_FLAGS=""
+if [ "${NO_CACHE:-false}" = "true" ]; then
+    BUILD_FLAGS="--no-cache"
+fi
+
+if $DOCKER_COMPOSE -f docker-compose.production.yml build $BUILD_FLAGS; then
     echo -e "${GREEN}   ✅ All images built successfully${NC}"
+    # Tag new images with deploy timestamp
+    for svc in gateway auth sales inventory finance saas migrations; do
+        docker tag "liquorpro/$svc:${VERSION:-latest}" "liquorpro/$svc:$DEPLOY_TAG" 2>/dev/null || true
+    done
+    echo -e "${CYAN}   Tagged as: $DEPLOY_TAG${NC}"
 else
     echo -e "${RED}❌ Image build failed${NC}"
     exit 1
@@ -185,7 +208,7 @@ $DOCKER_COMPOSE -f docker-compose.production.yml up -d postgres redis
 echo -e "${YELLOW}   Waiting for PostgreSQL to be ready...${NC}"
 ATTEMPTS=0
 MAX_ATTEMPTS=60
-until $DOCKER_COMPOSE -f docker-compose.production.yml exec -T postgres pg_isready -U liquorpro > /dev/null 2>&1 || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
+until $DOCKER_COMPOSE -f docker-compose.production.yml exec -T postgres pg_isready -U "$DB_USER" > /dev/null 2>&1 || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
     ATTEMPTS=$((ATTEMPTS + 1))
     printf "${YELLOW}   ."
     sleep 2
@@ -231,7 +254,7 @@ if $DOCKER_COMPOSE -f docker-compose.production.yml up --abort-on-container-exit
 
     # Show migration status
     echo -e "${CYAN}   Current schema version:${NC}"
-    $DOCKER_COMPOSE -f docker-compose.production.yml exec -T postgres psql -U liquorpro -d liquorpro -c \
+    $DOCKER_COMPOSE -f docker-compose.production.yml exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -c \
         "SELECT version, name, applied_at FROM schema_migrations WHERE success = true ORDER BY applied_at DESC LIMIT 5;" 2>/dev/null || true
 else
     echo -e "${RED}❌ Migration failed${NC}"

@@ -100,7 +100,8 @@ func parseDashOrFloat(s string) float64 {
 	return val
 }
 
-// calculateSimilarity calculates the similarity between two strings using Levenshtein distance
+// calculateSimilarity calculates the similarity between two strings using a combination of
+// Levenshtein distance, word-level matching, and position weighting for better accuracy
 func calculateSimilarity(s1, s2 string) float64 {
 	if s1 == s2 {
 		return 1.0
@@ -109,7 +110,18 @@ func calculateSimilarity(s1, s2 string) float64 {
 		return 0.0
 	}
 
-	// Simple word-based similarity
+	// Combine character-level (Levenshtein) and word-level similarity
+	// Uses levenshteinSimilarity from validation_service.go (same package)
+	charSim := levenshteinSimilarity(s1, s2)
+	wordSim := weightedWordSimilarity(s1, s2)
+
+	// Weight: 40% character-level, 60% word-level (words are more meaningful for brands)
+	return charSim*0.4 + wordSim*0.6
+}
+
+// weightedWordSimilarity calculates word-level similarity with position weighting
+// First word is most important for brand names
+func weightedWordSimilarity(s1, s2 string) float64 {
 	words1 := strings.Fields(s1)
 	words2 := strings.Fields(s2)
 
@@ -117,24 +129,58 @@ func calculateSimilarity(s1, s2 string) float64 {
 		return 0.0
 	}
 
-	// Count matching words
-	matches := 0
-	for _, w1 := range words1 {
-		for _, w2 := range words2 {
-			if strings.Contains(w1, w2) || strings.Contains(w2, w1) {
-				matches++
-				break
+	// Position weights: first word = 50%, rest distributed equally
+	// This prevents "TUBORG STRONG" matching "KINGFISHER STRONG"
+	firstWordWeight := 0.50
+	remainingWeight := 0.50
+
+	totalScore := 0.0
+	totalWeight := 0.0
+
+	// First word comparison (highest weight)
+	// Uses levenshteinSimilarity from validation_service.go (same package)
+	firstWordSim := levenshteinSimilarity(words1[0], words2[0])
+	totalScore += firstWordSim * firstWordWeight
+	totalWeight += firstWordWeight
+
+	// Remaining words comparison
+	if len(words1) > 1 || len(words2) > 1 {
+		remainingWords1 := words1[1:]
+		remainingWords2 := words2[1:]
+
+		if len(remainingWords1) == 0 && len(remainingWords2) == 0 {
+			// Both have only one word, done
+		} else {
+			// Count matching remaining words
+			matches := 0
+			maxRemaining := len(remainingWords1)
+			if len(remainingWords2) > maxRemaining {
+				maxRemaining = len(remainingWords2)
+			}
+
+			for _, w1 := range remainingWords1 {
+				for _, w2 := range remainingWords2 {
+					// Use Levenshtein for word matching (threshold 0.7)
+					if levenshteinSimilarity(w1, w2) >= 0.7 {
+						matches++
+						break
+					}
+				}
+			}
+
+			if maxRemaining > 0 {
+				remainingScore := float64(matches) / float64(maxRemaining)
+				totalScore += remainingScore * remainingWeight
+				totalWeight += remainingWeight
 			}
 		}
 	}
 
-	// Return ratio of matches to total words
-	maxWords := len(words1)
-	if len(words2) > maxWords {
-		maxWords = len(words2)
+	if totalWeight == 0 {
+		return 0.0
 	}
 
-	return float64(matches) / float64(maxWords)
+	return totalScore / totalWeight
 }
 
 func cleanBrandName(brandName string) string {
@@ -729,8 +775,9 @@ func extractPriceFromCalculation(numbers []float64, columnMap map[string]int) (f
 
 // 🔧 Phase 2.2: detectMergedRows finds and splits rows with multiple serial numbers
 func detectMergedRows(line string) []string {
-	// Pattern: Look for serial numbers (1-2 digits followed by dot or space)
-	serialPattern := regexp.MustCompile(`\b(\d{1,2})[\.\s]+([A-Za-z])`)
+	// Pattern: Look for serial numbers (1-2 digits followed by dot or space, then brand name)
+	// NOTE: Brand can start with letter OR digit (like "100 Pipers", "8 P.M.")
+	serialPattern := regexp.MustCompile(`\b(\d{1,2})[\.\s]+([A-Za-z0-9])`)
 	matches := serialPattern.FindAllStringIndex(line, -1)
 
 	// If we find 2+ serial numbers, this is likely a merged row
@@ -1254,95 +1301,68 @@ func (s *OCRService) parseInvoiceWithRegex(rawText, receiptType string) []Parsed
 		// 2. Followed by brand text (can start with digit like "8 P.M." or letter like "Conik")
 		// 3. Then followed by multiple numbers (the data columns)
 
-		// First, try to find all row number positions
-		// Pattern: whitespace, then 1-2 digits, then whitespace, then NON-digit (brand name starts)
-		// Use lookahead to avoid consuming the brand name
-		rowStartPattern := regexp.MustCompile(`\s+(\d{1,2})\s+([A-Za-z])`)
-		matches := rowStartPattern.FindAllStringIndex(rawText, -1)
+		// Find all row number positions using a comprehensive pattern
+		// This handles BOTH letter-starting brands (like "Iconiq") AND digit-starting brands (like "100 Pipers", "8 P.M.")
+		// Pattern: whitespace + 1-2 digit row number + whitespace
+		fmt.Println("🔧 [Regex Parser] Using comprehensive pattern for all brand types (letter AND digit-starting)...")
 
-		if len(matches) > 1 {
-			fmt.Printf("📋 [Regex Parser] Found %d potential row starts (letter-based)\n", len(matches))
-			// Create artificial lines by splitting at row number positions
-			newLines := make([]string, 0, len(matches))
-			for i := 0; i < len(matches); i++ {
-				start := matches[i][0]
-				var end int
-				if i < len(matches)-1 {
-					end = matches[i+1][0]
-				} else {
-					end = len(rawText)
-				}
-				line := strings.TrimSpace(rawText[start:end])
-				if line != "" {
-					newLines = append(newLines, line)
+		// Find ALL occurrences of " <digit> " and check if they're likely row numbers
+		digitPattern := regexp.MustCompile(`\s+(\d{1,2})\s+`)
+		allMatches := digitPattern.FindAllStringSubmatchIndex(rawText, -1)
+
+		if len(allMatches) > 0 {
+			fmt.Printf("🔍 [Regex Parser] Found %d potential row number positions\n", len(allMatches))
+
+			// Filter to find sequential row numbers (1, 2, 3, ...)
+			var rowStarts []int
+			for _, match := range allMatches {
+				numStr := rawText[match[2]:match[3]]
+				num, _ := strconv.Atoi(numStr)
+
+				// Only consider numbers 1-50 as potential row numbers
+				if num >= 1 && num <= 50 {
+					// Check if this looks like a row start (not a price/quantity)
+					// Row numbers are typically followed by brand text, not just more numbers
+					pos := match[1] // End of the match (after the whitespace following the number)
+					if pos < len(rawText) {
+						// Look ahead to see what follows
+						endPos := pos + 30
+						if endPos > len(rawText) {
+							endPos = len(rawText)
+						}
+						nextChunk := rawText[pos:endPos]
+						// If it starts with a letter OR digit followed by more chars (like "8 P.M." or "100 Pipers"), likely a brand
+						if len(nextChunk) > 0 && (unicode.IsLetter(rune(nextChunk[0])) ||
+						   (unicode.IsDigit(rune(nextChunk[0])) && len(nextChunk) > 2)) {
+							rowStarts = append(rowStarts, match[0])
+						}
+					}
 				}
 			}
-			lines = newLines
-			fmt.Printf("📋 [Regex Parser] Split into %d lines (letter-starting brands)\n", len(lines))
-		} else {
-			// Fallback: Try more aggressive pattern that handles digit-starting brands
-			// Look for: whitespace + sequential row numbers (1, 2, 3, ...) + whitespace
-			// This pattern looks for " <N> " where N is in sequence
-			fmt.Println("🔧 [Regex Parser] Trying fallback pattern for digit-starting brands...")
 
-			// Find ALL occurrences of " <digit> " and check if they're likely row numbers
-			digitPattern := regexp.MustCompile(`\s+(\d{1,2})\s+`)
-			allMatches := digitPattern.FindAllStringSubmatchIndex(rawText, -1)
-
-			if len(allMatches) > 0 {
-				fmt.Printf("🔍 [Regex Parser] Found %d potential row number positions\n", len(allMatches))
-
-				// Filter to find sequential row numbers (1, 2, 3, ...)
-				var rowStarts []int
-				for _, match := range allMatches {
-					numStr := rawText[match[2]:match[3]]
-					num, _ := strconv.Atoi(numStr)
-
-					// Only consider numbers 1-50 as potential row numbers
-					if num >= 1 && num <= 50 {
-						// Check if this looks like a row start (not a price/quantity)
-						// Row numbers are typically followed by brand text, not just more numbers
-						pos := match[1] // End of the match (after the whitespace following the number)
-						if pos < len(rawText) {
-							// Look ahead to see what follows
-							endPos := pos + 30
-							if endPos > len(rawText) {
-								endPos = len(rawText)
-							}
-							nextChunk := rawText[pos:endPos]
-							// If it starts with a letter OR digit followed by letter/dot (like "8 P.M."), likely a brand
-							if len(nextChunk) > 0 && (unicode.IsLetter(rune(nextChunk[0])) ||
-							   (unicode.IsDigit(rune(nextChunk[0])) && len(nextChunk) > 2)) {
-								rowStarts = append(rowStarts, match[0])
-							}
-						}
+			if len(rowStarts) > 1 {
+				fmt.Printf("📋 [Regex Parser] Filtered to %d likely row starts\n", len(rowStarts))
+				newLines := make([]string, 0, len(rowStarts))
+				for i := 0; i < len(rowStarts); i++ {
+					start := rowStarts[i]
+					var end int
+					if i < len(rowStarts)-1 {
+						end = rowStarts[i+1]
+					} else {
+						end = len(rawText)
+					}
+					line := strings.TrimSpace(rawText[start:end])
+					if line != "" {
+						newLines = append(newLines, line)
 					}
 				}
-
-				if len(rowStarts) > 1 {
-					fmt.Printf("📋 [Regex Parser] Filtered to %d likely row starts\n", len(rowStarts))
-					newLines := make([]string, 0, len(rowStarts))
-					for i := 0; i < len(rowStarts); i++ {
-						start := rowStarts[i]
-						var end int
-						if i < len(rowStarts)-1 {
-							end = rowStarts[i+1]
-						} else {
-							end = len(rawText)
-						}
-						line := strings.TrimSpace(rawText[start:end])
-						if line != "" {
-							newLines = append(newLines, line)
-						}
-					}
-					lines = newLines
-					fmt.Printf("📋 [Regex Parser] Split into %d lines (all brands)\n", len(lines))
-				} else {
-					fmt.Println("⚠️  [Regex Parser] Could not find row patterns in single-line text")
-				}
+				lines = newLines
+				fmt.Printf("📋 [Regex Parser] Split into %d lines (all brands)\n", len(lines))
 			} else {
 				fmt.Println("⚠️  [Regex Parser] Could not find row patterns in single-line text")
 			}
+		} else {
+			fmt.Println("⚠️  [Regex Parser] Could not find row patterns in single-line text")
 		}
 	}
 
@@ -1365,9 +1385,10 @@ func (s *OCRService) parseInvoiceWithRegex(rawText, receiptType string) []Parsed
 	if invoiceFormat == "beer" {
 		// Beer format: S.No | Brand Name | Op | Rec | Sale | Rate | Amount | Closing
 		// Uses dashes (-) instead of zeros, columns can be "-" or numbers
-		// Example: "3 BUDWEISER MAGNUM 24 - 5 210 1050 19"
+		// Example: "3 BUDWEISER MAGNUM 24 - 5 210 1050 19" or "4 100 Pipers 10 0 1 450 450 9"
 		// Pattern captures all 6 columns to extract closing stock and sale quantity
-		rowPattern = regexp.MustCompile(`^\s*(\d+)\s+([A-Za-z][A-Za-z0-9\s&'.#]*?)\s+(\d+|-)\s+(\d+|-)\s+(\d+|-)\s+(\d+(?:\.\d+)?|-)\s+(\d+(?:\.\d+)?|-)\s+(\d+)\s*$`)
+		// NOTE: Brand can start with letter OR digit (like "100 Pipers", "8 P.M.")
+		rowPattern = regexp.MustCompile(`^\s*(\d+)\s+([A-Za-z0-9][A-Za-z0-9\s&'.#]*?)\s+(\d+|-)\s+(\d+|-)\s+(\d+|-)\s+(\d+(?:\.\d+)?|-)\s+(\d+(?:\.\d+)?|-)\s+(\d+)\s*$`)
 	} else if invoiceFormat == "compact" {
 		// Compact format: S.No | Brand Name | Total | Sale | Rate | Amount | Closing
 		// Captures row num, then brand (can start with letter OR digit like "8 P.M."), then 7 number columns
@@ -1672,6 +1693,7 @@ func (s *OCRService) parseTableRow(row ocr.TableRow, columnMap map[string]int, s
 		OpeningStock:       opening,
 		SaleQuantity:       sale,
 		Quantity:           closing,
+		Rate:               rate,  // Column 5 - Rate per bottle
 		SellingPrice:       &rate,
 		IsSelected:         true,
 		IsReviewed:         false,
@@ -2051,78 +2073,53 @@ func (s *OCRService) ProcessSingleImage(ctx context.Context, batchID, tenantID, 
 	var rawText string
 	startTime := time.Now()
 
-	// ✨ OLLAMA QWEN2.5-VL AS PRIMARY - Local, cost-free extraction
-	// Uses local Ollama with Qwen2.5-VL vision model (no API costs!)
-	if s.useOllama && s.ollamaClient != nil {
-		fmt.Println("🦙 [OCR] Using Ollama Qwen2.5-VL as PRIMARY (LOCAL - cost-free)")
+	// ============================================================================
+	// OCR EXTRACTION PIPELINE (Priority Order):
+	// 1. PRIMARY: Google Vision OCR (reliable text extraction)
+	// 2. FALLBACK 1: Gemini for brand matching
+	// 3. FALLBACK 2: ChatGPT (GPT-4o Vision) if others fail
+	// ============================================================================
 
-		result, ollamaErr := s.ollamaClient.ExtractSalesFromImage(ctx, imageBytes, "")
-		if ollamaErr != nil {
-			fmt.Printf("⚠️  Ollama Qwen2.5-VL failed: %v\n", ollamaErr)
-			fmt.Println("🔍 [OCR] Falling back to OpenAI GPT-4o")
-			// Continue to OpenAI fallback below
-		} else if len(result.Items) > 0 {
-			// Success! Convert result to OCR items and save
-			fmt.Printf("✅ [Ollama] Extracted %d items in %v (COST: $0.00)\n", len(result.Items), result.ExtractionTime)
+	// 📸 PRIMARY: GOOGLE VISION OCR - Reliable text extraction
+	// Skip ChatGPT and go directly to Google Vision for stability
+	if s.visionClient != nil {
+		fmt.Println("📸 [OCR] ═══════════════════════════════════════════════")
+		fmt.Println("📸 [OCR] PRIMARY: Google Vision OCR")
+		fmt.Println("📸 [OCR] ═══════════════════════════════════════════════")
 
-			// Create OCR session for this image
-			sessionID := uuid.New().String()
-			processedAt := time.Now()
-			ocrSession := models.OCRSession{
-				ID:             sessionID,
-				BatchSessionID: batchID,
-				TenantID:       tenantID,
-				UserID:         userID,
-				ShopID:         shopID,
-				Status:         "completed",
-				CurrentStage:   "completed",
-				RawText:        fmt.Sprintf("Ollama Qwen2.5-VL extraction: %d items", len(result.Items)),
-				OCRProvider:    "ollama-qwen2.5vl",
-				ProcessedAt:    &processedAt,
+		var googleErr error
+		rawText, googleErr = s.visionClient.ExtractTextFromImage(ctx, imageBytes)
+		if googleErr != nil {
+			fmt.Printf("⚠️  [PRIMARY] Google Vision failed: %v\n", googleErr)
+			fmt.Println("🔄 [OCR] Trying Gemini Vision as backup...")
+			rawText, googleErr = s.geminiClient.ExtractTextFromImage(ctx, imageData)
+			if googleErr != nil {
+				fmt.Printf("❌ [PRIMARY] Both Google Vision and Gemini failed: %v\n", googleErr)
 			}
+		}
 
-			if err := s.db.Create(&ocrSession).Error; err != nil {
-				fmt.Printf("⚠️  Failed to create OCR session: %v\n", err)
-			}
-
-			// Convert and save OCR items
-			ocrItems := s.ollamaClient.ConvertToOCRItems(result, sessionID, batchID)
-			for i := range ocrItems {
-				ocrItems[i].ID = uuid.New().String()
-				if err := s.db.Create(&ocrItems[i]).Error; err != nil {
-					fmt.Printf("⚠️  Failed to save OCR item: %v\n", err)
-				}
-			}
-
-			fmt.Printf("✅ [Ollama] Saved %d items to database (COST: $0.00)\n", len(ocrItems))
-
-			// Record success metrics
-			processingTimeMS := time.Since(requestStartTime).Milliseconds()
-			metrics.RecordSuccess(processingTimeMS)
-
-			return sessionID, nil
-		} else {
-			fmt.Printf("⚠️  Ollama returned empty result, falling back to OpenAI\n")
+		if rawText != "" && len(rawText) > 50 {
+			fmt.Printf("✅ [PRIMARY] Google Vision extracted %d characters in %v\n", len(rawText), time.Since(startTime))
+			// Continue to text processing for brand matching
+			goto processGeminiText
 		}
 	}
 
-	// 🔄 OPENAI GPT-4o VISION AS FALLBACK - Direct structured extraction
-	// This provides the best accuracy when Ollama is unavailable or fails
-	if s.useOpenAI && s.openaiClient != nil {
-		if s.useOllama {
-			fmt.Println("🤖 [OCR] Using OpenAI GPT-4o Vision as FALLBACK")
-		} else {
-			fmt.Println("🤖 [OCR] Using OpenAI GPT-4o Vision as PRIMARY")
-		}
+	// 🤖 FALLBACK: OPENAI GPT-4o VISION - Only if Google Vision fails
+	// ChatGPT processes the image directly and extracts structured data
+	if s.openaiClient != nil && rawText == "" {
+		fmt.Println("🤖 [OCR] ═══════════════════════════════════════════════")
+		fmt.Println("🤖 [OCR] FALLBACK: ChatGPT (GPT-4o Vision) - Direct Image Processing")
+		fmt.Println("🤖 [OCR] ═══════════════════════════════════════════════")
 
 		result, openaiErr := s.openaiClient.ExtractSalesFromImage(ctx, imageBytes, "")
 		if openaiErr != nil {
-			fmt.Printf("⚠️  OpenAI GPT-4o failed: %v\n", openaiErr)
-			fmt.Println("🔍 [OCR] Falling back to Cloud Vision + Gemini pipeline")
-			// Continue to fallback below
-		} else {
+			fmt.Printf("❌ [PRIMARY] ChatGPT GPT-4o failed: %v\n", openaiErr)
+			fmt.Println("🔄 [OCR] Moving to FALLBACK 1: Fomoa + Gemini...")
+			// Continue to FALLBACK 1 below
+		} else if len(result.Items) > 0 {
 			// Success! Convert OpenAI result to OCR items and save directly
-			fmt.Printf("✅ [OpenAI] Extracted %d items in %v\n", len(result.Items), result.ExtractionTime)
+			fmt.Printf("✅ [PRIMARY] ChatGPT extracted %d items in %v\n", len(result.Items), result.ExtractionTime)
 
 			// Create OCR session for this image
 			sessionID := uuid.New().String()
@@ -2135,72 +2132,150 @@ func (s *OCRService) ProcessSingleImage(ctx context.Context, batchID, tenantID, 
 				ShopID:         shopID,
 				Status:         "completed",
 				CurrentStage:   "completed",
-				RawText:        fmt.Sprintf("OpenAI GPT-4o extraction: %d items", len(result.Items)),
-				OCRProvider:    "openai-gpt4o",
+				RawText:        fmt.Sprintf("ChatGPT GPT-4o extraction: %d items", len(result.Items)),
+				OCRProvider:    "chatgpt-gpt4o",
 				ProcessedAt:    &processedAt,
+			}
+
+			// Parse and store receipt date from extraction
+			if result.ReceiptDate != "" {
+				// Try multiple date formats
+				dateFormats := []string{
+					"02/01/2006", "2/1/2006", "02/1/2006", "2/01/2006", // DD/MM/YYYY
+					"02-01-2006", "2-1-2006",                             // DD-MM-YYYY
+					"02/01/06", "2/1/26", "2/1/06",                       // DD/MM/YY
+				}
+				for _, format := range dateFormats {
+					if parsed, err := time.Parse(format, result.ReceiptDate); err == nil {
+						// Handle 2-digit year (assume 2000s)
+						if parsed.Year() < 100 {
+							parsed = parsed.AddDate(2000, 0, 0)
+						}
+						ocrSession.ReceiptDate = &parsed
+						fmt.Printf("📅 [OCR] Receipt date extracted: %s\n", parsed.Format("2006-01-02"))
+						break
+					}
+				}
 			}
 
 			if err := s.db.Create(&ocrSession).Error; err != nil {
 				fmt.Printf("⚠️  Failed to create OCR session: %v\n", err)
 			}
 
-			// Convert and save OCR items
+			// Convert and save OCR items in batch
 			ocrItems := s.openaiClient.ConvertToOCRItems(result, sessionID, batchID)
 			for i := range ocrItems {
 				ocrItems[i].ID = uuid.New().String()
-				if err := s.db.Create(&ocrItems[i]).Error; err != nil {
-					fmt.Printf("⚠️  Failed to save OCR item: %v\n", err)
-				}
 			}
-
-			fmt.Printf("✅ [OpenAI] Saved %d items to database\n", len(ocrItems))
+			if len(ocrItems) > 0 {
+				s.db.CreateInBatches(&ocrItems, 100)
+			}
 
 			// Record success metrics
 			processingTimeMS := time.Since(requestStartTime).Milliseconds()
 			metrics.RecordSuccess(processingTimeMS)
 
 			return sessionID, nil
+		} else {
+			fmt.Println("⚠️  [PRIMARY] ChatGPT returned empty result")
+			fmt.Println("🔄 [OCR] Moving to FALLBACK 1: Fomoa + Gemini...")
 		}
+	} else {
+		fmt.Println("⚠️  [PRIMARY] ChatGPT not configured (no OPENAI_API_KEY)")
+		fmt.Println("🔄 [OCR] Moving to FALLBACK 1: Fomoa + Gemini...")
 	}
 
-	// FALLBACK: Use Google Cloud Vision API + Gemini pipeline
-	// Cloud Vision API has superior OCR accuracy for text recognition
-	// Then Gemini processes the extracted text for structured data extraction and brand matching
-	fmt.Println("📸 [OCR] Using Google Cloud Vision API as fallback (text extraction)")
+	// ============================================================================
+	// FALLBACK 1: Fomoa + Gemini OCR Text
+	// Step 1: Extract text from image using Gemini Vision
+	// Step 2: Use Fomoa AI for brand matching (text processing)
+	// ============================================================================
+	fmt.Println("🔄 [OCR] ═══════════════════════════════════════════════")
+	fmt.Println("🔄 [OCR] FALLBACK 1: Fomoa + Gemini OCR Text")
+	fmt.Println("🔄 [OCR] ═══════════════════════════════════════════════")
+
+	if s.geminiClient != nil {
+		fmt.Println("📸 [FALLBACK 1] Step 1: Extracting text with Gemini Vision...")
+		geminiText, geminiErr := s.geminiClient.ExtractTextFromImage(ctx, imageData)
+		if geminiErr == nil && len(geminiText) > 50 {
+			fmt.Printf("✅ [FALLBACK 1] Gemini extracted %d characters\n", len(geminiText))
+
+			// Store raw text for later use
+			rawText = geminiText
+
+			// Note: Fomoa will be used for brand matching in the validation phase
+			// The text is extracted here, and Fomoa matches OCR text to products during validation
+			fmt.Println("📝 [FALLBACK 1] Text extracted - Fomoa will process during validation")
+
+			// Continue to create session and save items using Gemini extraction
+			// The Fomoa AI matching happens in matchOCRItemsToProducts() during validation
+			goto processGeminiText
+		} else {
+			if geminiErr != nil {
+				fmt.Printf("❌ [FALLBACK 1] Gemini Vision failed: %v\n", geminiErr)
+			} else {
+				fmt.Printf("⚠️  [FALLBACK 1] Gemini returned insufficient text (%d chars)\n", len(geminiText))
+			}
+			fmt.Println("🔄 [OCR] Moving to FALLBACK 2: Google Vision OCR...")
+		}
+	} else {
+		fmt.Println("⚠️  [FALLBACK 1] Gemini not configured (no GEMINI_API_KEY)")
+		fmt.Println("🔄 [OCR] Moving to FALLBACK 2: Google Vision OCR...")
+	}
+
+	// ============================================================================
+	// FALLBACK 2: Google Vision OCR (Complete Google-based pipeline)
+	// Uses Google Cloud Vision API for text extraction
+	// ============================================================================
+	fmt.Println("📸 [OCR] ═══════════════════════════════════════════════")
+	fmt.Println("📸 [OCR] FALLBACK 2: Google Vision OCR (Complete)")
+	fmt.Println("📸 [OCR] ═══════════════════════════════════════════════")
 
 	if s.visionClient != nil {
 		rawText, err = s.visionClient.ExtractTextFromImage(ctx, imageBytes)
 		if err != nil {
 			metrics.RecordVisionAPICall(false)
-			// Fallback to Gemini Vision if Cloud Vision fails
-			fmt.Printf("⚠️  Cloud Vision API failed: %v\n", err)
-			fmt.Println("🔍 [OCR] Falling back to Gemini Vision")
+			fmt.Printf("❌ [FALLBACK 2] Google Cloud Vision failed: %v\n", err)
+
+			// Final fallback: try Gemini Vision if Cloud Vision fails
+			fmt.Println("🔍 [FALLBACK 2] Last resort: Gemini Vision...")
 			rawText, err = s.geminiClient.ExtractTextFromImage(ctx, imageData)
 			if err != nil {
 				metrics.RecordFailure()
-				return "", fmt.Errorf("both Cloud Vision API and Gemini Vision failed: %w", err)
+				return "", fmt.Errorf("all OCR providers failed (ChatGPT, Gemini, Google Vision): %w", err)
 			}
-			fmt.Printf("✅ [OCR] Gemini Vision extracted %d characters in %v\n", len(rawText), time.Since(startTime))
+			fmt.Printf("✅ [FALLBACK 2] Gemini Vision extracted %d characters\n", len(rawText))
 		} else {
 			metrics.RecordVisionAPICall(true)
-			fmt.Printf("✅ [OCR] Cloud Vision API extracted %d characters in %v\n", len(rawText), time.Since(startTime))
-
-			// DEBUG: Show exact Vision API output
-			newlineCount := strings.Count(rawText, "\n")
-			fmt.Printf("🔍 [DEBUG] Vision API raw text has %d newlines\n", newlineCount)
-			fmt.Printf("🔍 [DEBUG] First 500 chars of Vision API text:\n%s\n", truncateString(rawText, 500))
-			fmt.Printf("🔍 [DEBUG] Vision API text with newlines visible: %q\n", truncateString(rawText, 300))
+			fmt.Printf("✅ [FALLBACK 2] Google Vision extracted %d characters in %v\n", len(rawText), time.Since(startTime))
 		}
 	} else {
-		// No Cloud Vision client available, use Gemini Vision
-		fmt.Println("⚠️  Cloud Vision API not available, using Gemini Vision")
-		rawText, err = s.geminiClient.ExtractTextFromImage(ctx, imageData)
-		if err != nil {
-			metrics.RecordFailure()
-			return "", fmt.Errorf("gemini vision failed: %w", err)
-		}
-		fmt.Printf("✅ [OCR] Gemini Vision extracted %d characters in %v\n", len(rawText), time.Since(startTime))
+		// No Cloud Vision client available
+		fmt.Println("⚠️  [FALLBACK 2] Google Vision not configured")
+		metrics.RecordFailure()
+		return "", fmt.Errorf("all OCR providers failed - Google Vision not configured")
 	}
+
+	// ============================================================================
+	// PROCESS EXTRACTED TEXT (Common path for Gemini and Google Vision)
+	// ============================================================================
+processGeminiText:
+	fmt.Printf("📝 [OCR] Processing extracted text (%d characters)...\n", len(rawText))
+
+	// Determine which OCR provider was used based on the flow
+	var ocrProvider string
+	if s.geminiClient != nil && rawText != "" {
+		// If we got here via FALLBACK 1, it was Gemini + Fomoa
+		ocrProvider = "gemini+fomoa"
+	}
+	if s.visionClient != nil && ocrProvider == "" {
+		// If we got here via FALLBACK 2, it was Google Vision
+		ocrProvider = "google-vision"
+	}
+	if ocrProvider == "" {
+		ocrProvider = "fallback"
+	}
+	fmt.Printf("📝 [OCR] OCR Provider: %s\n", ocrProvider)
 
 	// ✨ Apply preprocessing to clean Indic numerals and artifacts
 	preprocessedText := preprocessVisionText(rawText)
@@ -2221,10 +2296,11 @@ func (s *OCRService) ProcessSingleImage(ctx context.Context, batchID, tenantID, 
 		ImageSize:          len(imageBytes),
 		ImageType:          "image/jpeg",
 		Status:             "completed",
-		CurrentStage:       "completed",  // Must be one of: pending, vision_api, gemini_extraction, item_matching, completed, failed
+		CurrentStage:       "completed",
 		ProgressPercentage: 100,
 		RawText:            rawText,
-		ExtractedData:      imageDataJSON,  // Store base64 image temporarily
+		OCRProvider:        ocrProvider, // Track which OCR provider was used
+		ExtractedData:      imageDataJSON,
 		CreatedAt:          time.Now(),
 		UpdatedAt:          time.Now(),
 	}
@@ -2535,13 +2611,17 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 	itemsCleaned := 0
 
 	for i, brand := range extractedBrands {
-		// Track invalid items that are being filtered out
+		// 🔧 FIX: Track invalid items but DON'T filter them - let user review and fix
+		// Instead of filtering, mark them for review
+		needsReviewDueToValidation := false
+		validationWarnings := []string{}
+
 		if !brand.IsValidBrand || strings.TrimSpace(brand.NormalizedName) == "" {
-			filteredCount++
-			fmt.Printf("🗑️  [OCR] Filtered invalid item: original='%s', normalized='%s', is_valid=%v, reason='%s'\n",
+			needsReviewDueToValidation = true
+			fmt.Printf("⚠️  [OCR] Item needs review: original='%s', normalized='%s', is_valid=%v, reason='%s'\n",
 				brand.OriginalText, brand.NormalizedName, brand.IsValidBrand, brand.RejectionReason)
 
-			// Add to rejected items list
+			// Add to rejected items list for tracking but DON'T skip - continue processing
 			rejectedItem := models.RejectedOCRItem{
 				BrandText:         brand.NormalizedName,
 				SizeText:          brand.Size,
@@ -2557,7 +2637,14 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 				rejectedItem.RejectionReason = "Failed Gemini validation"
 			}
 			rejectedItems = append(rejectedItems, rejectedItem)
-			continue
+
+			// Add warning but DON'T filter out
+			if brand.RejectionReason != "" {
+				validationWarnings = append(validationWarnings, "Validation: "+brand.RejectionReason)
+			} else {
+				validationWarnings = append(validationWarnings, "Needs brand name review")
+			}
+			// DON'T continue - let user fix it
 		}
 
 		// ✨ FIXED: Use normalized_name (already clean) for brand_text instead of original_text (contaminated with row data)
@@ -2642,13 +2729,15 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 		detectedReceiptSize := detectReceiptType(session.RawText)
 		crossValidation := validateCrossFields(&brand, detectedReceiptSize)
 		if !crossValidation.IsValid {
-			fmt.Printf("   ❌ [Cross-Field Validation] CRITICAL: Item failed validation\n")
+			// 🔧 FIX: DON'T filter - mark for review and let user fix
+			fmt.Printf("   ⚠️  [Cross-Field Validation] Item needs review (failed validation)\n")
 			for _, issue := range crossValidation.Issues {
 				fmt.Printf("      - %s\n", issue)
+				validationWarnings = append(validationWarnings, "Math: "+issue)
 			}
-			fmt.Printf("   🗑️  [OCR] Skipping item due to critical validation failures\n")
-			filteredCount++
-			continue
+			fmt.Printf("   📝 [OCR] Item added for manual review instead of filtering\n")
+			needsReviewDueToValidation = true
+			// DON'T continue - let user fix it
 		} else if len(crossValidation.Issues) > 0 {
 			fmt.Printf("   ⚠️  [Cross-Field Validation] Found %d warnings:\n", crossValidation.WarningCount)
 			for _, issue := range crossValidation.Issues {
@@ -2815,6 +2904,21 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 				fieldConfidences.Brand, fieldConfidences.Opening, fieldConfidences.Rate, fieldConfidences.Closing)
 		}
 
+		// 🔧 FIX: Items needing validation review should be deselected but still included
+		shouldSelect := shouldBeSelected && !needsConfidenceReview && !needsReviewDueToValidation
+
+		// Build verification notes from validation warnings
+		verificationNotes := ""
+		if len(validationWarnings) > 0 {
+			verificationNotes = strings.Join(validationWarnings, "; ")
+		}
+
+		// Set verification status based on validation
+		verificationStatus := "pending"
+		if needsReviewDueToValidation {
+			verificationStatus = "needs_review"
+		}
+
 		item := models.OCRItem{
 			ID:                     uuid.New().String(),
 			SessionID:              sessionID,
@@ -2852,9 +2956,11 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 			InferredSubcategoryName: brand.Subcategory,
 			CategoryConfidence:     &categoryConfidence,
 
-			// ===== STATUS FLAGS =====
+			// ===== VERIFICATION & STATUS FLAGS =====
+			VerificationStatus:     verificationStatus,
+			VerificationNotes:      verificationNotes, // Store validation warnings for user review
 			IsReviewed:             false, // Items start as unreviewed
-			IsSelected:             shouldBeSelected && !needsConfidenceReview,
+			IsSelected:             shouldSelect, // Deselect items that need validation review
 			CreatedAt:              time.Now(),
 			UpdatedAt:              time.Now(),
 		}
@@ -2867,10 +2973,10 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 		// ✨ Validate the cleaned item with detailed rejection info
 		validationResult := validateExtractedItemWithReason(&item)
 		if !validationResult.IsValid {
-			filteredCount++
-			fmt.Printf("🗑️  [OCR] Filtered invalid item after cleaning: brand='%s' - %s\n", cleanedBrandText, validationResult.Reason)
+			// 🔧 FIX: DON'T filter - mark for review and let user fix
+			fmt.Printf("⚠️  [OCR] Item needs review after cleaning: brand='%s' - %s\n", cleanedBrandText, validationResult.Reason)
 
-			// Add to rejected items with specific rejection reason
+			// Add to rejected items for tracking but DON'T skip
 			rejectedItem := models.RejectedOCRItem{
 				BrandText:         cleanedBrandText,
 				SizeText:          itemSize,
@@ -2883,7 +2989,16 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 				CanRecover:        validationResult.CanRecover,
 			}
 			rejectedItems = append(rejectedItems, rejectedItem)
-			continue
+
+			// Mark item as needing review but DON'T filter out
+			needsReviewDueToValidation = true
+			validationWarnings = append(validationWarnings, "Validation: "+validationResult.Reason)
+			item.IsSelected = false // Deselect by default for invalid items
+
+			// Update item's verification notes and status with the additional warnings
+			item.VerificationStatus = "needs_review"
+			item.VerificationNotes = strings.Join(validationWarnings, "; ")
+			// DON'T continue - let user fix it
 		}
 
 		// 🏷️  Infer category and subcategory based on brand name and price
@@ -2911,9 +3026,8 @@ func (s *OCRService) ExtractItemsWithGemini(ctx context.Context, sessionID strin
 		items = append(items, item)
 	}
 
-	if filteredCount > 0 {
-		fmt.Printf("✅ [OCR] Created %d valid items, filtered out %d invalid items\n", len(items), filteredCount)
-	}
+	// 🔧 FIX: All items are now included - filteredCount only counts items added to rejectedItems list for tracking
+	fmt.Printf("✅ [OCR] Created %d items total (including %d needing review)\n", len(items), len(rejectedItems))
 
 	// Store rejected items in cache for later retrieval
 	if len(rejectedItems) > 0 && session.BatchSessionID != "" {
@@ -3020,6 +3134,7 @@ func (s *OCRService) ExtractItemsDirect(ctx context.Context, sessionID, imageDat
 							OpeningStock:       beerItem.Opening,
 							SaleQuantity:       beerItem.Sale,
 							Quantity:           beerItem.Closing,
+							Rate:               rate,           // Column 5 - Rate per bottle
 							SellingPrice:       &rate,
 							MatchConfidence:    &confidence,
 							IsReviewed:         false,
@@ -3050,6 +3165,7 @@ func (s *OCRService) ExtractItemsDirect(ctx context.Context, sessionID, imageDat
 						OpeningStock:       row.Opening,
 						SaleQuantity:       row.Sale,
 						Quantity:           row.Closing,
+						Rate:               row.Rate,  // Column 5 - Rate per bottle
 						SellingPrice:       &row.Rate,
 						MatchConfidence:    &row.Confidence,
 						IsReviewed:         false,
@@ -3085,6 +3201,7 @@ func (s *OCRService) ExtractItemsDirect(ctx context.Context, sessionID, imageDat
 							OpeningStock:       row.Opening,
 							SaleQuantity:       row.Sale,
 							Quantity:           row.Closing,
+							Rate:               row.Rate,  // Column 5 - Rate per bottle
 							SellingPrice:       &row.Rate,
 							MatchConfidence:    &row.Confidence,
 							IsReviewed:         false,
@@ -3125,6 +3242,7 @@ func (s *OCRService) ExtractItemsDirect(ctx context.Context, sessionID, imageDat
 					OpeningStock:    row.Opening,
 					SaleQuantity:    row.Sale,
 					Quantity:        row.Closing,
+					Rate:            row.Rate,  // Column 5 - Rate per bottle
 					SellingPrice:    &row.Rate,
 					MatchConfidence: &row.Confidence,
 					IsReviewed:      false,

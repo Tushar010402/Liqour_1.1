@@ -3,6 +3,7 @@ package routes
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/sales/handlers"
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/logger"
@@ -10,7 +11,11 @@ import (
 )
 
 // SetupRoutes configures all sales service routes
-func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, draftHandlers *handlers.DraftHandlers, purchaReportHandler *handlers.PurchaReportHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, draftHandlers *handlers.DraftHandlers, purchaReportHandler *handlers.PurchaReportHandler, trainingHandlers *handlers.TrainingHandlers, aiTrainingHandlers *handlers.AITrainingHandlers) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("sales"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Health check
 	router.GET("/health", salesHandlers.Health)
 
@@ -165,6 +170,62 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, sal
 		}
 	}
 
+	// Smart Sale Routes (AI-assisted sale creation from images)
+	// - POST /process → ProcessSmartSaleV2 (GPT-5.2, DEFAULT)
+	// - POST /v2/process → ProcessSmartSaleV2 (explicit V2)
+	// - POST /v1/process → ProcessSmartSale (legacy, Vision API - DEPRECATED)
+	smartSale := api.Group("/smart-sale")
+	smartSale.Use(middleware.RoleMiddleware("owner", "saas_admin", "salesman", "manager", "admin"))
+	{
+		if ocrHandlers != nil {
+			smartSale.POST("/process", ocrHandlers.ProcessSmartSaleV2)      // Default: GPT-5.2
+			smartSale.POST("/v2/process", ocrHandlers.ProcessSmartSaleV2)   // Explicit V2
+			smartSale.POST("/v1/process", ocrHandlers.ProcessSmartSale)     // Legacy (deprecated)
+		}
+		smartSale.POST("/finalize", salesHandlers.FinalizeSmartSale)
+	}
+
+	// AI Training Data Routes - for preparing ground truth training data
+	if trainingHandlers != nil {
+		training := api.Group("/training")
+		training.Use(middleware.RoleMiddleware("owner", "saas_admin", "manager", "admin"))
+		{
+			// V1 endpoints (backward compatibility)
+			training.GET("/images", trainingHandlers.GetTrainingImages)
+			training.GET("/images/export", trainingHandlers.ExportTrainingData)
+			training.GET("/images/:filename", trainingHandlers.GetImageSaleData)
+			training.GET("/debug/records", trainingHandlers.GetRecordsWithImages)
+
+			// V2 endpoints - Size-based training images
+			training.GET("/images/v2", trainingHandlers.GetTrainingImagesV2)
+			training.GET("/images/export-v2", trainingHandlers.ExportTrainingDataV2)
+			training.POST("/images/process/:filename", trainingHandlers.ProcessImage)
+			training.POST("/images/process-all", trainingHandlers.ProcessAllImages)
+			training.POST("/images/detect-size/:filename", trainingHandlers.DetectImageSize)
+
+			// Size mappings
+			training.GET("/mappings/:record_id", trainingHandlers.GetSizeMappings)
+			training.POST("/mappings/:id/verify", trainingHandlers.VerifySizeMapping)
+
+			// Size-filtered items
+			training.GET("/items/:record_id/:size", trainingHandlers.GetSizeFilteredItems)
+		}
+	}
+
+	// AI Training V2 Routes - Generic document training (any logged-in user)
+	if aiTrainingHandlers != nil {
+		aiTraining := api.Group("/ai-training")
+		// Any logged-in user can access (already authenticated via api group middleware)
+		{
+			aiTraining.POST("/upload", aiTrainingHandlers.Upload)
+			aiTraining.GET("/images", aiTrainingHandlers.ListImages)
+			aiTraining.GET("/images/:id", aiTrainingHandlers.GetImage)
+			aiTraining.PUT("/images/:id/verify", aiTrainingHandlers.VerifyImage)
+			aiTraining.DELETE("/images/:id", aiTrainingHandlers.DeleteImage)
+			aiTraining.GET("/export", aiTrainingHandlers.ExportTraining)
+		}
+	}
+
 	// Gateway-compatible routes (without /api prefix for proxy forwarding)
 	// These routes are needed when requests come through the Gateway proxy
 	router.Use(middleware.AuthMiddleware(cfg.JWT, cache))
@@ -251,9 +312,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, sal
 }
 
 // SetupProtectedRoutes sets up routes with gateway-style auth handling
-func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, draftHandlers *handlers.DraftHandlers, purchaReportHandler *handlers.PurchaReportHandler) {
+func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, draftHandlers *handlers.DraftHandlers, purchaReportHandler *handlers.PurchaReportHandler, trainingHandlers *handlers.TrainingHandlers, aiTrainingHandlers *handlers.AITrainingHandlers) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("sales"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Health check (no auth required)
 	router.GET("/health", salesHandlers.Health)
+
+	// Debug endpoint for database diagnostics (temporary)
+	router.GET("/debug/database", salesHandlers.DebugDatabase)
 
 	// WebSocket endpoint for real-time updates (handles auth via query params)
 	router.GET("/ws", handlers.HandleWebSocket(logger.Logger, cfg.JWT.Secret))
@@ -380,6 +448,62 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 			ocrGroup.POST("/batch/validate-row", ocrHandlers.ValidateRow)
 			ocrGroup.POST("/batch/validate-comprehensive/:id", ocrHandlers.ValidateBatchComprehensive)
 			ocrGroup.GET("/accuracy/dashboard", ocrHandlers.GetAccuracyDashboard)
+		}
+	}
+
+	// Smart Sale Routes (AI-assisted sale creation - gateway compatible)
+	// All routes use GPT-5.2 by default. V1 is deprecated but kept for backward compatibility.
+	// - POST /process → ProcessSmartSaleV2 (GPT-5.2, DEFAULT)
+	// - POST /v2/process → ProcessSmartSaleV2 (explicit V2)
+	// - POST /v1/process → ProcessSmartSale (legacy, Vision API - DEPRECATED)
+	smartSaleGroup := router.Group("/smart-sale")
+	smartSaleGroup.Use(middleware.RoleMiddleware("owner", "saas_admin", "salesman", "manager", "admin"))
+	{
+		if ocrHandlers != nil {
+			smartSaleGroup.POST("/process", ocrHandlers.ProcessSmartSaleV2)      // Default: GPT-5.2
+			smartSaleGroup.POST("/v2/process", ocrHandlers.ProcessSmartSaleV2)   // Explicit V2
+			smartSaleGroup.POST("/v1/process", ocrHandlers.ProcessSmartSale)     // Legacy (deprecated)
+		}
+		smartSaleGroup.POST("/finalize", salesHandlers.FinalizeSmartSale)
+	}
+
+	// AI Training Data Routes (internal tool - no auth, secured at nginx level)
+	// Uses /api/training path to match gateway proxy path
+	if trainingHandlers != nil {
+		trainingGroup := router.Group("/api/training")
+		{
+			// V1 endpoints (backward compatibility)
+			trainingGroup.GET("/images", trainingHandlers.GetTrainingImages)
+			trainingGroup.GET("/images/export", trainingHandlers.ExportTrainingData)
+			trainingGroup.GET("/images/:filename", trainingHandlers.GetImageSaleData)
+			trainingGroup.GET("/debug/records", trainingHandlers.GetRecordsWithImages)
+
+			// V2 endpoints - Size-based training images
+			trainingGroup.GET("/images/v2", trainingHandlers.GetTrainingImagesV2)
+			trainingGroup.GET("/images/export-v2", trainingHandlers.ExportTrainingDataV2)
+			trainingGroup.POST("/images/process/:filename", trainingHandlers.ProcessImage)
+			trainingGroup.POST("/images/process-all", trainingHandlers.ProcessAllImages)
+			trainingGroup.POST("/images/detect-size/:filename", trainingHandlers.DetectImageSize)
+
+			// Size mappings
+			trainingGroup.GET("/mappings/:record_id", trainingHandlers.GetSizeMappings)
+			trainingGroup.POST("/mappings/:id/verify", trainingHandlers.VerifySizeMapping)
+
+			// Size-filtered items
+			trainingGroup.GET("/items/:record_id/:size", trainingHandlers.GetSizeFilteredItems)
+		}
+	}
+
+	// AI Training V2 Routes - Generic document training (protected routes)
+	if aiTrainingHandlers != nil {
+		aiTrainingGroup := router.Group("/api/ai-training")
+		{
+			aiTrainingGroup.POST("/upload", aiTrainingHandlers.Upload)
+			aiTrainingGroup.GET("/images", aiTrainingHandlers.ListImages)
+			aiTrainingGroup.GET("/images/:id", aiTrainingHandlers.GetImage)
+			aiTrainingGroup.PUT("/images/:id/verify", aiTrainingHandlers.VerifyImage)
+			aiTrainingGroup.DELETE("/images/:id", aiTrainingHandlers.DeleteImage)
+			aiTrainingGroup.GET("/export", aiTrainingHandlers.ExportTraining)
 		}
 	}
 }

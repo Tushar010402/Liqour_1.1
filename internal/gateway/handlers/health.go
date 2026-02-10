@@ -288,9 +288,8 @@ func (h *HealthHandler) checkServices() []ServiceHealth {
 // checkService checks individual service health
 func (h *HealthHandler) checkService(name, url string) ServiceHealth {
 	start := time.Now()
-	client := &http.Client{Timeout: 2 * time.Second}
 
-	resp, err := client.Get(url)
+	resp, err := healthClient.Get(url)
 	if err != nil {
 		return ServiceHealth{
 			Name:         name,

@@ -1,15 +1,33 @@
 package handlers
 
 import (
-	"bytes"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
+)
+
+var (
+	standardTransport = &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	standardClient = &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: standardTransport,
+	}
+	extendedClient = &http.Client{
+		Timeout:   300 * time.Second,
+		Transport: standardTransport,
+	}
+	healthClient = &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: standardTransport,
+	}
 )
 
 // GatewayHandlers handles API gateway routing and service communication
@@ -28,57 +46,52 @@ func NewGatewayHandlers(config *config.Config, httpClient *http.Client) *Gateway
 
 // ProxyRequest proxies requests to appropriate microservices
 func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
-	log.Printf("🔌 [ProxyRequest] Creating handler for service: %s", serviceName)
 	return func(c *gin.Context) {
-		log.Printf("🔌 [ProxyRequest] Handler called for %s: %s %s", serviceName, c.Request.Method, c.Request.URL.Path)
 		// Get service URL
 		serviceURL := h.getServiceURL(serviceName)
 		if serviceURL == "" {
-			log.Printf("❌ [ProxyRequest] Service URL not found for %s", serviceName)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Service not found"})
 			return
 		}
-		log.Printf("✅ [ProxyRequest] Service URL: %s", serviceURL)
 
-		// Build target URL - strip service prefix for microservices
+		// Build target URL
 		path := c.Request.URL.Path
 		targetPath := h.transformPath(path, serviceName)
 		targetURL := serviceURL + targetPath
-		log.Printf("🎯 [ProxyRequest] Proxying to: %s", targetURL)
 		if c.Request.URL.RawQuery != "" {
 			targetURL += "?" + c.Request.URL.RawQuery
 		}
 
-		// Read request body
-		var bodyReader io.Reader
-		if c.Request.Body != nil {
-			bodyBytes, err := io.ReadAll(c.Request.Body)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
-				return
-			}
-			bodyReader = bytes.NewReader(bodyBytes)
+		// Select appropriate shared client based on path
+		client := standardClient
+		if strings.Contains(path, "smart-sale") || strings.Contains(path, "ocr") {
+			client = extendedClient
 		}
 
-		// Create new request
-		req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, bodyReader)
+		// Create the proxy request with context propagation for proper cancellation
+		req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, c.Request.Body)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create proxy request"})
 			return
 		}
 
-		// Copy headers
+		// Copy all headers from original request
 		for key, values := range c.Request.Header {
 			for _, value := range values {
 				req.Header.Add(key, value)
 			}
 		}
 
+		// Set Content-Length if known
+		if c.Request.ContentLength > 0 {
+			req.ContentLength = c.Request.ContentLength
+		}
+
 		// Add gateway headers
 		req.Header.Set("X-Gateway", "liquorpro-gateway")
 		req.Header.Set("X-Service", serviceName)
 
-		// Forward user context if available
+		// Forward user context from auth middleware
 		if userID := c.GetString("user_id"); userID != "" {
 			req.Header.Set("X-User-ID", userID)
 		}
@@ -89,10 +102,10 @@ func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
 			req.Header.Set("X-User-Role", role)
 		}
 
-		// Make request to service
-		resp, err := h.httpClient.Do(req)
+		// Execute the request
+		resp, err := client.Do(req)
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "Service unavailable"})
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Service unavailable", "details": err.Error()})
 			return
 		}
 		defer resp.Body.Close()
@@ -100,13 +113,18 @@ func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
 		// Copy response headers
 		for key, values := range resp.Header {
 			for _, value := range values {
-				c.Header(key, value)
+				c.Writer.Header().Add(key, value)
 			}
 		}
 
-		// Copy response body
-		c.Status(resp.StatusCode)
-		io.Copy(c.Writer, resp.Body)
+		// Write status code
+		c.Writer.WriteHeader(resp.StatusCode)
+
+		// Stream response body directly to client
+		if _, err := io.Copy(c.Writer, resp.Body); err != nil {
+			c.Abort()
+			return
+		}
 	}
 }
 
@@ -133,8 +151,18 @@ func (h *GatewayHandlers) GetVersion(c *gin.Context) {
 	})
 }
 
-// ServiceDiscovery returns available services and their endpoints
+// ServiceDiscovery returns available services and their endpoints (cached 30s)
+var (
+	sdCache     gin.H
+	sdCacheTime time.Time
+)
+
 func (h *GatewayHandlers) ServiceDiscovery(c *gin.Context) {
+	if sdCache != nil && time.Since(sdCacheTime) < 30*time.Second {
+		c.JSON(http.StatusOK, sdCache)
+		return
+	}
+
 	services := gin.H{
 		"auth": gin.H{
 			"url":    h.config.Services.Auth.URL,
@@ -154,10 +182,14 @@ func (h *GatewayHandlers) ServiceDiscovery(c *gin.Context) {
 		},
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	result := gin.H{
 		"gateway":  h.config.Services.Gateway.URL,
 		"services": services,
-	})
+	}
+	sdCache = result
+	sdCacheTime = time.Now()
+
+	c.JSON(http.StatusOK, result)
 }
 
 // transformPath strips the service prefix from the path
@@ -285,11 +317,7 @@ func (h *GatewayHandlers) checkServiceHealth(serviceURL string) string {
 	}
 	req.Header.Set("User-Agent", "liquorpro-gateway-health-check")
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := healthClient.Do(req)
 	if err != nil {
 		return "unhealthy"
 	}

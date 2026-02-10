@@ -618,16 +618,126 @@ func (CashHolding) TableName() string { return "cash_holdings" }
 // Note: This model matches the existing cash_transactions table schema
 type CashTransaction struct {
 	TenantModel
-	UserID          uuid.UUID  `json:"user_id" gorm:"type:uuid"`
-	User            *User      `json:"user,omitempty" gorm:"foreignKey:UserID"`
-	TransactionType string     `json:"transaction_type" gorm:"not null"` // collection_sent, collection_received, sale, expense, adjustment
-	Amount          float64    `json:"amount" gorm:"type:decimal(10,2);not null"`
-	BalanceBefore   float64    `json:"balance_before" gorm:"type:decimal(10,2);default:0"`
-	BalanceAfter    float64    `json:"balance_after" gorm:"type:decimal(10,2);default:0"`
-	RelatedType     string     `json:"related_type" gorm:"size:50"` // money_collection, sale, expense, manual
-	RelatedID       *uuid.UUID `json:"related_id" gorm:"type:uuid"`
-	Notes           string     `json:"notes"`
-	TransactionDate time.Time  `json:"transaction_date" gorm:"default:CURRENT_TIMESTAMP"`
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid"`
+	User              *User      `json:"user,omitempty" gorm:"foreignKey:UserID"`
+	ShopID            *uuid.UUID `json:"shop_id" gorm:"type:uuid"`
+	Shop              *Shop      `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
+	TransactionType   string     `json:"transaction_type" gorm:"not null"` // collection_sent, collection_received, sale, expense, adjustment
+	Amount            float64    `json:"amount" gorm:"type:decimal(10,2);not null"`
+	// Dual naming for compatibility - use column mapping to existing DB columns
+	PreviousBalance   float64    `json:"previous_balance" gorm:"column:balance_before;type:decimal(10,2);default:0"`
+	NewBalance        float64    `json:"new_balance" gorm:"column:balance_after;type:decimal(10,2);default:0"`
+	BalanceBefore     float64    `json:"-" gorm:"-"` // Alias for PreviousBalance (deprecated)
+	BalanceAfter      float64    `json:"-" gorm:"-"` // Alias for NewBalance (deprecated)
+	RelatedEntityType string     `json:"related_entity_type" gorm:"column:related_type;size:50"` // money_collection, sale, expense, manual
+	RelatedEntityID   *uuid.UUID `json:"related_entity_id" gorm:"column:related_id;type:uuid"`
+	RelatedType       string     `json:"-" gorm:"-"` // Alias for RelatedEntityType (deprecated)
+	RelatedID         *uuid.UUID `json:"-" gorm:"-"` // Alias for RelatedEntityID (deprecated)
+	Description       string     `json:"description" gorm:"column:notes"`
+	Notes             string     `json:"notes" gorm:"-"` // Alias for Description
+	TransactionDate   time.Time  `json:"transaction_date" gorm:"default:CURRENT_TIMESTAMP"`
+	CreatedByID       uuid.UUID  `json:"created_by_id" gorm:"type:uuid"`
+	CreatedBy         *User      `json:"created_by,omitempty" gorm:"foreignKey:CreatedByID"`
 }
 
 func (CashTransaction) TableName() string { return "cash_transactions" }
+
+// CashCollection represents a cash collection between users
+type CashCollection struct {
+	TenantModel
+	FromUserID     uuid.UUID  `json:"from_user_id" gorm:"type:uuid;not null"`
+	FromUser       *User      `json:"from_user,omitempty" gorm:"foreignKey:FromUserID"`
+	ToUserID       uuid.UUID  `json:"to_user_id" gorm:"type:uuid;not null"`
+	ToUser         *User      `json:"to_user,omitempty" gorm:"foreignKey:ToUserID"`
+	ShopID         uuid.UUID  `json:"shop_id" gorm:"type:uuid"`
+	Shop           *Shop      `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
+	Amount         float64    `json:"amount" gorm:"type:decimal(10,2);not null"`
+	Status         string     `json:"status" gorm:"default:'pending'"` // pending, approved, rejected, expired
+	Notes          string     `json:"notes"`
+	CollectionDate time.Time  `json:"collection_date" gorm:"default:CURRENT_TIMESTAMP"`
+	ExpiresAt      *time.Time `json:"expires_at"`
+	ApprovedAt     *time.Time `json:"approved_at"`
+	ApprovedByID   *uuid.UUID `json:"approved_by_id" gorm:"type:uuid"`
+	ApprovedBy     *User      `json:"approved_by,omitempty" gorm:"foreignKey:ApprovedByID"`
+	RejectedAt     *time.Time `json:"rejected_at"`
+	RejectedByID   *uuid.UUID `json:"rejected_by_id" gorm:"type:uuid"`
+	RejectedBy     *User      `json:"rejected_by,omitempty" gorm:"foreignKey:RejectedByID"`
+	RejectReason   string     `json:"reject_reason"`
+	CreatedByID    uuid.UUID  `json:"created_by_id" gorm:"type:uuid"`
+	CreatedBy      *User      `json:"created_by,omitempty" gorm:"foreignKey:CreatedByID"`
+}
+
+func (CashCollection) TableName() string { return "cash_collections" }
+
+// CashSubmission represents a cash deposit submission to a bank account
+type CashSubmission struct {
+	TenantModel
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null"`
+	User              *User      `json:"user,omitempty" gorm:"foreignKey:UserID"`
+	ShopID            uuid.UUID  `json:"shop_id" gorm:"type:uuid"`
+	Shop              *Shop      `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
+	BankAccountID     *uuid.UUID `json:"bank_account_id" gorm:"type:uuid"`
+	TotalAmount       float64    `json:"total_amount" gorm:"column:submitted_amount;type:decimal(10,2);not null"`
+	ExpectedAmount    float64    `json:"expected_amount" gorm:"type:decimal(10,2)"`
+	SubmittedAmount   float64    `json:"-" gorm:"-"` // Alias for TotalAmount (deprecated)
+	DiscrepancyAmount float64    `json:"discrepancy_amount" gorm:"type:decimal(10,2);default:0"`
+	CollectedAmount   *float64   `json:"collected_amount" gorm:"type:decimal(10,2)"`
+	DepositDate       time.Time  `json:"deposit_date" gorm:"not null"`
+	Status            string     `json:"status" gorm:"default:'pending'"` // pending, verified, collected, rejected
+	Notes             string     `json:"notes"`
+	PhotoURL          string     `json:"photo_url"`
+	ReceiptPhotoURL   string     `json:"receipt_photo_url"`
+	BankSlipNumber    string     `json:"bank_slip_number"`
+	// Denomination tracking
+	Notes500          int        `json:"notes_500" gorm:"default:0"`
+	Notes200          int        `json:"notes_200" gorm:"default:0"`
+	Notes100          int        `json:"notes_100" gorm:"default:0"`
+	Notes50           int        `json:"notes_50" gorm:"default:0"`
+	Notes20           int        `json:"notes_20" gorm:"default:0"`
+	Notes10           int        `json:"notes_10" gorm:"default:0"`
+	// Approval tracking
+	VerifiedAt        *time.Time `json:"verified_at"`
+	VerifiedByID      *uuid.UUID `json:"verified_by_id" gorm:"type:uuid"`
+	VerifiedBy        *User      `json:"verified_by,omitempty" gorm:"foreignKey:VerifiedByID"`
+	ApprovedAt        *time.Time `json:"approved_at"`
+	ApprovedByID      *uuid.UUID `json:"approved_by_id" gorm:"type:uuid"`
+	ApprovedBy        *User      `json:"approved_by,omitempty" gorm:"foreignKey:ApprovedByID"`
+	RejectedAt        *time.Time `json:"rejected_at"`
+	RejectedByID      *uuid.UUID `json:"rejected_by_id" gorm:"type:uuid"`
+	RejectedBy        *User      `json:"rejected_by,omitempty" gorm:"foreignKey:RejectedByID"`
+	RejectionReason   string     `json:"rejection_reason"`
+	CollectedAt       *time.Time `json:"collected_at"`
+	CollectedByID     *uuid.UUID `json:"collected_by_id" gorm:"type:uuid"`
+	CollectedBy       *User      `json:"collected_by,omitempty" gorm:"foreignKey:CollectedByID"`
+	CreatedByID       uuid.UUID  `json:"created_by_id" gorm:"type:uuid"`
+	CreatedBy         *User      `json:"created_by,omitempty" gorm:"foreignKey:CreatedByID"`
+}
+
+func (CashSubmission) TableName() string { return "cash_submissions" }
+
+// CashRequest represents a cash request from one user to another
+type CashRequest struct {
+	TenantModel
+	RequesterID      uuid.UUID  `json:"requester_id" gorm:"type:uuid;not null"`
+	Requester        *User      `json:"requester,omitempty" gorm:"foreignKey:RequesterID"`
+	RequestedFromID  uuid.UUID  `json:"requested_from_id" gorm:"type:uuid;not null"`
+	RequestedFrom    *User      `json:"requested_from,omitempty" gorm:"foreignKey:RequestedFromID"`
+	ShopID           *uuid.UUID `json:"shop_id" gorm:"type:uuid"`
+	Shop             *Shop      `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
+	Amount           float64    `json:"amount" gorm:"type:decimal(10,2);not null"`
+	Reason           string     `json:"reason"`
+	RequestDate      time.Time  `json:"request_date" gorm:"default:CURRENT_TIMESTAMP"`
+	Status           string     `json:"status" gorm:"default:'pending'"` // pending, approved, rejected, expired
+	ExpiresAt        *time.Time `json:"expires_at"`
+	ApprovedAt       *time.Time `json:"approved_at"`
+	ApprovedByID     *uuid.UUID `json:"approved_by_id" gorm:"type:uuid"`
+	ApprovedBy       *User      `json:"approved_by,omitempty" gorm:"foreignKey:ApprovedByID"`
+	RejectedAt       *time.Time `json:"rejected_at"`
+	RejectedByID     *uuid.UUID `json:"rejected_by_id" gorm:"type:uuid"`
+	RejectedBy       *User      `json:"rejected_by,omitempty" gorm:"foreignKey:RejectedByID"`
+	RejectReason     string     `json:"reject_reason"`
+	CreatedByID      uuid.UUID  `json:"created_by_id" gorm:"type:uuid"`
+	CreatedBy        *User      `json:"created_by,omitempty" gorm:"foreignKey:CreatedByID"`
+}
+
+func (CashRequest) TableName() string { return "cash_requests" }

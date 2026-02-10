@@ -3,6 +3,7 @@ package routes
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/finance/handlers"
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
@@ -10,6 +11,10 @@ import (
 
 // SetupRoutes configures all finance service routes
 func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, financeHandlers *handlers.FinanceHandlers) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("finance"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Health check
 	router.GET("/health", financeHandlers.Health)
 
@@ -144,6 +149,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, fin
 
 // SetupProtectedRoutes sets up routes with gateway-style auth handling
 func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, financeHandlers *handlers.FinanceHandlers) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("finance"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Health check (no auth required)
 	router.GET("/health", financeHandlers.Health)
 
@@ -417,6 +426,7 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 
 	// User Notifications
 	router.GET("/notifications", financeHandlers.GetNotifications)
+	router.GET("/notifications/unread-count", financeHandlers.GetUnreadCount)         // Unread count only (used by Flutter app badge)
 	router.GET("/notifications/counts", financeHandlers.GetNotificationCounts)
 	router.GET("/notifications/unread", financeHandlers.GetUnreadNotifications)
 	router.POST("/notifications/mark-read", financeHandlers.MarkNotificationsRead)
@@ -425,6 +435,7 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	router.POST("/notifications/read-all", financeHandlers.MarkAllNotificationsRead) // Gateway compatibility alias
 	router.PATCH("/notifications/:id/read", financeHandlers.MarkSingleNotificationRead) // Mark single notification as read
 	router.DELETE("/notifications/:id", financeHandlers.DeleteNotification)
+	router.DELETE("/notifications", financeHandlers.ClearAllNotifications)             // Clear all notifications
 
 	// Notification Preferences
 	router.GET("/notifications/preferences", financeHandlers.GetNotificationPreferences)

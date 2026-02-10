@@ -717,3 +717,13 @@ type NotificationListResponseV2 struct {
 		HasMore       bool           `json:"has_more"`
 	} `json:"data"`
 }
+
+// ReminderSentLog tracks which reminders have been sent to prevent duplicate notifications
+type ReminderSentLog struct {
+	ID           uuid.UUID `json:"id" gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
+	TenantID     uuid.UUID `json:"tenant_id" gorm:"type:uuid;not null"`
+	UserID       uuid.UUID `json:"user_id" gorm:"type:uuid;not null"`
+	ReminderType string    `json:"reminder_type" gorm:"type:varchar(100);not null"`
+	ReminderDate time.Time `json:"reminder_date" gorm:"type:date;not null"`
+	SentAt       time.Time `json:"sent_at" gorm:"not null;default:now()"`
+}

@@ -33,7 +33,7 @@ func NewDatabase(config Config) (*DB, error) {
 		config.Host, config.Port, config.User, config.Password, config.DBName, config.SSLMode, config.TimeZone)
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: logger.Default.LogMode(logger.Warn),
 		NowFunc: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -47,11 +47,12 @@ func NewDatabase(config Config) (*DB, error) {
 		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
 	}
 
-	// Connection pool settings - optimized for production
-	sqlDB.SetMaxOpenConns(100)                    // Increased from 25 for concurrent auth requests
-	sqlDB.SetMaxIdleConns(25)                     // Keep baseline idle connections
-	sqlDB.SetConnMaxLifetime(30 * time.Minute)    // Increased from 5min to reduce reconnection overhead
-	sqlDB.SetConnMaxIdleTime(10 * time.Minute)    // Close idle connections after 10 min
+	// Connection pool settings - optimized for 6 microservices sharing PostgreSQL
+	// PostgreSQL max_connections=300, so 6 services x 50 = 300 max
+	sqlDB.SetMaxOpenConns(50)                     // Scaled for 100K concurrent users
+	sqlDB.SetMaxIdleConns(20)                     // Keep more warm connections for burst traffic
+	sqlDB.SetConnMaxLifetime(15 * time.Minute)    // Faster recycling for better load distribution
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)     // Release idle connections faster
 
 	return &DB{db}, nil
 }

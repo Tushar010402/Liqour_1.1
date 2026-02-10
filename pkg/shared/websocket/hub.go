@@ -3,7 +3,6 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
@@ -42,6 +41,7 @@ type Hub struct {
 	unregister chan *Client
 	mu         sync.RWMutex
 	logger     *zap.Logger
+	maxClients int
 }
 
 // Global hub instance
@@ -55,10 +55,11 @@ func GetHub(logger *zap.Logger) *Hub {
 			clients:    make(map[string]*Client),
 			tenants:    make(map[string]map[string]bool),
 			channels:   make(map[string]map[string]bool),
-			broadcast:  make(chan Message, 256),
+			broadcast:  make(chan Message, 4096),
 			register:   make(chan *Client),
 			unregister: make(chan *Client),
 			logger:     logger,
+			maxClients: 10000,
 		}
 		go hub.Run()
 	})
@@ -74,6 +75,17 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.mu.Lock()
+			if h.maxClients > 0 && len(h.clients) >= h.maxClients {
+				h.mu.Unlock()
+				if h.logger != nil {
+					h.logger.Warn("WebSocket connection rejected: max clients reached",
+						zap.Int("max_clients", h.maxClients),
+						zap.String("client_id", client.ID))
+				}
+				close(client.Send)
+				client.Conn.Close()
+				continue
+			}
 			h.clients[client.ID] = client
 
 			// Add to tenant map
@@ -84,9 +96,10 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 
 			if h.logger != nil {
-				h.logger.Info("✅ WebSocket client connected",
+				h.logger.Info("WebSocket client connected",
 					zap.String("client_id", client.ID),
-					zap.String("tenant_id", client.TenantID))
+					zap.String("tenant_id", client.TenantID),
+					zap.Int("total_clients", len(h.clients)))
 			}
 
 		case client := <-h.unregister:
@@ -123,36 +136,33 @@ func (h *Hub) Run() {
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
-			clientIDs := make([]string, 0)
+			var targets []*Client
 
-			// Get clients subscribed to this channel
+			// Snapshot client pointers under single lock (no per-client re-lock)
 			if message.Channel != "" {
 				if subscribers, ok := h.channels[message.Channel]; ok {
+					targets = make([]*Client, 0, len(subscribers))
 					for clientID := range subscribers {
-						clientIDs = append(clientIDs, clientID)
+						if client, ok := h.clients[clientID]; ok {
+							targets = append(targets, client)
+						}
 					}
 				}
 			}
 			h.mu.RUnlock()
 
-			// Send message to subscribed clients
-			for _, clientID := range clientIDs {
-				h.mu.RLock()
-				client, ok := h.clients[clientID]
-				h.mu.RUnlock()
-
-				if ok {
-					select {
-					case client.Send <- message:
-						// Message sent successfully
-					default:
-						// Client's send channel is full, disconnect
-						if h.logger != nil {
-							h.logger.Warn("⚠️  WebSocket send buffer full, disconnecting client",
-								zap.String("client_id", clientID))
-						}
-						go func() { h.unregister <- client }()
+			// Send to all targets without holding any lock
+			for _, client := range targets {
+				select {
+				case client.Send <- message:
+					// Message sent successfully
+				default:
+					// Client's send channel is full, disconnect
+					if h.logger != nil {
+						h.logger.Warn("WebSocket send buffer full, disconnecting client",
+							zap.String("client_id", client.ID))
 					}
+					go func(c *Client) { h.unregister <- c }(client)
 				}
 			}
 		}
@@ -270,38 +280,25 @@ func (c *Client) ReadPump() {
 				return
 			}
 
-			// ✨ DEBUG: Log raw message received
-			fmt.Printf("📨 [WebSocket] Raw message received from client %s: %s\n", c.ID, string(message))
-
 			// Parse message
 			var msg map[string]interface{}
 			if err := json.Unmarshal(message, &msg); err != nil {
-				fmt.Printf("❌ [WebSocket] Failed to parse message from client %s: %v\n", c.ID, err)
 				if c.Hub.logger != nil {
 					c.Hub.logger.Warn("Failed to parse WebSocket message", zap.Error(err))
 				}
 				continue
 			}
 
-			fmt.Printf("✅ [WebSocket] Parsed message from client %s: %+v\n", c.ID, msg)
-
 			// Handle subscribe/unsubscribe
 			if action, ok := msg["action"].(string); ok {
 				if channel, ok := msg["channel"].(string); ok {
-					fmt.Printf("🎬 [WebSocket] Action detected - action: %s, channel: %s, client: %s\n", action, channel, c.ID)
 					switch action {
 					case "subscribe":
 						c.Hub.Subscribe(c.ID, channel)
-						fmt.Printf("✅ [WebSocket] Client %s subscribed to channel: %s\n", c.ID, channel)
 					case "unsubscribe":
 						c.Hub.Unsubscribe(c.ID, channel)
-						fmt.Printf("🔇 [WebSocket] Client %s unsubscribed from channel: %s\n", c.ID, channel)
 					}
-				} else {
-					fmt.Printf("⚠️ [WebSocket] Action without channel - client: %s, msg: %+v\n", c.ID, msg)
 				}
-			} else {
-				fmt.Printf("ℹ️ [WebSocket] Non-action message from client %s: %+v\n", c.ID, msg)
 			}
 		}
 	}

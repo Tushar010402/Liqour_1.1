@@ -28,9 +28,9 @@ func NewCache(config Config) (*Cache, error) {
 		Addr:     fmt.Sprintf("%s:%d", config.Host, config.Port),
 		Password: config.Password,
 		DB:       config.DB,
-		// Connection pool settings - optimized for auth service
-		PoolSize:     50,               // Up from default 10
-		MinIdleConns: 10,               // Keep warm connections
+		// Connection pool settings - scaled for 100K concurrent users
+		PoolSize:     100,              // Every auth check hits Redis
+		MinIdleConns: 20,               // Keep more warm connections
 		PoolTimeout:  30 * time.Second, // Wait time for pool connection
 		// Connection timeouts
 		DialTimeout:  5 * time.Second,
@@ -365,7 +365,7 @@ const (
 
 	// Cache durations - optimized for sub-20ms response times
 	DefaultTTL         = 1 * time.Hour
-	SessionTTL         = 45 * 24 * time.Hour // 45 days - match JWT token expiration
+	SessionTTL         = 7 * 24 * time.Hour  // 7 days - match JWT_REFRESH_HOURS=168
 	ShortTTL           = 15 * time.Minute
 	LongTTL            = 24 * time.Hour
 	ProfileCacheTTL    = 5 * time.Minute    // User profile cache

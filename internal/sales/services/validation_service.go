@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -105,6 +106,252 @@ var commonBrandMisreads = map[string]string{
 	"UNKNOWN":           "",
 	"ILLEGIBLE":         "",
 	"UNKNOWN ILLEGIBLE": "",
+
+	// Common OCR misreads - only for fixing typos, not for brand variants
+	"PURECRAFT":         "PURE CRAFT",
+	"PURE CRAF":         "PURE CRAFT",
+}
+
+// Common variant suffixes that distinguish different products
+var variantSuffixes = []string{
+	"MATURED", "WHITE", "GOLD", "SILVER", "PREMIUM", "STRONG", "ULTRA",
+	"LIGHT", "DARK", "RESERVE", "SELECT", "CLASSIC", "ORIGINAL",
+	"MAX", "MINI", "CRAFT", "SPECIAL", "DELUXE", "AGED", "BLACK", "RED",
+	"GREEN", "BLUE", "XXX", "VS", "VSOP", "XO", "RUM", "WHISKY", "BEER",
+	"VODKA", "GIN", "BRANDY", "WINE", "LAGER", "ALE", "STOUT", "PILSNER",
+}
+
+// isExcludedMatch uses smart detection to check if two brands are variants of each other
+// that should NOT be matched together (e.g., "OLD MONK" vs "OLD MONK MATURED RUM")
+func isExcludedMatch(brand1, brand2 string) bool {
+	// Normalize both brands
+	brand1 = strings.ToUpper(strings.TrimSpace(brand1))
+	brand2 = strings.ToUpper(strings.TrimSpace(brand2))
+
+	// Exact match is fine - not excluded
+	if brand1 == brand2 {
+		return false
+	}
+
+	// Empty brands - not excluded
+	if brand1 == "" || brand2 == "" {
+		return false
+	}
+
+	words1 := strings.Fields(brand1)
+	words2 := strings.Fields(brand2)
+
+	// Rule 1: Prefix relationship detection
+	// If one brand is a prefix of another, they're likely variants (exclude matching)
+	// e.g., "OLD MONK" vs "OLD MONK MATURED RUM"
+	if isPrefixBrand(words1, words2) || isPrefixBrand(words2, words1) {
+		return true
+	}
+
+	// Rule 2: Same base with different variant suffix
+	// e.g., "KINGFISHER STRONG" vs "KINGFISHER ULTRA MAX"
+	if hasSameBaseWithDifferentVariant(words1, words2) {
+		return true
+	}
+
+	// Rule 3: High word overlap but different - likely confused variants
+	// e.g., brands sharing 2+ words but not identical
+	if hasConfusingWordOverlap(words1, words2) {
+		return true
+	}
+
+	return false
+}
+
+// isPrefixBrand checks if words1 is a prefix of words2
+// e.g., ["OLD", "MONK"] is prefix of ["OLD", "MONK", "MATURED", "RUM"]
+func isPrefixBrand(shorter, longer []string) bool {
+	if len(shorter) >= len(longer) {
+		return false
+	}
+
+	// Need at least 1 word in shorter and at least 1 extra word in longer
+	if len(shorter) < 1 || len(longer) < 2 {
+		return false
+	}
+
+	// Check if all words in shorter match the beginning of longer
+	for i, word := range shorter {
+		if !stringsEqualFuzzy(word, longer[i]) {
+			return false
+		}
+	}
+
+	// Verify the extra word(s) in longer are meaningful (not just noise)
+	extraWords := longer[len(shorter):]
+	for _, extra := range extraWords {
+		if len(extra) >= 2 { // At least 2 chars to be meaningful
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasSameBaseWithDifferentVariant checks if two brands share a base but have different variants
+// e.g., "KINGFISHER STRONG" vs "KINGFISHER ULTRA"
+func hasSameBaseWithDifferentVariant(words1, words2 []string) bool {
+	if len(words1) < 2 || len(words2) < 2 {
+		return false
+	}
+
+	// Find common prefix length
+	commonLen := 0
+	minLen := len(words1)
+	if len(words2) < minLen {
+		minLen = len(words2)
+	}
+
+	for i := 0; i < minLen; i++ {
+		if stringsEqualFuzzy(words1[i], words2[i]) {
+			commonLen++
+		} else {
+			break
+		}
+	}
+
+	// Need at least 1 common word and both must have words after it
+	if commonLen < 1 {
+		return false
+	}
+
+	remaining1 := words1[commonLen:]
+	remaining2 := words2[commonLen:]
+
+	// Both have remaining words that differ - check if they're variant suffixes
+	if len(remaining1) > 0 && len(remaining2) > 0 {
+		hasVariant1 := containsVariantSuffix(remaining1)
+		hasVariant2 := containsVariantSuffix(remaining2)
+
+		// If both have variant indicators, they're different products
+		if hasVariant1 && hasVariant2 {
+			return true
+		}
+
+		// If only one has variant indicator, they might still be different
+		if hasVariant1 || hasVariant2 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// containsVariantSuffix checks if any word is a known variant suffix
+func containsVariantSuffix(words []string) bool {
+	for _, word := range words {
+		for _, suffix := range variantSuffixes {
+			if stringsEqualFuzzy(word, suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasConfusingWordOverlap detects brands that share significant words but aren't identical
+// This catches cases where OCR might confuse similar-sounding brands
+func hasConfusingWordOverlap(words1, words2 []string) bool {
+	if len(words1) == 0 || len(words2) == 0 {
+		return false
+	}
+
+	// Count matching words
+	matchCount := 0
+	for _, w1 := range words1 {
+		for _, w2 := range words2 {
+			if stringsEqualFuzzy(w1, w2) {
+				matchCount++
+				break
+			}
+		}
+	}
+
+	// Calculate overlap ratio
+	minWords := len(words1)
+	if len(words2) < minWords {
+		minWords = len(words2)
+	}
+
+	maxWords := len(words1)
+	if len(words2) > maxWords {
+		maxWords = len(words2)
+	}
+
+	// If they share 50%+ words but have different lengths, they're confusing variants
+	// e.g., "OLD MONK RUM" vs "OLD MONK WHITE RUM" (3 of 4 match = 75%)
+	overlapRatio := float64(matchCount) / float64(minWords)
+
+	if overlapRatio >= 0.5 && len(words1) != len(words2) {
+		return true
+	}
+
+	// If same length, high overlap, but not identical - also exclude
+	if len(words1) == len(words2) && matchCount >= 2 && matchCount < len(words1) {
+		return true
+	}
+
+	return false
+}
+
+// stringsEqualFuzzy compares two strings with minor fuzzy tolerance
+func stringsEqualFuzzy(s1, s2 string) bool {
+	s1 = strings.ToUpper(strings.TrimSpace(s1))
+	s2 = strings.ToUpper(strings.TrimSpace(s2))
+
+	if s1 == s2 {
+		return true
+	}
+
+	// Allow for minor OCR errors (1 char difference for words > 4 chars)
+	if len(s1) > 4 && len(s2) > 4 {
+		diff := levenshteinDistance(s1, s2)
+		return diff <= 1
+	}
+
+	return false
+}
+
+// MatchDebugLog captures detailed information about matching decisions for debugging
+type MatchDebugLog struct {
+	EnteredBrand      string  `json:"entered_brand"`
+	OCRBrand          string  `json:"ocr_brand"`
+	ResolvedOCRBrand  string  `json:"resolved_ocr_brand"`
+	EnteredSize       string  `json:"entered_size"`
+	OCRSize           string  `json:"ocr_size"`
+	BrandSimilarity   float64 `json:"brand_similarity"`
+	FirstWordSim      float64 `json:"first_word_similarity"`
+	SizeMatches       bool    `json:"size_matches"`
+	BrandsExcluded    bool    `json:"brands_excluded"`
+	DataFingerprint   bool    `json:"data_fingerprint_match"`
+	FinalConfidence   float64 `json:"final_confidence"`
+	MatchDecision     string  `json:"match_decision"` // "MATCHED", "REJECTED", "EXCLUDED"
+	RejectionReason   string  `json:"rejection_reason,omitempty"`
+}
+
+// logMatchDecision logs detailed matching decision for debugging
+// Enable with DEBUG_MATCHING=true environment variable
+func logMatchDecision(log MatchDebugLog) {
+	if os.Getenv("DEBUG_MATCHING") != "true" {
+		return
+	}
+
+	// Format and print debug log
+	fmt.Printf("\n🔍 [Match Debug] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Printf("   Entered: '%s' (%s)\n", log.EnteredBrand, log.EnteredSize)
+	fmt.Printf("   OCR:     '%s' -> '%s' (%s)\n", log.OCRBrand, log.ResolvedOCRBrand, log.OCRSize)
+	fmt.Printf("   Brand Similarity: %.2f | First Word: %.2f\n", log.BrandSimilarity, log.FirstWordSim)
+	fmt.Printf("   Size Match: %v | Excluded: %v | Fingerprint: %v\n", log.SizeMatches, log.BrandsExcluded, log.DataFingerprint)
+	fmt.Printf("   Confidence: %.2f | Decision: %s\n", log.FinalConfidence, log.MatchDecision)
+	if log.RejectionReason != "" {
+		fmt.Printf("   Reason: %s\n", log.RejectionReason)
+	}
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 }
 
 // resolveBrandMisread attempts to resolve a misread brand name using the common patterns
@@ -154,7 +401,7 @@ func NewValidationService(db *database.DB, cache *cache.Cache, ocrService *OCRSe
 	}
 	fomoaModel := os.Getenv("FOMOA_MODEL")
 	if fomoaModel == "" {
-		fomoaModel = "qwen2.5vl:7b"
+		fomoaModel = "fomoa-vision-2.0"
 	}
 	openAIKey := os.Getenv("OPENAI_API_KEY")
 	geminiKey := os.Getenv("GEMINI_API_KEY")
@@ -162,7 +409,7 @@ func NewValidationService(db *database.DB, cache *cache.Cache, ocrService *OCRSe
 	// Log AI provider configuration
 	fmt.Println("🤖 AI Validation Service Configuration:")
 	if fomoaKey != "" {
-		fmt.Println("  ✅ PRIMARY: Fomoa (qwen2.5vl:7b)")
+		fmt.Printf("  ✅ PRIMARY: Fomoa (%s)\n", fomoaModel)
 	} else {
 		fmt.Println("  ⚠️  Fomoa not configured")
 	}
@@ -321,7 +568,14 @@ func (s *ValidationService) TriggerValidation(ctx context.Context, recordID uuid
 	validationResult.OCRSessionID = batchSession.ID
 	validationResult.ValidatedAt = time.Now()
 
-	// 8.5. Generate AI-powered review suggestions ONCE and store them
+	// 8.5. Check for date mismatches between receipt images and record date
+	dateWarnings := s.checkReceiptDateMismatch(ctx, batchSession.ID, record.RecordDate)
+	if len(dateWarnings) > 0 {
+		validationResult.Warnings = append(validationResult.Warnings, dateWarnings...)
+		fmt.Printf("⚠️  [Validation] DATE MISMATCH DETECTED: %d receipts have different dates\n", len(dateWarnings))
+	}
+
+	// 8.6. Generate AI-powered review suggestions ONCE and store them
 	// This prevents calling ChatGPT repeatedly on every GET request
 	fmt.Printf("[Validation] Generating AI summary and per-item insights...\n")
 	validationResult.AISummary = s.generateAISummary(validationResult)
@@ -362,6 +616,53 @@ func (s *ValidationService) TriggerValidation(ctx context.Context, recordID uuid
 		recordID, validationResult.OverallAccuracy, validationResult.MatchedItems, validationResult.MismatchedItems)
 
 	return nil
+}
+
+// checkReceiptDateMismatch checks if OCR receipt dates match the expected record date
+func (s *ValidationService) checkReceiptDateMismatch(ctx context.Context, batchID string, recordDate time.Time) []models.ValidationWarning {
+	var warnings []models.ValidationWarning
+
+	// Get OCR sessions for this batch
+	var ocrSessions []models.OCRSession
+	if err := s.db.WithContext(ctx).
+		Where("batch_session_id = ?", batchID).
+		Where("receipt_date IS NOT NULL").
+		Find(&ocrSessions).Error; err != nil {
+		fmt.Printf("[Validation] Warning: Could not fetch OCR sessions for date check: %v\n", err)
+		return warnings
+	}
+
+	recordDateOnly := recordDate.Format("2006-01-02")
+
+	for _, session := range ocrSessions {
+		if session.ReceiptDate == nil {
+			continue
+		}
+
+		receiptDateOnly := session.ReceiptDate.Format("2006-01-02")
+
+		// Check if dates are different (more than 1 day apart to allow for edge cases)
+		daysDiff := int(recordDate.Sub(*session.ReceiptDate).Hours() / 24)
+		if daysDiff < 0 {
+			daysDiff = -daysDiff
+		}
+
+		if daysDiff > 1 {
+			warning := models.ValidationWarning{
+				Type:        "date_mismatch",
+				Severity:    "warning",
+				Message:     fmt.Sprintf("Receipt image date (%s) doesn't match record date (%s)", receiptDateOnly, recordDateOnly),
+				Details:     "The uploaded receipt images may be from a different day. This could explain data mismatches. Please verify the correct images were uploaded.",
+				RecordDate:  recordDateOnly,
+				ReceiptDate: receiptDateOnly,
+			}
+			warnings = append(warnings, warning)
+			fmt.Printf("⚠️  [Validation] Date mismatch: Receipt=%s, Record=%s (diff=%d days)\n",
+				receiptDateOnly, recordDateOnly, daysDiff)
+		}
+	}
+
+	return warnings
 }
 
 // waitForOCRCompletion polls for OCR completion and returns the extracted items
@@ -766,12 +1067,13 @@ func (s *ValidationService) CompareEnteredVsOCR(ctx context.Context, tenantID uu
 }
 
 // deduplicateOCRItems removes duplicate OCR items from multiple images
-// Keeps the item with highest confidence or most complete data
+// IMPROVED: Keeps ALL variants when values differ significantly (>20% difference)
+// This allows the matching logic to find the correct OCR item that matches entered data
 // Resolves brand misreads BEFORE deduplication for accurate grouping
 func (s *ValidationService) deduplicateOCRItems(ocrItems []models.OCRItem) []models.OCRItem {
 	// Key: resolved brand + size (use resolved brand for accurate dedup)
-	seen := make(map[string]models.OCRItem)
-	keyToResolvedBrand := make(map[string]string) // Track resolved brand for logging
+	// Value: list of all items with this key (to check for significant differences)
+	seen := make(map[string][]models.OCRItem)
 
 	for _, item := range ocrItems {
 		// Resolve brand misread BEFORE creating the key
@@ -781,41 +1083,90 @@ func (s *ValidationService) deduplicateOCRItems(ocrItems []models.OCRItem) []mod
 		}
 
 		key := normalizeBrandName(resolvedBrand) + "|" + normalizeSize(item.SizeText)
-
-		existing, exists := seen[key]
-		if !exists {
-			seen[key] = item
-			keyToResolvedBrand[key] = resolvedBrand
-			continue
-		}
-
-		// Keep the item with more complete data AND valid math
-		existingScore := s.scoreOCRItemCompleteness(existing)
-		newScore := s.scoreOCRItemCompleteness(item)
-
-		// Penalize items with impossible values
-		if existing.ClosingStock < 0 {
-			existingScore -= 10
-		}
-		if item.ClosingStock < 0 {
-			newScore -= 10
-		}
-
-		if newScore > existingScore {
-			fmt.Printf("[Dedup] Replacing %s (score %d) with better version (score %d)\n",
-				key, existingScore, newScore)
-			seen[key] = item
-			keyToResolvedBrand[key] = resolvedBrand
-		}
+		seen[key] = append(seen[key], item)
 	}
 
 	result := make([]models.OCRItem, 0, len(seen))
-	for _, item := range seen {
-		result = append(result, item)
+	for key, items := range seen {
+		if len(items) == 1 {
+			result = append(result, items[0])
+			continue
+		}
+
+		// Multiple items with same brand+size - check if values differ significantly
+		// If so, keep all variants to let matching logic pick the right one
+		keptItems := s.selectBestOCRVariants(items)
+		for _, item := range keptItems {
+			result = append(result, item)
+		}
+		if len(keptItems) > 1 {
+			fmt.Printf("[Dedup] Kept %d variants for %s (values differ significantly)\n", len(keptItems), key)
+		}
 	}
 
-	fmt.Printf("[Dedup] Reduced %d OCR items to %d after deduplication\n", len(ocrItems), len(result))
+	fmt.Printf("[Dedup] Reduced %d OCR items to %d after smart deduplication\n", len(ocrItems), len(result))
 	return result
+}
+
+// selectBestOCRVariants selects which OCR variants to keep when multiple exist for same brand+size
+// Keeps items with significantly different values (allowing matching to find correct one)
+// Otherwise keeps the one with best completeness score
+func (s *ValidationService) selectBestOCRVariants(items []models.OCRItem) []models.OCRItem {
+	if len(items) <= 1 {
+		return items
+	}
+
+	// Check if values differ significantly between items
+	// If sale quantities differ by more than 50%, keep both variants
+	// This handles cases where OCR extracted from different receipt pages
+	var distinctItems []models.OCRItem
+	for _, item := range items {
+		isDistinct := true
+		for _, existing := range distinctItems {
+			// Check if this item is "similar enough" to an existing one
+			saleDiff := absInt(item.SaleQuantity - existing.SaleQuantity)
+			openingDiff := absInt(item.OpeningStock - existing.OpeningStock)
+			closingDiff := absInt(item.ClosingStock - existing.ClosingStock)
+
+			// If all key values are within 20% or differ by less than 5 units, consider them duplicates
+			maxSale := max(item.SaleQuantity, existing.SaleQuantity)
+			maxOpening := max(item.OpeningStock, existing.OpeningStock)
+
+			salesSimilar := maxSale == 0 || (float64(saleDiff)/float64(maxSale) < 0.2) || saleDiff <= 3
+			openingSimilar := maxOpening == 0 || (float64(openingDiff)/float64(maxOpening) < 0.2) || openingDiff <= 5
+			closingSimilar := closingDiff <= 5
+
+			if salesSimilar && openingSimilar && closingSimilar {
+				// Items are similar - this is a true duplicate, keep the one with better score
+				existingScore := s.scoreOCRItemCompleteness(existing)
+				newScore := s.scoreOCRItemCompleteness(item)
+				if existing.ClosingStock < 0 {
+					existingScore -= 10
+				}
+				if item.ClosingStock < 0 {
+					newScore -= 10
+				}
+
+				if newScore > existingScore {
+					// Replace existing with new item
+					for i, e := range distinctItems {
+						if e.ID == existing.ID {
+							distinctItems[i] = item
+							break
+						}
+					}
+				}
+				isDistinct = false
+				break
+			}
+		}
+
+		if isDistinct {
+			distinctItems = append(distinctItems, item)
+		}
+	}
+
+	return distinctItems
 }
 
 // scoreOCRItemCompleteness returns a score based on how complete the OCR data is
@@ -1283,9 +1634,10 @@ func (s *ValidationService) findBestOCRMatch(enteredItem sharedModels.DailySales
 		enteredWords := strings.Fields(normalizedBrand)
 		ocrWords := strings.Fields(resolvedOCRBrand)
 		firstWordMatch := false
+		firstWordSimilarity := 0.0
 		if len(enteredWords) > 0 && len(ocrWords) > 0 {
-			firstWordSimilarity := calculateStringSimilarityVal(enteredWords[0], ocrWords[0])
-			firstWordMatch = firstWordSimilarity >= 0.70 // First word must be 70%+ similar
+			firstWordSimilarity = calculateStringSimilarityVal(enteredWords[0], ocrWords[0])
+			firstWordMatch = firstWordSimilarity >= 0.85 // First word must be 85%+ similar (increased from 70%)
 		}
 
 		hasBrandRelationship := firstWordMatch || // First words must match
@@ -1293,12 +1645,21 @@ func (s *ValidationService) findBestOCRMatch(enteredItem sharedModels.DailySales
 			strings.HasPrefix(ocrBrand, normalizedBrand[:min(4, len(normalizedBrand))]) || // Same 4-char start
 			strings.HasPrefix(normalizedBrand, ocrBrand[:min(4, len(ocrBrand))]) // Same 4-char start
 
-		if sizeMatches && matchCount >= minMatches && confidence < 0.90 && hasBrandRelationship {
+		// Check brand exclusions before allowing data fingerprint match
+		brandsExcluded := isExcludedMatch(normalizedBrand, resolvedOCRBrand)
+
+		if sizeMatches && matchCount >= minMatches && confidence < 0.90 && hasBrandRelationship && !brandsExcluded {
 			if debugMatching {
 				fmt.Printf("[Match]   -> DATA FINGERPRINT: OCR '%s' matches %d/%d fields (O:%v C:%v S:%v P:%v)\n",
 					ocrItem.BrandText, matchCount, validFieldCount, openingMatch, closingMatch, saleMatch, priceMatch)
 			}
 			confidence = 0.90 // Strong data fingerprint match
+		} else if sizeMatches && matchCount >= minMatches && brandsExcluded {
+			// Brands are mutually exclusive - do NOT boost confidence despite matching fields
+			if debugMatching {
+				fmt.Printf("[Match]   -> BLOCKED DATA FINGERPRINT: OCR '%s' vs '%s' - brands are mutually exclusive\n",
+					ocrItem.BrandText, brandName)
+			}
 		} else if sizeMatches && matchCount >= minMatches && !hasBrandRelationship {
 			// Log why we're NOT using data fingerprint (brand too different)
 			if debugMatching {
@@ -1313,13 +1674,74 @@ func (s *ValidationService) findBestOCRMatch(enteredItem sharedModels.DailySales
 			confidence = 0.92
 		}
 
+		// COLUMN MISALIGNMENT DETECTION: OCR sometimes reads columns shifted
+		// If OCR's "Sale" equals entered's "Opening", and brand/size match, it's likely column confusion
+		// In this case, we should still match but flag for investigation
+		columnMisalignment := false
+		if sizeMatches && hasBrandRelationship && confidence < 0.75 {
+			// Check if OCR sale = entered opening (common misalignment)
+			if ocrSale == enteredItem.OpeningStock && enteredItem.OpeningStock > 10 {
+				columnMisalignment = true
+				if debugMatching {
+					fmt.Printf("[Match]   -> COLUMN MISALIGNMENT detected: OCR Sale(%d) = Entered Opening(%d) for '%s'\n",
+						ocrSale, enteredItem.OpeningStock, ocrItem.BrandText)
+				}
+				// Still give it a moderate confidence - it's the right item, just wrong columns
+				if confidence < 0.70 {
+					confidence = 0.70
+				}
+			}
+			// Check if OCR closing = entered opening (another common pattern)
+			if ocrClosing == enteredItem.OpeningStock && enteredItem.OpeningStock > 10 {
+				columnMisalignment = true
+				if debugMatching {
+					fmt.Printf("[Match]   -> COLUMN MISALIGNMENT detected: OCR Closing(%d) = Entered Opening(%d) for '%s'\n",
+						ocrClosing, enteredItem.OpeningStock, ocrItem.BrandText)
+				}
+				if confidence < 0.70 {
+					confidence = 0.70
+				}
+			}
+		}
+		_ = columnMisalignment // Used for debugging, prevents unused variable warning
+
 		if debugMatching && confidence > 0.3 {
 			fmt.Printf("[Match]   -> OCR Item %d: '%s' (%s), confidence=%.2f\n",
 				i, ocrItem.BrandText, ocrItem.SizeText, confidence)
 		}
 
-		// Lower threshold to 0.45 and prefer items with matching sale quantity
-		minThreshold := 0.45
+		// Minimum threshold set to 0.65 to reduce false positive matches (increased from 0.45)
+		minThreshold := 0.65
+
+		// Log significant matching decisions for debugging (when DEBUG_MATCHING=true)
+		if brandsExcluded || confidence >= minThreshold {
+			decision := "REJECTED"
+			reason := fmt.Sprintf("Below threshold (%.2f < %.2f)", confidence, minThreshold)
+			if brandsExcluded {
+				decision = "EXCLUDED"
+				reason = "Brands are mutually exclusive"
+			} else if confidence >= minThreshold {
+				decision = "CANDIDATE"
+				reason = ""
+			}
+
+			logMatchDecision(MatchDebugLog{
+				EnteredBrand:     brandName,
+				OCRBrand:         ocrItem.BrandText,
+				ResolvedOCRBrand: resolvedOCRBrand,
+				EnteredSize:      size,
+				OCRSize:          ocrItem.SizeText,
+				BrandSimilarity:  brandSimilarity,
+				FirstWordSim:     firstWordSimilarity,
+				SizeMatches:      sizeMatches,
+				BrandsExcluded:   brandsExcluded,
+				DataFingerprint:  sizeMatches && matchCount >= minMatches && hasBrandRelationship && !brandsExcluded,
+				FinalConfidence:  confidence,
+				MatchDecision:    decision,
+				RejectionReason:  reason,
+			})
+		}
+
 		if confidence > bestMatch.confidence && confidence >= minThreshold {
 			bestMatch.matchedIndex = i
 			bestMatch.confidence = confidence
@@ -1334,6 +1756,18 @@ func (s *ValidationService) findBestOCRMatch(enteredItem sharedModels.DailySales
 		} else {
 			fmt.Printf("[Match] ✗ No match found for '%s'\n", brandName)
 		}
+	}
+
+	// Log final match decision
+	if bestMatch.matchedIndex >= 0 {
+		logMatchDecision(MatchDebugLog{
+			EnteredBrand:    brandName,
+			OCRBrand:        bestMatch.ocrItem.BrandText,
+			EnteredSize:     size,
+			OCRSize:         bestMatch.ocrItem.SizeText,
+			FinalConfidence: bestMatch.confidence,
+			MatchDecision:   "MATCHED",
+		})
 	}
 
 	return bestMatch
@@ -3047,8 +3481,8 @@ Return ONLY the JSON array, no other text.`,
 		strings.Join(productList, "\n"),
 		strings.Join(ocrList, "\n"))
 
-	// Call AI with fallback
-	responseText, provider, err := s.callAIWithFallback(ctx, systemPrompt, userPrompt, 1500)
+	// Call AI with fallback (using high token limit for Fomoa - owned service)
+	responseText, provider, err := s.callAIWithFallback(ctx, systemPrompt, userPrompt, 8000)
 	if err != nil {
 		return nil, fmt.Errorf("AI matching failed: %w", err)
 	}
@@ -3277,8 +3711,21 @@ func (s *ValidationService) callFomoa(ctx context.Context, systemPrompt, userPro
 	}
 	defer resp.Body.Close()
 
+	// Read full response body for debugging
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Fomoa response: %w", err)
+	}
+
+	// Check for non-200 status
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[AI] Fomoa error response (status %d): %s\n", resp.StatusCode, string(bodyBytes[:min(500, len(bodyBytes))]))
+		return "", fmt.Errorf("Fomoa API error: status %d", resp.StatusCode)
+	}
+
 	var chatResp ChatGPTResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
+		fmt.Printf("[AI] Fomoa parse error - raw response: %s\n", string(bodyBytes[:min(500, len(bodyBytes))]))
 		return "", fmt.Errorf("failed to decode Fomoa response: %w", err)
 	}
 
@@ -3287,11 +3734,12 @@ func (s *ValidationService) callFomoa(ctx context.Context, systemPrompt, userPro
 	}
 
 	if len(chatResp.Choices) == 0 {
+		fmt.Printf("[AI] Fomoa no choices - raw response: %s\n", string(bodyBytes[:min(500, len(bodyBytes))]))
 		return "", fmt.Errorf("no response from Fomoa")
 	}
 
 	content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	fmt.Printf("[AI] Fomoa responded (%d tokens)\n", chatResp.Usage.TotalTokens)
+	fmt.Printf("[AI] Fomoa responded (%d tokens, model: %s)\n", chatResp.Usage.TotalTokens, s.fomoaModel)
 	return content, nil
 }
 
@@ -3431,8 +3879,8 @@ When reviewing validation results that compare salesman entries with OCR-extract
 - Give a clear recommendation: APPROVE, REVIEW, or REJECT
 - Mention specific products if there are critical issues`
 
-	// Use unified AI call with fallback
-	content, provider, err := s.callAIWithFallback(ctx, systemPrompt, userPrompt, 200)
+	// Use unified AI call with fallback (high token limit for Fomoa)
+	content, provider, err := s.callAIWithFallback(ctx, systemPrompt, userPrompt, 1000)
 	if err != nil {
 		return "", err
 	}
@@ -3533,8 +3981,8 @@ In one sentence, what should the manager check for this product?`,
 
 	systemPrompt := "You are a concise assistant. Give a one-sentence actionable insight for a liquor store manager reviewing sales discrepancies."
 
-	// Use unified AI call with fallback
-	content, _, err := s.callAIWithFallback(ctx, systemPrompt, userPrompt, 100)
+	// Use unified AI call with fallback (high token limit for Fomoa)
+	content, _, err := s.callAIWithFallback(ctx, systemPrompt, userPrompt, 500)
 	if err != nil {
 		return "", err
 	}

@@ -207,12 +207,12 @@ func (s *EnhancedProductService) CreateBrandWithVariants(ctx context.Context, re
 			continue
 		}
 
-		// Create stock records for ALL tenant shops (ensures product appears in inventory)
+		// Create stock records for ALL tenant shops in batch (single INSERT instead of N)
 		var shops []models.Shop
 		if err := s.db.Where("tenant_id = ? AND is_active = ?", tenantID, true).Find(&shops).Error; err == nil {
+			stocks := make([]models.Stock, 0, len(shops))
 			for _, shop := range shops {
-				// Use InitialStock for all shops (typically 0 for new products)
-				stock := models.Stock{
+				stocks = append(stocks, models.Stock{
 					TenantModel:       models.TenantModel{TenantID: &tenantID},
 					ShopID:            shop.ID,
 					ProductID:         product.ID,
@@ -223,8 +223,10 @@ func (s *EnhancedProductService) CreateBrandWithVariants(ctx context.Context, re
 					CostingMethod:     "fifo",
 					AverageCost:       totalCost,
 					LastPurchasePrice: variant.CostPrice,
-				}
-				s.db.Create(&stock) // Ignore individual errors - stock creation is non-critical
+				})
+			}
+			if len(stocks) > 0 {
+				s.db.CreateInBatches(&stocks, 100)
 			}
 		}
 

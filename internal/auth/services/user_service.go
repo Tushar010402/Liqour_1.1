@@ -113,14 +113,9 @@ func (s *UserService) GetUsers(ctx context.Context, tenantID uuid.UUID, page, pa
 			ProfileImage: user.ProfileImage,
 		}
 
-		// Debug logging
-		log.Printf("[GetUsers] User %s (%s): Salesman=%v", user.Username, user.ID, user.Salesman != nil)
-
 		if user.Salesman != nil {
-			log.Printf("[GetUsers] User %s has Salesman: ShopID=%s", user.Username, user.Salesman.ShopID)
 			response.ShopID = &user.Salesman.ShopID
 			if user.Salesman.Shop != nil {
-				log.Printf("[GetUsers] User %s has Shop: Name=%s", user.Username, user.Salesman.Shop.Name)
 				response.ShopName = user.Salesman.Shop.Name
 			}
 		}
@@ -265,11 +260,6 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, ten
 
 // UpdateUser updates user information
 func (s *UserService) UpdateUser(ctx context.Context, userID, tenantID uuid.UUID, req UpdateUserRequest) (*UserResponse, error) {
-	// Debug logging
-	log.Printf("[UpdateUser] Called for userID=%s, tenantID=%s", userID, tenantID)
-	log.Printf("[UpdateUser] Request: FirstName=%v, LastName=%v, Phone=%v, Role=%v, ShopID=%v",
-		req.FirstName, req.LastName, req.Phone, req.Role, req.ShopID)
-
 	var user models.User
 
 	err := s.db.Where("id = ? AND tenant_id = ?", userID, tenantID).

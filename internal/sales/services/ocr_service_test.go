@@ -632,6 +632,18 @@ func TestDetectMergedRows(t *testing.T) {
 			expectedCount: 1,
 			expectedFirst: "Royal Stag Premium Whisky",
 		},
+		{
+			name:          "Digit-starting brand - 100 Pipers",
+			line:          "1 100 Pipers Delux 40 0 40 12 90 1080 28 2 Royal Stag 0 0 0 0 90 0 0",
+			expectedCount: 2,
+			expectedFirst: "1 100 Pipers Delux 40 0 40 12 90 1080 28",
+		},
+		{
+			name:          "Digit-starting brand - 8 PM single row",
+			line:          "3 8 P.M. Black Whisky 10 5 15 8 120 960 7",
+			expectedCount: 1,
+			expectedFirst: "3 8 P.M. Black Whisky 10 5 15 8 120 960 7",
+		},
 	}
 
 	for _, tt := range tests {

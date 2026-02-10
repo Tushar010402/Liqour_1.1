@@ -1321,19 +1321,25 @@ func (s *ProductService) GetDistinctSizesMultiCategory(ctx context.Context, tena
 
 	// Build query to get ALL sizes in catalog with stock totals
 	// Join with stocks table to get total quantity
-	query := s.db.Model(&models.Product{}).
-		Select("UPPER(products.size) as size, COUNT(DISTINCT products.id) as product_count, COALESCE(SUM(stocks.quantity), 0) as total_stock").
-		Joins("LEFT JOIN stocks ON stocks.product_id = products.id AND stocks.deleted_at IS NULL").
-		Where("products.tenant_id = ? AND products.deleted_at IS NULL AND products.size IS NOT NULL AND products.size <> ''", tenantID)
+	// IMPORTANT: Shop filter must be in JOIN condition (not WHERE) to preserve LEFT JOIN behavior
+	// Otherwise products with stock in other shops but not the requested shop would be excluded
+	var query *gorm.DB
+	if shopID != nil {
+		// Filter stocks by shop IN the JOIN condition to preserve all products
+		query = s.db.Model(&models.Product{}).
+			Select("UPPER(products.size) as size, COUNT(DISTINCT products.id) as product_count, COALESCE(SUM(stocks.quantity), 0) as total_stock").
+			Joins("LEFT JOIN stocks ON stocks.product_id = products.id AND stocks.deleted_at IS NULL AND stocks.shop_id = ?", *shopID).
+			Where("products.tenant_id = ? AND products.deleted_at IS NULL AND products.size IS NOT NULL AND products.size <> ''", tenantID)
+	} else {
+		query = s.db.Model(&models.Product{}).
+			Select("UPPER(products.size) as size, COUNT(DISTINCT products.id) as product_count, COALESCE(SUM(stocks.quantity), 0) as total_stock").
+			Joins("LEFT JOIN stocks ON stocks.product_id = products.id AND stocks.deleted_at IS NULL").
+			Where("products.tenant_id = ? AND products.deleted_at IS NULL AND products.size IS NOT NULL AND products.size <> ''", tenantID)
+	}
 
 	// Filter by multiple categories if provided (using IN clause)
 	if len(categoryIDs) > 0 {
 		query = query.Where("products.category_id IN ?", categoryIDs)
-	}
-
-	// Filter stocks by shop if provided
-	if shopID != nil {
-		query = query.Where("(stocks.shop_id = ? OR stocks.shop_id IS NULL)", *shopID)
 	}
 
 	// Get all sizes in catalog with stock totals

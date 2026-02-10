@@ -1,8 +1,15 @@
-version: '3.8'
-
 # LiquorPro Production Docker Compose
 # Optimized for high performance, security, and reliability
 # Server: 72.60.96.174
+#
+# IMPORTANT: This file REQUIRES .env.production
+# The env_file is hardcoded below - DO NOT run without it!
+
+# Default environment file for ALL services
+# This ensures env vars are always loaded even if --env-file is forgotten
+x-common-env: &common-env
+  env_file:
+    - .env.production
 
 services:
   # ========================================
@@ -13,22 +20,19 @@ services:
     image: postgres:15-alpine
     container_name: liquorpro-postgres-prod
     restart: unless-stopped
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
     environment:
       POSTGRES_DB: ${DATABASE_NAME}
       POSTGRES_USER: ${DATABASE_USER}
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
       POSTGRES_MULTIPLE_EXTENSIONS: uuid-ossp,pg_trgm
-      # Performance tuning
-      POSTGRES_SHARED_BUFFERS: 2GB
-      POSTGRES_EFFECTIVE_CACHE_SIZE: 6GB
-      POSTGRES_MAX_CONNECTIONS: 300
-      POSTGRES_WORK_MEM: 16MB
     ports:
       - "127.0.0.1:5432:5432"  # Bind to localhost only
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
       - /opt/liquorpro/logs/postgres:/var/log/postgresql
+      - /opt/liquorpro/config/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     networks:
       - liquorpro-network
     healthcheck:
@@ -42,9 +46,10 @@ services:
         limits:
           cpus: '2.0'
           memory: 4G
+          pids: 512
         reservations:
           cpus: '1.0'
-          memory: 2G
+          memory: 1G
     security_opt:
       - no-new-privileges:true
     logging:
@@ -61,13 +66,13 @@ services:
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD}
-      --maxmemory 2gb
-      --maxmemory-policy allkeys-lru
+      --maxmemory 1536mb
+      --maxmemory-policy volatile-lru
       --save 900 1
       --save 300 10
       --save 60 10000
-      --appendonly yes
-      --appendfsync everysec
+      --appendonly no
+      --tcp-keepalive 300
     ports:
       - "127.0.0.1:6379:6379"  # Bind to localhost only
     volumes:
@@ -76,7 +81,7 @@ services:
     networks:
       - liquorpro-network
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -87,8 +92,8 @@ services:
           cpus: '1.0'
           memory: 2G
         reservations:
-          cpus: '0.5'
-          memory: 1G
+          cpus: '0.25'
+          memory: 512M
     security_opt:
       - no-new-privileges:true
     logging:
@@ -145,6 +150,11 @@ services:
       - "127.0.0.1:8090:8090"  # Bind to localhost only
     environment:
       - APP_ENVIRONMENT=production
+      - SERVER_HOST=0.0.0.0
+      # Extended timeouts for proxying AI/OCR requests
+      - SERVER_READ_TIMEOUT=300
+      - SERVER_WRITE_TIMEOUT=300
+      - SERVER_IDLE_TIMEOUT=300
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=${DATABASE_USER}
@@ -154,6 +164,8 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRATION_HOURS=${JWT_EXPIRATION_HOURS}
+      - JWT_REFRESH_HOURS=${JWT_REFRESH_HOURS}
       - SERVICES_AUTH_URL=http://auth:8091
       - SERVICES_SALES_URL=http://sales:8092
       - SERVICES_INVENTORY_URL=http://inventory:8093
@@ -161,6 +173,10 @@ services:
       - SERVICES_SAAS_URL=http://saas:8095
       - KAFKA_BROKERS=${KAFKA_BROKERS}
       - KAFKA_ENABLED=${KAFKA_ENABLED:-false}
+      - GOMAXPROCS=2
+      - DB_MAX_OPEN_CONNS=25
+      - DB_MAX_IDLE_CONNS=10
+      - DB_CONN_MAX_LIFETIME=1h
     depends_on:
       postgres:
         condition: service_healthy
@@ -172,8 +188,9 @@ services:
       - liquorpro-network
     volumes:
       - /opt/liquorpro/logs/gateway:/var/log/liquorpro
+      - /var/www/liquorpro/uploads:/var/www/liquorpro/uploads:ro
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8090/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8090/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -182,10 +199,11 @@ services:
       resources:
         limits:
           cpus: '2.0'
-          memory: 2G
+          memory: 1.5G
+          pids: 256
         reservations:
           cpus: '0.5'
-          memory: 512M
+          memory: 256M
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -213,6 +231,7 @@ services:
       - "127.0.0.1:8091:8091"
     environment:
       - APP_ENVIRONMENT=production
+      - SERVER_HOST=0.0.0.0
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=${DATABASE_USER}
@@ -222,6 +241,14 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRATION_HOURS=${JWT_EXPIRATION_HOURS}
+      - JWT_REFRESH_HOURS=${JWT_REFRESH_HOURS}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - KAFKA_ENABLED=${KAFKA_ENABLED:-false}
+      - GOMAXPROCS=1
+      - DB_MAX_OPEN_CONNS=25
+      - DB_MAX_IDLE_CONNS=10
+      - DB_CONN_MAX_LIFETIME=1h
     depends_on:
       postgres:
         condition: service_healthy
@@ -234,7 +261,7 @@ services:
     volumes:
       - /opt/liquorpro/logs/auth:/var/log/liquorpro
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8091/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8091/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -243,10 +270,11 @@ services:
       resources:
         limits:
           cpus: '1.0'
-          memory: 1G
+          memory: 512M
+          pids: 256
         reservations:
           cpus: '0.25'
-          memory: 512M
+          memory: 128M
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -270,13 +298,23 @@ services:
     image: liquorpro/sales:${VERSION:-latest}
     container_name: liquorpro-sales-prod
     restart: unless-stopped
+    # IMPORTANT: Always load production env file to prevent missing API keys
+    env_file:
+      - .env.production
     ports:
       - "127.0.0.1:8092:8092"
     volumes:
       - ./credentials:/app/credentials:ro
+      - ./config/firebase:/app/config/firebase:ro
       - /opt/liquorpro/logs/sales:/var/log/liquorpro
+      - /var/www/liquorpro/uploads:/root/uploads  # Persist uploaded images
     environment:
       - APP_ENVIRONMENT=production
+      - SERVER_HOST=0.0.0.0
+      # Extended timeouts for AI/OCR processing (default 10s is too short)
+      - SERVER_READ_TIMEOUT=300
+      - SERVER_WRITE_TIMEOUT=300
+      - SERVER_IDLE_TIMEOUT=300
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=${DATABASE_USER}
@@ -287,7 +325,20 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/google-vision-credentials.json
+      - FIREBASE_CREDENTIALS_PATH=/app/config/firebase/service-account.json
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # OpenAI ChatGPT Configuration (PRIMARY for OCR image extraction)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # FOMOA AI Configuration (FALLBACK 1 for brand matching)
+      - FOMOA_API_KEY=${FOMOA_API_KEY}
+      - FOMOA_API_URL=${FOMOA_API_URL}
+      - FOMOA_MODEL=${FOMOA_MODEL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - KAFKA_ENABLED=${KAFKA_ENABLED:-false}
+      - GOMAXPROCS=2
+      - DB_MAX_OPEN_CONNS=25
+      - DB_MAX_IDLE_CONNS=10
+      - DB_CONN_MAX_LIFETIME=1h
     depends_on:
       postgres:
         condition: service_healthy
@@ -295,10 +346,12 @@ services:
         condition: service_healthy
       migrations:
         condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
     networks:
       - liquorpro-network
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8092/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8092/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -307,13 +360,14 @@ services:
       resources:
         limits:
           cpus: '1.5'
-          memory: 2G
+          memory: 1.5G
+          pids: 256
         reservations:
           cpus: '0.5'
-          memory: 512M
+          memory: 256M
     security_opt:
       - no-new-privileges:true
-    read_only: true
+    # read_only removed - sales service needs to write uploaded images
     tmpfs:
       - /tmp
     logging:
@@ -338,6 +392,7 @@ services:
       - "127.0.0.1:8093:8093"
     environment:
       - APP_ENVIRONMENT=production
+      - SERVER_HOST=0.0.0.0
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=${DATABASE_USER}
@@ -348,6 +403,12 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - SAAS_SERVICE_URL=http://saas:8095
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - KAFKA_ENABLED=${KAFKA_ENABLED:-false}
+      - GOMAXPROCS=1
+      - DB_MAX_OPEN_CONNS=25
+      - DB_MAX_IDLE_CONNS=10
+      - DB_CONN_MAX_LIFETIME=1h
     depends_on:
       postgres:
         condition: service_healthy
@@ -355,12 +416,14 @@ services:
         condition: service_healthy
       migrations:
         condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
     networks:
       - liquorpro-network
     volumes:
       - /opt/liquorpro/logs/inventory:/var/log/liquorpro
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8093/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8093/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -369,10 +432,11 @@ services:
       resources:
         limits:
           cpus: '1.0'
-          memory: 1G
+          memory: 768M
+          pids: 256
         reservations:
           cpus: '0.25'
-          memory: 512M
+          memory: 128M
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -400,6 +464,7 @@ services:
       - "127.0.0.1:8094:8094"
     environment:
       - APP_ENVIRONMENT=production
+      - SERVER_HOST=0.0.0.0
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=${DATABASE_USER}
@@ -409,6 +474,14 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
+      - FIREBASE_CREDENTIALS_PATH=/app/config/firebase/service-account.json
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - KAFKA_ENABLED=${KAFKA_ENABLED:-false}
+      - GOMAXPROCS=1
+      - TZ=Asia/Kolkata
+      - DB_MAX_OPEN_CONNS=25
+      - DB_MAX_IDLE_CONNS=10
+      - DB_CONN_MAX_LIFETIME=1h
     depends_on:
       postgres:
         condition: service_healthy
@@ -416,12 +489,15 @@ services:
         condition: service_healthy
       migrations:
         condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
     networks:
       - liquorpro-network
     volumes:
       - /opt/liquorpro/logs/finance:/var/log/liquorpro
+      - /opt/liquorpro/config/firebase:/app/config/firebase:ro
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8094/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8094/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -430,10 +506,11 @@ services:
       resources:
         limits:
           cpus: '1.0'
-          memory: 1G
+          memory: 768M
+          pids: 256
         reservations:
           cpus: '0.25'
-          memory: 512M
+          memory: 128M
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -470,6 +547,12 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - KAFKA_ENABLED=${KAFKA_ENABLED:-false}
+      - GOMAXPROCS=1
+      - DB_MAX_OPEN_CONNS=25
+      - DB_MAX_IDLE_CONNS=10
+      - DB_CONN_MAX_LIFETIME=1h
     depends_on:
       postgres:
         condition: service_healthy
@@ -482,7 +565,7 @@ services:
     volumes:
       - /opt/liquorpro/logs/saas:/var/log/liquorpro
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8095/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8095/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -491,10 +574,11 @@ services:
       resources:
         limits:
           cpus: '1.0'
-          memory: 1G
+          memory: 512M
+          pids: 256
         reservations:
           cpus: '0.25'
-          memory: 512M
+          memory: 128M
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -505,6 +589,67 @@ services:
       options:
         max-size: "50m"
         max-file: "10"
+        compress: "true"
+
+  # ========================================
+  # Kafka (KRaft mode, single node)
+  # ========================================
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: liquorpro-kafka-prod
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9092:9092"
+    environment:
+      # KRaft mode (built-in, no ZooKeeper)
+      - KAFKA_NODE_ID=0
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      # Listeners
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      # Topic defaults
+      - KAFKA_NUM_PARTITIONS=3
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=1
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=false
+      # Retention
+      - KAFKA_LOG_RETENTION_HOURS=168
+      - KAFKA_LOG_RETENTION_BYTES=5368709120
+      - KAFKA_LOG_SEGMENT_BYTES=1073741824
+      # Compression
+      - KAFKA_COMPRESSION_TYPE=snappy
+      # JVM heap
+      - KAFKA_HEAP_OPTS=-Xmx512m -Xms512m
+      # Cluster ID for KRaft
+      - CLUSTER_ID=liquorpro-kafka-cluster-01
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
+    networks:
+      - liquorpro-network
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 768M
+          pids: 512
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
         compress: "true"
 
 # ========================================
@@ -523,6 +668,12 @@ volumes:
       type: none
       o: bind
       device: /opt/liquorpro/data/redis
+  kafka_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/liquorpro/data/kafka
 
 # ========================================
 # Networks

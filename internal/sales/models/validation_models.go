@@ -44,6 +44,19 @@ type ValidationResult struct {
 	AISummary           *AISummary         `json:"ai_summary,omitempty"`            // AI-generated summary
 	PerItemInsights     []ItemInsight      `json:"per_item_insights,omitempty"`     // Per-product AI insights
 	MissingItemsGrouped []MissingItemGroup `json:"missing_items_grouped,omitempty"` // Missing items grouped by severity
+
+	// Validation Warnings
+	Warnings []ValidationWarning `json:"warnings,omitempty"` // System warnings (date mismatch, etc.)
+}
+
+// ValidationWarning represents a warning about the validation process
+type ValidationWarning struct {
+	Type        string `json:"type"`        // date_mismatch, low_confidence, missing_images
+	Severity    string `json:"severity"`    // warning, error
+	Message     string `json:"message"`     // Human-readable message
+	Details     string `json:"details,omitempty"` // Additional details
+	RecordDate  string `json:"record_date,omitempty"`  // Expected date
+	ReceiptDate string `json:"receipt_date,omitempty"` // Extracted date from image
 }
 
 // ValidationMismatch represents a single discrepancy between entered and OCR data

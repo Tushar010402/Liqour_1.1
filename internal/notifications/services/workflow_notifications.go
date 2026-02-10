@@ -121,25 +121,37 @@ func (w *WorkflowNotificationService) NotifySaleCreated(ctx context.Context, sal
 	return nil
 }
 
-// NotifySaleApproved notifies the creator when their sale is approved
+// NotifySaleApproved notifies the creator and all approvers when a sale is approved
 func (w *WorkflowNotificationService) NotifySaleApproved(ctx context.Context, sale *models.Sale, approver *models.User) error {
 	if sale == nil || sale.TenantID == nil || approver == nil {
 		return fmt.Errorf("invalid sale or approver data")
 	}
 
-	// Modern, concise notification
-	title := "✅ Sale Approved"
-	body := fmt.Sprintf("₹%.0f approved by %s",
+	// Get creator info for notification body
+	var creator models.User
+	if err := w.db.First(&creator, "id = ?", sale.CreatedByID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get sale creator: %v", err)
+	}
+
+	// Get shop info
+	var shop models.Shop
+	if err := w.db.First(&shop, "id = ?", sale.ShopID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get shop: %v", err)
+	}
+
+	// 1. Notify the CREATOR (primary notification)
+	creatorTitle := "✅ Sale Approved"
+	creatorBody := fmt.Sprintf("₹%.0f approved by %s",
 		sale.TotalAmount,
 		approver.FullName(),
 	)
 
-	req := &models.SendNotificationRequest{
+	creatorReq := &models.SendNotificationRequest{
 		UserID:   sale.CreatedByID,
 		Category: models.NotificationCategorySales,
 		Priority: models.NotificationPriorityNormal,
-		Title:    title,
-		Body:     body,
+		Title:    creatorTitle,
+		Body:     creatorBody,
 		Data: map[string]interface{}{
 			"action":         "open_sale_details",
 			"sale_id":        sale.ID.String(),
@@ -152,36 +164,99 @@ func (w *WorkflowNotificationService) NotifySaleApproved(ctx context.Context, sa
 		},
 		ActionURL: fmt.Sprintf("/sales/%s", sale.ID),
 		Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
-		// Modern notification features
 		ThreadID:  fmt.Sprintf("shop_%s_sales", sale.ShopID),
 		ChannelID: "sales",
 	}
 
-	if _, err := w.notificationService.SendNotification(ctx, *sale.TenantID, sale.CreatedByID, req); err != nil {
+	if _, err := w.notificationService.SendNotification(ctx, *sale.TenantID, sale.CreatedByID, creatorReq); err != nil {
 		log.Printf("[WORKFLOW] Failed to notify creator %s for approved sale %s: %v", sale.CreatedByID, sale.ID, err)
-		return err
+	} else {
+		log.Printf("[WORKFLOW] Notified creator %s that sale %s was approved by %s", sale.CreatedByID, sale.SaleNumber, approver.FullName())
 	}
 
-	log.Printf("[WORKFLOW] Notified creator %s that sale %s was approved by %s", sale.CreatedByID, sale.SaleNumber, approver.FullName())
+	// 2. Notify ALL OTHER APPROVERS (activity notification)
+	approvers, err := w.GetApprovers(ctx, *sale.TenantID, &sale.ShopID)
+	if err != nil {
+		log.Printf("[WORKFLOW] Failed to get approvers for sale approval notification: %v", err)
+		return nil // Don't fail the whole operation
+	}
+
+	approverTitle := fmt.Sprintf("✅ Sales Approved • %s", shop.Name)
+	approverBody := fmt.Sprintf("%s approved ₹%.0f by %s",
+		approver.FullName(),
+		sale.TotalAmount,
+		creator.FullName(),
+	)
+
+	for _, a := range approvers {
+		// Skip the approver who did the action and the creator (they already got notified)
+		if a.ID == approver.ID || a.ID == sale.CreatedByID {
+			continue
+		}
+
+		approverReq := &models.SendNotificationRequest{
+			UserID:   a.ID,
+			Category: models.NotificationCategorySales,
+			Priority: models.NotificationPriorityNormal,
+			Title:    approverTitle,
+			Body:     approverBody,
+			Data: map[string]interface{}{
+				"action":         "open_sale_details",
+				"sale_id":        sale.ID.String(),
+				"sale_number":    sale.SaleNumber,
+				"amount":         sale.TotalAmount,
+				"status":         "approved",
+				"approved_by":    approver.FullName(),
+				"approved_by_id": approver.ID.String(),
+				"created_by":     creator.FullName(),
+				"shop_name":      shop.Name,
+				"approved_at":    time.Now().Format(time.RFC3339),
+				"is_activity":    true,
+			},
+			ActionURL: fmt.Sprintf("/sales/%s", sale.ID),
+			Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
+			ThreadID:  fmt.Sprintf("shop_%s_activity", sale.ShopID),
+			ChannelID: "sales",
+		}
+
+		if _, err := w.notificationService.SendNotification(ctx, *sale.TenantID, a.ID, approverReq); err != nil {
+			log.Printf("[WORKFLOW] Failed to notify approver %s about sale approval: %v", a.ID, err)
+		} else {
+			log.Printf("[WORKFLOW] Notified approver %s about sale %s approval", a.ID, sale.SaleNumber)
+		}
+	}
+
 	return nil
 }
 
-// NotifySaleRejected notifies the creator when their sale is rejected
+// NotifySaleRejected notifies the creator and all approvers when a sale is rejected
 func (w *WorkflowNotificationService) NotifySaleRejected(ctx context.Context, sale *models.Sale, rejector *models.User, reason string) error {
 	if sale == nil || sale.TenantID == nil || rejector == nil {
 		return fmt.Errorf("invalid sale or rejector data")
 	}
 
-	// Modern, action-oriented notification
-	title := "⚠️ Sale Needs Edit"
-	body := fmt.Sprintf("%s • Tap to fix", reason)
+	// Get creator info for notification body
+	var creator models.User
+	if err := w.db.First(&creator, "id = ?", sale.CreatedByID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get sale creator: %v", err)
+	}
 
-	req := &models.SendNotificationRequest{
+	// Get shop info
+	var shop models.Shop
+	if err := w.db.First(&shop, "id = ?", sale.ShopID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get shop: %v", err)
+	}
+
+	// 1. Notify the CREATOR (primary notification - action required)
+	creatorTitle := "⚠️ Sale Needs Edit"
+	creatorBody := fmt.Sprintf("%s • Tap to fix", reason)
+
+	creatorReq := &models.SendNotificationRequest{
 		UserID:   sale.CreatedByID,
 		Category: models.NotificationCategorySales,
 		Priority: models.NotificationPriorityHigh,
-		Title:    title,
-		Body:     body,
+		Title:    creatorTitle,
+		Body:     creatorBody,
 		Data: map[string]interface{}{
 			"action":           "open_sale_edit",
 			"sale_id":          sale.ID.String(),
@@ -195,7 +270,6 @@ func (w *WorkflowNotificationService) NotifySaleRejected(ctx context.Context, sa
 		},
 		ActionURL: fmt.Sprintf("/sales/%s/edit", sale.ID),
 		Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
-		// Modern notification features
 		Actions: []models.NotificationAction{
 			{Action: "edit", Label: "Edit Sale", Icon: "ic_edit", Style: "primary", URL: fmt.Sprintf("/sales/%s/edit", sale.ID)},
 		},
@@ -203,12 +277,65 @@ func (w *WorkflowNotificationService) NotifySaleRejected(ctx context.Context, sa
 		ChannelID: "sales",
 	}
 
-	if _, err := w.notificationService.SendNotification(ctx, *sale.TenantID, sale.CreatedByID, req); err != nil {
+	if _, err := w.notificationService.SendNotification(ctx, *sale.TenantID, sale.CreatedByID, creatorReq); err != nil {
 		log.Printf("[WORKFLOW] Failed to notify creator %s for rejected sale %s: %v", sale.CreatedByID, sale.ID, err)
-		return err
+	} else {
+		log.Printf("[WORKFLOW] Notified creator %s that sale %s was rejected by %s: %s", sale.CreatedByID, sale.SaleNumber, rejector.FullName(), reason)
 	}
 
-	log.Printf("[WORKFLOW] Notified creator %s that sale %s was rejected by %s: %s", sale.CreatedByID, sale.SaleNumber, rejector.FullName(), reason)
+	// 2. Notify ALL OTHER APPROVERS (activity notification)
+	approvers, err := w.GetApprovers(ctx, *sale.TenantID, &sale.ShopID)
+	if err != nil {
+		log.Printf("[WORKFLOW] Failed to get approvers for sale rejection notification: %v", err)
+		return nil // Don't fail the whole operation
+	}
+
+	approverTitle := fmt.Sprintf("❌ Sale Rejected • %s", shop.Name)
+	approverBody := fmt.Sprintf("%s rejected ₹%.0f by %s",
+		rejector.FullName(),
+		sale.TotalAmount,
+		creator.FullName(),
+	)
+
+	for _, a := range approvers {
+		// Skip the rejector who did the action and the creator (they already got notified)
+		if a.ID == rejector.ID || a.ID == sale.CreatedByID {
+			continue
+		}
+
+		approverReq := &models.SendNotificationRequest{
+			UserID:   a.ID,
+			Category: models.NotificationCategorySales,
+			Priority: models.NotificationPriorityNormal,
+			Title:    approverTitle,
+			Body:     approverBody,
+			Data: map[string]interface{}{
+				"action":           "open_sale_details",
+				"sale_id":          sale.ID.String(),
+				"sale_number":      sale.SaleNumber,
+				"amount":           sale.TotalAmount,
+				"status":           "rejected",
+				"rejected_by":      rejector.FullName(),
+				"rejected_by_id":   rejector.ID.String(),
+				"rejection_reason": reason,
+				"created_by":       creator.FullName(),
+				"shop_name":        shop.Name,
+				"rejected_at":      time.Now().Format(time.RFC3339),
+				"is_activity":      true,
+			},
+			ActionURL: fmt.Sprintf("/sales/%s", sale.ID),
+			Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
+			ThreadID:  fmt.Sprintf("shop_%s_activity", sale.ShopID),
+			ChannelID: "sales",
+		}
+
+		if _, err := w.notificationService.SendNotification(ctx, *sale.TenantID, a.ID, approverReq); err != nil {
+			log.Printf("[WORKFLOW] Failed to notify approver %s about sale rejection: %v", a.ID, err)
+		} else {
+			log.Printf("[WORKFLOW] Notified approver %s about sale %s rejection", a.ID, sale.SaleNumber)
+		}
+	}
+
 	return nil
 }
 
@@ -305,23 +432,36 @@ func (w *WorkflowNotificationService) NotifyDailySalesCreated(ctx context.Contex
 	return nil
 }
 
-// NotifyDailySalesApproved notifies the creator when their daily sales record is approved
+// NotifyDailySalesApproved notifies the creator and all approvers when a daily sales record is approved
 func (w *WorkflowNotificationService) NotifyDailySalesApproved(ctx context.Context, record *models.DailySalesRecord, approver *models.User) error {
 	if record == nil || record.TenantID == nil || approver == nil {
 		return fmt.Errorf("invalid record or approver data")
 	}
 
-	// Modern, concise notification
-	recordDate := record.RecordDate.Format("02 Jan")
-	title := "✅ Sales Approved"
-	body := fmt.Sprintf("₹%.0f verified • Cash credited", record.TotalSalesAmount)
+	// Get creator info for notification body
+	var creator models.User
+	if err := w.db.First(&creator, "id = ?", record.CreatedByID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get daily sales creator: %v", err)
+	}
 
-	req := &models.SendNotificationRequest{
+	// Get shop info
+	var shop models.Shop
+	if err := w.db.First(&shop, "id = ?", record.ShopID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get shop: %v", err)
+	}
+
+	recordDate := record.RecordDate.Format("02 Jan")
+
+	// 1. Notify the CREATOR (primary notification)
+	creatorTitle := "✅ Sales Approved"
+	creatorBody := fmt.Sprintf("₹%.0f verified • Cash credited", record.TotalSalesAmount)
+
+	creatorReq := &models.SendNotificationRequest{
 		UserID:   record.CreatedByID,
 		Category: models.NotificationCategorySales,
 		Priority: models.NotificationPriorityNormal,
-		Title:    title,
-		Body:     body,
+		Title:    creatorTitle,
+		Body:     creatorBody,
 		Data: map[string]interface{}{
 			"action":         "open_daily_sales_details",
 			"record_id":      record.ID.String(),
@@ -334,37 +474,102 @@ func (w *WorkflowNotificationService) NotifyDailySalesApproved(ctx context.Conte
 		},
 		ActionURL: fmt.Sprintf("/daily-sales/%s", record.ID),
 		Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
-		// Modern notification features
 		ThreadID:  fmt.Sprintf("shop_%s_sales", record.ShopID),
 		ChannelID: "sales",
 	}
 
-	if _, err := w.notificationService.SendNotification(ctx, *record.TenantID, record.CreatedByID, req); err != nil {
+	if _, err := w.notificationService.SendNotification(ctx, *record.TenantID, record.CreatedByID, creatorReq); err != nil {
 		log.Printf("[WORKFLOW] Failed to notify creator %s for approved daily sales %s: %v", record.CreatedByID, record.ID, err)
-		return err
+	} else {
+		log.Printf("[WORKFLOW] Notified creator %s that daily sales %s was approved by %s", record.CreatedByID, record.ID, approver.FullName())
 	}
 
-	log.Printf("[WORKFLOW] Notified creator %s that daily sales %s was approved by %s", record.CreatedByID, record.ID, approver.FullName())
+	// 2. Notify ALL OTHER APPROVERS (activity notification)
+	approvers, err := w.GetApprovers(ctx, *record.TenantID, &record.ShopID)
+	if err != nil {
+		log.Printf("[WORKFLOW] Failed to get approvers for daily sales approval notification: %v", err)
+		return nil // Don't fail the whole operation
+	}
+
+	approverTitle := fmt.Sprintf("✅ Daily Sales Approved • %s", shop.Name)
+	approverBody := fmt.Sprintf("%s approved ₹%.0f (%s) by %s",
+		approver.FullName(),
+		record.TotalSalesAmount,
+		recordDate,
+		creator.FullName(),
+	)
+
+	for _, a := range approvers {
+		// Skip the approver who did the action and the creator (they already got notified)
+		if a.ID == approver.ID || a.ID == record.CreatedByID {
+			continue
+		}
+
+		approverReq := &models.SendNotificationRequest{
+			UserID:   a.ID,
+			Category: models.NotificationCategorySales,
+			Priority: models.NotificationPriorityNormal,
+			Title:    approverTitle,
+			Body:     approverBody,
+			Data: map[string]interface{}{
+				"action":         "open_daily_sales_details",
+				"record_id":      record.ID.String(),
+				"record_date":    recordDate,
+				"amount":         record.TotalSalesAmount,
+				"status":         "approved",
+				"approved_by":    approver.FullName(),
+				"approved_by_id": approver.ID.String(),
+				"created_by":     creator.FullName(),
+				"shop_name":      shop.Name,
+				"approved_at":    time.Now().Format(time.RFC3339),
+				"is_activity":    true,
+			},
+			ActionURL: fmt.Sprintf("/daily-sales/%s", record.ID),
+			Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
+			ThreadID:  fmt.Sprintf("shop_%s_activity", record.ShopID),
+			ChannelID: "sales",
+		}
+
+		if _, err := w.notificationService.SendNotification(ctx, *record.TenantID, a.ID, approverReq); err != nil {
+			log.Printf("[WORKFLOW] Failed to notify approver %s about daily sales approval: %v", a.ID, err)
+		} else {
+			log.Printf("[WORKFLOW] Notified approver %s about daily sales %s approval", a.ID, record.ID)
+		}
+	}
+
 	return nil
 }
 
-// NotifyDailySalesRejected notifies the creator when their daily sales record is rejected
+// NotifyDailySalesRejected notifies the creator and all approvers when a daily sales record is rejected
 func (w *WorkflowNotificationService) NotifyDailySalesRejected(ctx context.Context, record *models.DailySalesRecord, rejector *models.User, reason string) error {
 	if record == nil || record.TenantID == nil || rejector == nil {
 		return fmt.Errorf("invalid record or rejector data")
 	}
 
-	// Modern, action-oriented notification
-	recordDate := record.RecordDate.Format("02 Jan")
-	title := "⚠️ Sales Record Issue"
-	body := fmt.Sprintf("%s • Tap to correct", reason)
+	// Get creator info for notification body
+	var creator models.User
+	if err := w.db.First(&creator, "id = ?", record.CreatedByID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get daily sales creator: %v", err)
+	}
 
-	req := &models.SendNotificationRequest{
+	// Get shop info
+	var shop models.Shop
+	if err := w.db.First(&shop, "id = ?", record.ShopID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get shop: %v", err)
+	}
+
+	recordDate := record.RecordDate.Format("02 Jan")
+
+	// 1. Notify the CREATOR (primary notification - action required)
+	creatorTitle := "⚠️ Sales Record Issue"
+	creatorBody := fmt.Sprintf("%s • Tap to correct", reason)
+
+	creatorReq := &models.SendNotificationRequest{
 		UserID:   record.CreatedByID,
 		Category: models.NotificationCategorySales,
 		Priority: models.NotificationPriorityHigh,
-		Title:    title,
-		Body:     body,
+		Title:    creatorTitle,
+		Body:     creatorBody,
 		Data: map[string]interface{}{
 			"action":           "open_daily_sales_edit",
 			"record_id":        record.ID.String(),
@@ -378,7 +583,6 @@ func (w *WorkflowNotificationService) NotifyDailySalesRejected(ctx context.Conte
 		},
 		ActionURL: fmt.Sprintf("/daily-sales/%s/edit", record.ID),
 		Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
-		// Modern notification features
 		Actions: []models.NotificationAction{
 			{Action: "edit", Label: "Edit Record", Icon: "ic_edit", Style: "primary", URL: fmt.Sprintf("/daily-sales/%s/edit", record.ID)},
 		},
@@ -386,12 +590,66 @@ func (w *WorkflowNotificationService) NotifyDailySalesRejected(ctx context.Conte
 		ChannelID: "sales",
 	}
 
-	if _, err := w.notificationService.SendNotification(ctx, *record.TenantID, record.CreatedByID, req); err != nil {
+	if _, err := w.notificationService.SendNotification(ctx, *record.TenantID, record.CreatedByID, creatorReq); err != nil {
 		log.Printf("[WORKFLOW] Failed to notify creator %s for rejected daily sales %s: %v", record.CreatedByID, record.ID, err)
-		return err
+	} else {
+		log.Printf("[WORKFLOW] Notified creator %s that daily sales %s was rejected by %s: %s", record.CreatedByID, record.ID, rejector.FullName(), reason)
 	}
 
-	log.Printf("[WORKFLOW] Notified creator %s that daily sales %s was rejected by %s: %s", record.CreatedByID, record.ID, rejector.FullName(), reason)
+	// 2. Notify ALL OTHER APPROVERS (activity notification)
+	approvers, err := w.GetApprovers(ctx, *record.TenantID, &record.ShopID)
+	if err != nil {
+		log.Printf("[WORKFLOW] Failed to get approvers for daily sales rejection notification: %v", err)
+		return nil // Don't fail the whole operation
+	}
+
+	approverTitle := fmt.Sprintf("❌ Daily Sales Rejected • %s", shop.Name)
+	approverBody := fmt.Sprintf("%s rejected ₹%.0f (%s) by %s",
+		rejector.FullName(),
+		record.TotalSalesAmount,
+		recordDate,
+		creator.FullName(),
+	)
+
+	for _, a := range approvers {
+		// Skip the rejector who did the action and the creator (they already got notified)
+		if a.ID == rejector.ID || a.ID == record.CreatedByID {
+			continue
+		}
+
+		approverReq := &models.SendNotificationRequest{
+			UserID:   a.ID,
+			Category: models.NotificationCategorySales,
+			Priority: models.NotificationPriorityNormal,
+			Title:    approverTitle,
+			Body:     approverBody,
+			Data: map[string]interface{}{
+				"action":           "open_daily_sales_details",
+				"record_id":        record.ID.String(),
+				"record_date":      recordDate,
+				"amount":           record.TotalSalesAmount,
+				"status":           "rejected",
+				"rejected_by":      rejector.FullName(),
+				"rejected_by_id":   rejector.ID.String(),
+				"rejection_reason": reason,
+				"created_by":       creator.FullName(),
+				"shop_name":        shop.Name,
+				"rejected_at":      time.Now().Format(time.RFC3339),
+				"is_activity":      true,
+			},
+			ActionURL: fmt.Sprintf("/daily-sales/%s", record.ID),
+			Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
+			ThreadID:  fmt.Sprintf("shop_%s_activity", record.ShopID),
+			ChannelID: "sales",
+		}
+
+		if _, err := w.notificationService.SendNotification(ctx, *record.TenantID, a.ID, approverReq); err != nil {
+			log.Printf("[WORKFLOW] Failed to notify approver %s about daily sales rejection: %v", a.ID, err)
+		} else {
+			log.Printf("[WORKFLOW] Notified approver %s about daily sales %s rejection", a.ID, record.ID)
+		}
+	}
+
 	return nil
 }
 
@@ -1192,6 +1450,203 @@ func (w *WorkflowNotificationService) NotifyStockVerificationRejected(ctx contex
 	if _, err := w.notificationService.SendNotification(ctx, tenantID, creatorID, req); err != nil {
 		log.Printf("[WORKFLOW] Failed to notify creator %s for rejected verification: %v", creatorID, err)
 		return err
+	}
+
+	return nil
+}
+
+// =============================================================================
+// PENDING SALES REMINDER NOTIFICATIONS
+// =============================================================================
+
+// NotifyPendingSalesReminder sends escalating reminders to approvers for overdue pending sales
+func (w *WorkflowNotificationService) NotifyPendingSalesReminder(ctx context.Context, sale *models.Sale, reminderLevel int) error {
+	if sale == nil || sale.TenantID == nil {
+		return nil
+	}
+
+	pendingHours := int(time.Since(sale.CreatedAt).Hours())
+
+	// Get shop info
+	var shop models.Shop
+	if err := w.db.First(&shop, "id = ?", sale.ShopID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get shop for reminder: %v", err)
+		shop.Name = "Shop"
+	}
+
+	// Get creator info
+	var creator models.User
+	if err := w.db.First(&creator, "id = ?", sale.CreatedByID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get sale creator for reminder: %v", err)
+	}
+
+	// Get all approvers
+	approvers, err := w.GetApprovers(ctx, *sale.TenantID, &sale.ShopID)
+	if err != nil || len(approvers) == 0 {
+		log.Printf("[WORKFLOW] No approvers found for pending sale reminder: %v", err)
+		return nil
+	}
+
+	// Escalating urgency based on reminder level
+	var title, body string
+	var priority models.NotificationPriority
+
+	switch reminderLevel {
+	case 1: // 2 hours
+		title = fmt.Sprintf("⏰ Pending %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f by %s awaits your review", sale.TotalAmount, creator.FullName())
+		priority = models.NotificationPriorityNormal
+	case 2: // 4 hours
+		title = fmt.Sprintf("⚠️ Overdue %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f by %s needs urgent review", sale.TotalAmount, creator.FullName())
+		priority = models.NotificationPriorityHigh
+	case 3: // 8+ hours
+		title = fmt.Sprintf("🚨 Critical %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f by %s requires immediate action", sale.TotalAmount, creator.FullName())
+		priority = models.NotificationPriorityCritical
+	default:
+		title = fmt.Sprintf("⏰ Pending %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f by %s awaits your review", sale.TotalAmount, creator.FullName())
+		priority = models.NotificationPriorityNormal
+	}
+
+	for _, approver := range approvers {
+		// Skip the creator
+		if approver.ID == sale.CreatedByID {
+			continue
+		}
+
+		req := &models.SendNotificationRequest{
+			UserID:   approver.ID,
+			Category: models.NotificationCategoryApproval,
+			Priority: priority,
+			Title:    title,
+			Body:     body,
+			Data: map[string]interface{}{
+				"action":         "open_sale_approval",
+				"sale_id":        sale.ID.String(),
+				"sale_number":    sale.SaleNumber,
+				"amount":         sale.TotalAmount,
+				"pending_hours":  pendingHours,
+				"reminder_level": reminderLevel,
+				"is_reminder":    true,
+				"shop_id":        sale.ShopID.String(),
+				"shop_name":      shop.Name,
+				"created_by":     creator.FullName(),
+			},
+			ActionURL: fmt.Sprintf("/sales/%s/approve", sale.ID),
+			Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
+			Actions: []models.NotificationAction{
+				{Action: "approve", Label: "Approve", Icon: "ic_check", Style: "primary", URL: fmt.Sprintf("/sales/%s/approve", sale.ID)},
+				{Action: "reject", Label: "Reject", Icon: "ic_close", Style: "destructive", URL: fmt.Sprintf("/sales/%s/reject", sale.ID)},
+			},
+			CollapseKey: fmt.Sprintf("pending_sale_reminder_%s", sale.ID),
+			ThreadID:    fmt.Sprintf("shop_%s_approvals", sale.ShopID),
+			ChannelID:   "approvals",
+		}
+
+		if _, err := w.notificationService.SendNotification(ctx, *sale.TenantID, approver.ID, req); err != nil {
+			log.Printf("[WORKFLOW] Failed to send pending sale reminder to approver %s: %v", approver.ID, err)
+		} else {
+			log.Printf("[WORKFLOW] Sent level %d reminder to approver %s for pending sale %s", reminderLevel, approver.ID, sale.SaleNumber)
+		}
+	}
+
+	return nil
+}
+
+// NotifyPendingDailySalesReminder sends escalating reminders to approvers for overdue pending daily sales records
+func (w *WorkflowNotificationService) NotifyPendingDailySalesReminder(ctx context.Context, record *models.DailySalesRecord, reminderLevel int) error {
+	if record == nil || record.TenantID == nil {
+		return nil
+	}
+
+	pendingHours := int(time.Since(record.CreatedAt).Hours())
+	recordDate := record.RecordDate.Format("02 Jan")
+
+	// Get shop info
+	var shop models.Shop
+	if err := w.db.First(&shop, "id = ?", record.ShopID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get shop for reminder: %v", err)
+		shop.Name = "Shop"
+	}
+
+	// Get creator info
+	var creator models.User
+	if err := w.db.First(&creator, "id = ?", record.CreatedByID).Error; err != nil {
+		log.Printf("[WORKFLOW] Failed to get daily sales creator for reminder: %v", err)
+	}
+
+	// Get all approvers
+	approvers, err := w.GetApprovers(ctx, *record.TenantID, &record.ShopID)
+	if err != nil || len(approvers) == 0 {
+		log.Printf("[WORKFLOW] No approvers found for pending daily sales reminder: %v", err)
+		return nil
+	}
+
+	// Escalating urgency based on reminder level
+	var title, body string
+	var priority models.NotificationPriority
+
+	switch reminderLevel {
+	case 1: // 2 hours
+		title = fmt.Sprintf("⏰ Pending %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f (%s) by %s awaits review", record.TotalSalesAmount, recordDate, creator.FullName())
+		priority = models.NotificationPriorityNormal
+	case 2: // 4 hours
+		title = fmt.Sprintf("⚠️ Overdue %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f (%s) needs urgent review", record.TotalSalesAmount, recordDate)
+		priority = models.NotificationPriorityHigh
+	case 3: // 8+ hours
+		title = fmt.Sprintf("🚨 Critical %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f (%s) requires immediate action", record.TotalSalesAmount, recordDate)
+		priority = models.NotificationPriorityCritical
+	default:
+		title = fmt.Sprintf("⏰ Pending %dh • %s", pendingHours, shop.Name)
+		body = fmt.Sprintf("₹%.0f (%s) awaits review", record.TotalSalesAmount, recordDate)
+		priority = models.NotificationPriorityNormal
+	}
+
+	for _, approver := range approvers {
+		// Skip the creator
+		if approver.ID == record.CreatedByID {
+			continue
+		}
+
+		req := &models.SendNotificationRequest{
+			UserID:   approver.ID,
+			Category: models.NotificationCategoryApproval,
+			Priority: priority,
+			Title:    title,
+			Body:     body,
+			Data: map[string]interface{}{
+				"action":         "open_daily_sales_approval",
+				"record_id":      record.ID.String(),
+				"record_date":    recordDate,
+				"amount":         record.TotalSalesAmount,
+				"pending_hours":  pendingHours,
+				"reminder_level": reminderLevel,
+				"is_reminder":    true,
+				"shop_id":        record.ShopID.String(),
+				"shop_name":      shop.Name,
+				"created_by":     creator.FullName(),
+			},
+			ActionURL: fmt.Sprintf("/daily-sales/%s/approve", record.ID),
+			Channels:  []models.NotificationChannel{models.NotificationChannelInApp, models.NotificationChannelPush},
+			Actions: []models.NotificationAction{
+				{Action: "approve", Label: "Approve", Icon: "ic_check", Style: "primary", URL: fmt.Sprintf("/daily-sales/%s/approve", record.ID)},
+				{Action: "view", Label: "View", Icon: "ic_view", Style: "default", URL: fmt.Sprintf("/daily-sales/%s", record.ID)},
+			},
+			CollapseKey: fmt.Sprintf("pending_daily_sales_reminder_%s", record.ID),
+			ThreadID:    fmt.Sprintf("shop_%s_approvals", record.ShopID),
+			ChannelID:   "approvals",
+		}
+
+		if _, err := w.notificationService.SendNotification(ctx, *record.TenantID, approver.ID, req); err != nil {
+			log.Printf("[WORKFLOW] Failed to send pending daily sales reminder to approver %s: %v", approver.ID, err)
+		} else {
+			log.Printf("[WORKFLOW] Sent level %d reminder to approver %s for pending daily sales %s", reminderLevel, approver.ID, record.ID)
+		}
 	}
 
 	return nil

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"text/template"
@@ -632,8 +633,40 @@ func (s *NotificationService) sendPushToAllDevices(ctx context.Context, notifica
 		return
 	}
 
-	// Send to each device
+	// CRITICAL: Deduplicate by FCM token to prevent sending same notification multiple times
+	// This handles cases where multiple device records have the same token (race conditions)
+	seenTokens := make(map[string]bool)
+	var uniqueDevices []models.NotificationDevice
 	for _, device := range devices {
+		if device.FCMToken == "" {
+			continue
+		}
+		if !seenTokens[device.FCMToken] {
+			seenTokens[device.FCMToken] = true
+			uniqueDevices = append(uniqueDevices, device)
+		}
+	}
+
+	if len(uniqueDevices) == 0 {
+		return
+	}
+
+	// Send to each unique device token
+	for _, device := range uniqueDevices {
+		// CRITICAL: Check if we already delivered this notification to this token
+		// This prevents duplicates even if sendPushToAllDevices is called multiple times
+		var existingDelivery models.NotificationDelivery
+		if err := s.db.WithContext(ctx).
+			Where("notification_id = ? AND channel = 'push' AND recipient = ?", notification.ID, device.FCMToken).
+			First(&existingDelivery).Error; err == nil {
+			// Already delivered to this token, skip
+			tokenPreview := device.FCMToken
+			if len(tokenPreview) > 20 {
+				tokenPreview = tokenPreview[:20]
+			}
+			log.Printf("[PUSH] Skipping duplicate delivery for notification %s to token %s...", notification.ID, tokenPreview)
+			continue
+		}
 		now := time.Now()
 		delivery := &models.NotificationDelivery{
 			TenantID:       notification.TenantID,
@@ -656,8 +689,16 @@ func (s *NotificationService) sendPushToAllDevices(ctx context.Context, notifica
 			failedAt := time.Now()
 			delivery.FailedAt = &failedAt
 
-			// Mark token as invalid if FCM reports it as unregistered
-			if strings.Contains(err.Error(), "NotRegistered") || strings.Contains(err.Error(), "InvalidRegistration") {
+			// Mark token as invalid if FCM reports it as unregistered or invalid
+			// Check for both legacy FCM and Firebase v1 API error codes
+			errStr := err.Error()
+			isInvalidToken := strings.Contains(errStr, "NotRegistered") ||
+				strings.Contains(errStr, "InvalidRegistration") ||
+				strings.Contains(errStr, "UNREGISTERED") ||
+				strings.Contains(errStr, "INVALID_ARGUMENT") ||
+				strings.Contains(errStr, "not a valid FCM registration token")
+			if isInvalidToken {
+				log.Printf("[PUSH] Deactivating invalid token for device %s: %s", device.ID, errStr)
 				device.IsActive = false
 				s.db.WithContext(ctx).Save(&device)
 			}
@@ -991,35 +1032,74 @@ func generateVerificationCode() string {
 func (s *NotificationService) RegisterDevice(ctx context.Context, tenantID, userID uuid.UUID, req *models.RegisterDeviceRequest) error {
 	now := time.Now()
 
-	// Check if device already exists for this user
-	var existingDevice models.NotificationDevice
-	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND device_id = ?", userID, req.DeviceID).
-		First(&existingDevice).Error
-
-	if err == nil {
-		// Update existing device
-		existingDevice.FCMToken = req.FCMToken
-		existingDevice.Platform = req.Platform
-		existingDevice.DeviceName = req.DeviceName
-		existingDevice.AppVersion = req.AppVersion
-		existingDevice.IsActive = true
-		existingDevice.LastUsedAt = &now
-		existingDevice.UpdatedAt = now
-		return s.db.WithContext(ctx).Save(&existingDevice).Error
-	}
-
-	if err != gorm.ErrRecordNotFound {
-		return fmt.Errorf("failed to check existing device: %w", err)
-	}
-
-	// Check if FCM token exists for different device (token reuse)
-	// If so, deactivate the old device
+	// FIRST: Deactivate ALL other devices with this FCM token (for any user)
+	// FCM tokens are unique per app installation, so if token exists elsewhere, it's stale
 	s.db.WithContext(ctx).Model(&models.NotificationDevice{}).
-		Where("fcm_token = ? AND device_id != ?", req.FCMToken, req.DeviceID).
+		Where("fcm_token = ? AND (user_id != ? OR device_id != ?)", req.FCMToken, userID, req.DeviceID).
 		Updates(map[string]interface{}{
-			"is_active":   false,
-			"updated_at":  now,
+			"is_active":  false,
+			"updated_at": now,
+		})
+
+	// Check if device already exists for this user BY FCM TOKEN (primary key for dedup)
+	var existingByToken models.NotificationDevice
+	errToken := s.db.WithContext(ctx).
+		Where("user_id = ? AND fcm_token = ?", userID, req.FCMToken).
+		First(&existingByToken).Error
+
+	if errToken == nil {
+		// Update existing device (found by token)
+		existingByToken.DeviceID = req.DeviceID // Update device ID if it changed
+		existingByToken.Platform = req.Platform
+		existingByToken.DeviceName = req.DeviceName
+		existingByToken.AppVersion = req.AppVersion
+		existingByToken.IsActive = true
+		existingByToken.LastUsedAt = &now
+		existingByToken.UpdatedAt = now
+		return s.db.WithContext(ctx).Save(&existingByToken).Error
+	}
+
+	// Check if device already exists for this user BY DEVICE ID
+	var existingByDeviceID models.NotificationDevice
+	errDevice := s.db.WithContext(ctx).
+		Where("user_id = ? AND device_id = ?", userID, req.DeviceID).
+		First(&existingByDeviceID).Error
+
+	if errDevice == nil {
+		// Check if token changed
+		oldToken := existingByDeviceID.FCMToken
+		tokenChanged := oldToken != req.FCMToken
+
+		if tokenChanged {
+			log.Printf("[DEVICE] FCM token changed for user %s device %s (platform: %s)", userID, req.DeviceID, req.Platform)
+		}
+
+		// Update existing device
+		existingByDeviceID.FCMToken = req.FCMToken
+		existingByDeviceID.Platform = req.Platform
+		existingByDeviceID.DeviceName = req.DeviceName
+		existingByDeviceID.AppVersion = req.AppVersion
+		existingByDeviceID.IsActive = true
+		existingByDeviceID.LastUsedAt = &now
+		existingByDeviceID.UpdatedAt = now
+		if err := s.db.WithContext(ctx).Save(&existingByDeviceID).Error; err != nil {
+			return err
+		}
+
+		// If token changed, re-send recent undelivered notifications
+		if tokenChanged {
+			go s.resendRecentNotifications(context.Background(), tenantID, userID, oldToken, req.FCMToken)
+		}
+		return nil
+	}
+
+	// Also deactivate any OLD devices for this user on the same platform
+	// (keep only the most recent device per platform)
+	s.db.WithContext(ctx).Model(&models.NotificationDevice{}).
+		Where("user_id = ? AND platform = ? AND device_id != ?", userID, req.Platform, req.DeviceID).
+		Updates(map[string]interface{}{
+			"is_active":  false,
+			"updated_at": now,
 		})
 
 	// Create new device
@@ -1049,6 +1129,132 @@ func (s *NotificationService) UnregisterDevice(ctx context.Context, tenantID, us
 			"is_active":  false,
 			"updated_at": now,
 		}).Error
+}
+
+// CleanupDuplicateDevices removes duplicate active device registrations
+// Keeps only the most recently used device per user per platform
+func (s *NotificationService) CleanupDuplicateDevices(ctx context.Context) (int64, error) {
+	now := time.Now()
+
+	// SQL to deactivate duplicates - keep only the device with the latest last_used_at per user+platform
+	// This uses a subquery to find the "winning" device per user+platform combo
+	result := s.db.WithContext(ctx).Exec(`
+		UPDATE notification_devices nd
+		SET is_active = false, updated_at = ?
+		WHERE nd.is_active = true
+		AND nd.id NOT IN (
+			SELECT DISTINCT ON (user_id, platform) id
+			FROM notification_devices
+			WHERE is_active = true
+			ORDER BY user_id, platform, last_used_at DESC NULLS LAST, created_at DESC
+		)
+	`, now)
+
+	if result.Error != nil {
+		log.Printf("[DEVICE CLEANUP] Error cleaning up duplicates: %v", result.Error)
+		return 0, result.Error
+	}
+
+	log.Printf("[DEVICE CLEANUP] Deactivated %d duplicate device registrations", result.RowsAffected)
+	return result.RowsAffected, nil
+}
+
+// resendRecentNotifications re-sends recent unread notifications when FCM token changes
+// This ensures users don't miss notifications sent while their token was stale
+func (s *NotificationService) resendRecentNotifications(ctx context.Context, tenantID, userID uuid.UUID, oldToken, newToken string) {
+	// Find recent unread notifications (last 24 hours) that were sent to the old token
+	var deliveries []models.NotificationDelivery
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	err := s.db.WithContext(ctx).
+		Where("tenant_id = ? AND channel = 'push' AND recipient = ? AND status = 'sent' AND created_at > ?",
+			tenantID, oldToken, cutoff).
+		Order("created_at DESC").
+		Limit(10). // Limit to avoid spam
+		Find(&deliveries).Error
+
+	if err != nil || len(deliveries) == 0 {
+		return
+	}
+
+	log.Printf("[DEVICE] Re-sending %d recent notifications to new token for user %s", len(deliveries), userID)
+
+	// Get the push provider
+	s.channelsMu.RLock()
+	provider, exists := s.channels[models.NotificationChannelPush]
+	s.channelsMu.RUnlock()
+
+	if !exists || !provider.IsEnabled() {
+		log.Printf("[DEVICE] Push provider not available for re-send")
+		return
+	}
+
+	// Track already processed notification IDs to prevent duplicates
+	processedNotifications := make(map[uuid.UUID]bool)
+
+	// Re-send each notification
+	for _, delivery := range deliveries {
+		// Skip if already processed (prevents duplicate resends)
+		if processedNotifications[delivery.NotificationID] {
+			continue
+		}
+		processedNotifications[delivery.NotificationID] = true
+
+		// Get the original notification
+		var notification models.Notification
+		if err := s.db.WithContext(ctx).First(&notification, "id = ?", delivery.NotificationID).Error; err != nil {
+			continue
+		}
+
+		// Skip if already read
+		if notification.ReadAt != nil {
+			continue
+		}
+
+		// Skip if already delivered to the new token
+		var existingDelivery models.NotificationDelivery
+		if err := s.db.WithContext(ctx).
+			Where("notification_id = ? AND channel = 'push' AND recipient = ?", notification.ID, newToken).
+			First(&existingDelivery).Error; err == nil {
+			// Already delivered to this token
+			continue
+		}
+
+		// Send to new token
+		now := time.Now()
+		newDelivery := &models.NotificationDelivery{
+			TenantID:       tenantID,
+			NotificationID: notification.ID,
+			Channel:        models.NotificationChannelPush,
+			Status:         models.DeliveryStatusPending,
+			Recipient:      newToken,
+			Provider:       provider.GetName(),
+			AttemptCount:   1,
+			LastAttemptAt:  &now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+		s.db.WithContext(ctx).Create(newDelivery)
+
+		result, err := provider.Send(ctx, &notification, newToken)
+		if err != nil {
+			newDelivery.Status = models.DeliveryStatusFailed
+			newDelivery.ErrorMessage = err.Error()
+			failedAt := time.Now()
+			newDelivery.FailedAt = &failedAt
+			log.Printf("[DEVICE] Re-send failed for notification %s: %v", notification.ID, err)
+		} else {
+			newDelivery.Status = models.DeliveryStatusSent
+			sentAt := time.Now()
+			newDelivery.SentAt = &sentAt
+			if result != nil {
+				newDelivery.ExternalID = result.ExternalID
+			}
+			log.Printf("[DEVICE] Re-sent notification %s to new token", notification.ID)
+		}
+		newDelivery.UpdatedAt = time.Now()
+		s.db.WithContext(ctx).Save(newDelivery)
+	}
 }
 
 // GetUserDevices returns all active devices for a user

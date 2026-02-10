@@ -203,11 +203,11 @@ func (s *SalesService) CreateSale(ctx context.Context, req SaleRequest, tenantID
 			return fmt.Errorf("failed to create sale: %w", err)
 		}
 
-		// Create sale items
+		// Create sale items in batch (single INSERT instead of N)
+		saleItems := make([]models.SaleItem, 0, len(req.Items))
 		for _, itemReq := range req.Items {
 			totalPrice := (float64(itemReq.Quantity) * itemReq.UnitPrice) - itemReq.DiscountAmount
-
-			item := models.SaleItem{
+			saleItems = append(saleItems, models.SaleItem{
 				TenantModel:    models.TenantModel{TenantID: &tenantID},
 				SaleID:         sale.ID,
 				ProductID:      itemReq.ProductID,
@@ -216,10 +216,11 @@ func (s *SalesService) CreateSale(ctx context.Context, req SaleRequest, tenantID
 				DiscountAmount: itemReq.DiscountAmount,
 				DiscountReason: itemReq.DiscountReason,
 				TotalPrice:     totalPrice,
-			}
-
-			if err := tx.Create(&item).Error; err != nil {
-				return fmt.Errorf("failed to create sale item: %w", err)
+			})
+		}
+		if len(saleItems) > 0 {
+			if err := tx.CreateInBatches(&saleItems, 100).Error; err != nil {
+				return fmt.Errorf("failed to create sale items: %w", err)
 			}
 		}
 
@@ -268,12 +269,9 @@ func (s *SalesService) GetSales(ctx context.Context, tenantID uuid.UUID, filters
 	var totalCount int64
 
 	query := s.db.Model(&models.Sale{}).
-		Where("tenant_id = ?", tenantID).
-		Preload("Shop").
-		Preload("Salesman").
-		Preload("CreatedBy").
-		Preload("ApprovedBy").
-		Preload("RejectedBy").
+		Where("sales.tenant_id = ?", tenantID).
+		Joins("Shop").Joins("Salesman").Joins("CreatedBy").
+		Joins("ApprovedBy").Joins("RejectedBy").
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category")
 
@@ -313,8 +311,8 @@ func (s *SalesService) GetSales(ctx context.Context, tenantID uuid.UUID, filters
 
 	// Convert to response format
 	responses := make([]*SaleResponse, len(sales))
-	for i, sale := range sales {
-		responses[i] = s.mapSaleToResponse(&sale)
+	for i := range sales {
+		responses[i] = s.mapSaleToResponse(&sales[i])
 	}
 
 	totalPages := int((totalCount + int64(filters.PageSize) - 1) / int64(filters.PageSize))
@@ -333,11 +331,8 @@ func (s *SalesService) GetSaleByID(ctx context.Context, saleID, tenantID uuid.UU
 	var sale models.Sale
 
 	err := s.db.Where("id = ? AND tenant_id = ?", saleID, tenantID).
-		Preload("Shop").
-		Preload("Salesman").
-		Preload("CreatedBy").
-		Preload("ApprovedBy").
-		Preload("RejectedBy").
+		Joins("Shop").Joins("Salesman").Joins("CreatedBy").
+		Joins("ApprovedBy").Joins("RejectedBy").
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category").
 		Preload("Payments").
@@ -566,27 +561,24 @@ func (s *SalesService) RevertSale(ctx context.Context, saleID, tenantID, reverte
 // GetPendingSales returns pending sales requiring approval
 func (s *SalesService) GetPendingSales(ctx context.Context, tenantID uuid.UUID, shopID *uuid.UUID) ([]*SaleResponse, error) {
 	query := s.db.Model(&models.Sale{}).
-		Where("tenant_id = ? AND status = ?", tenantID, models.StatusPending).
-		Preload("Shop").
-		Preload("Salesman").
-		Preload("CreatedBy").
-		Preload("ApprovedBy").
-		Preload("RejectedBy").
+		Where("sales.tenant_id = ? AND sales.status = ?", tenantID, models.StatusPending).
+		Joins("Shop").Joins("Salesman").Joins("CreatedBy").
+		Joins("ApprovedBy").Joins("RejectedBy").
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category")
 
 	if shopID != nil {
-		query = query.Where("shop_id = ?", *shopID)
+		query = query.Where("sales.shop_id = ?", *shopID)
 	}
 
 	var sales []models.Sale
-	if err := query.Order("created_at ASC").Find(&sales).Error; err != nil {
+	if err := query.Order("sales.created_at ASC").Limit(500).Find(&sales).Error; err != nil {
 		return nil, fmt.Errorf("failed to get pending sales: %w", err)
 	}
 
 	responses := make([]*SaleResponse, len(sales))
-	for i, sale := range sales {
-		responses[i] = s.mapSaleToResponse(&sale)
+	for i := range sales {
+		responses[i] = s.mapSaleToResponse(&sales[i])
 	}
 
 	return responses, nil
@@ -595,27 +587,24 @@ func (s *SalesService) GetPendingSales(ctx context.Context, tenantID uuid.UUID, 
 // GetUncollectedSales returns sales with due amounts
 func (s *SalesService) GetUncollectedSales(ctx context.Context, tenantID uuid.UUID, shopID *uuid.UUID) ([]*SaleResponse, error) {
 	query := s.db.Model(&models.Sale{}).
-		Where("tenant_id = ? AND due_amount > 0 AND status = ?", tenantID, models.StatusApproved).
-		Preload("Shop").
-		Preload("Salesman").
-		Preload("CreatedBy").
-		Preload("ApprovedBy").
-		Preload("RejectedBy").
+		Where("sales.tenant_id = ? AND sales.due_amount > 0 AND sales.status = ?", tenantID, models.StatusApproved).
+		Joins("Shop").Joins("Salesman").Joins("CreatedBy").
+		Joins("ApprovedBy").Joins("RejectedBy").
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category")
 
 	if shopID != nil {
-		query = query.Where("shop_id = ?", *shopID)
+		query = query.Where("sales.shop_id = ?", *shopID)
 	}
 
 	var sales []models.Sale
-	if err := query.Order("sale_date ASC").Find(&sales).Error; err != nil {
+	if err := query.Order("sales.sale_date ASC").Limit(500).Find(&sales).Error; err != nil {
 		return nil, fmt.Errorf("failed to get uncollected sales: %w", err)
 	}
 
 	responses := make([]*SaleResponse, len(sales))
-	for i, sale := range sales {
-		responses[i] = s.mapSaleToResponse(&sale)
+	for i := range sales {
+		responses[i] = s.mapSaleToResponse(&sales[i])
 	}
 
 	return responses, nil
@@ -684,21 +673,29 @@ func (s *SalesService) UpdateSale(
 		return nil, errors.New("invalid payment method")
 	}
 
+	// Validate all products exist before starting transaction (batch query)
+	productIDs := make([]uuid.UUID, len(req.Items))
+	for i, itemReq := range req.Items {
+		productIDs[i] = itemReq.ProductID
+	}
+	var validProducts []models.Product
+	if err := s.db.Where("id IN ? AND tenant_id = ?", productIDs, tenantID).Find(&validProducts).Error; err != nil {
+		return nil, fmt.Errorf("failed to verify products: %w", err)
+	}
+	if len(validProducts) != len(productIDs) {
+		return nil, errors.New("one or more products not found")
+	}
+
+	// Calculate totals outside transaction
+	var subTotal, totalDiscount float64
+	for _, itemReq := range req.Items {
+		itemTotal := float64(itemReq.Quantity) * itemReq.UnitPrice
+		subTotal += itemTotal
+		totalDiscount += itemReq.DiscountAmount
+	}
+
 	// Start transaction
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		// Calculate new totals
-		var subTotal, totalDiscount float64
-		for _, itemReq := range req.Items {
-			// Verify product exists
-			var product models.Product
-			if err := tx.Where("id = ? AND tenant_id = ?", itemReq.ProductID, tenantID).First(&product).Error; err != nil {
-				return fmt.Errorf("product %s not found", itemReq.ProductID)
-			}
-
-			itemTotal := float64(itemReq.Quantity) * itemReq.UnitPrice
-			subTotal += itemTotal
-			totalDiscount += itemReq.DiscountAmount
-		}
 
 		totalAmount := subTotal - totalDiscount
 		dueAmount := totalAmount - req.PaidAmount
@@ -745,7 +742,6 @@ func (s *SalesService) UpdateSale(
 			updates["rejected_at"] = nil
 			updates["rejected_by_id"] = nil
 			updates["rejection_reason"] = ""
-			log.Printf("✅ [Sales] Sale %s resubmitted by creator %s", sale.SaleNumber, userID)
 		}
 
 		// Apply updates
@@ -753,11 +749,11 @@ func (s *SalesService) UpdateSale(
 			return fmt.Errorf("failed to update sale: %w", err)
 		}
 
-		// Create new sale items
+		// Create new sale items in batch (single INSERT instead of N)
+		newItems := make([]models.SaleItem, 0, len(req.Items))
 		for _, itemReq := range req.Items {
 			totalPrice := (float64(itemReq.Quantity) * itemReq.UnitPrice) - itemReq.DiscountAmount
-
-			item := models.SaleItem{
+			newItems = append(newItems, models.SaleItem{
 				TenantModel:    models.TenantModel{TenantID: &tenantID},
 				SaleID:         saleID,
 				ProductID:      itemReq.ProductID,
@@ -766,10 +762,11 @@ func (s *SalesService) UpdateSale(
 				DiscountAmount: itemReq.DiscountAmount,
 				DiscountReason: itemReq.DiscountReason,
 				TotalPrice:     totalPrice,
-			}
-
-			if err := tx.Create(&item).Error; err != nil {
-				return fmt.Errorf("failed to create sale item: %w", err)
+			})
+		}
+		if len(newItems) > 0 {
+			if err := tx.CreateInBatches(&newItems, 100).Error; err != nil {
+				return fmt.Errorf("failed to create sale items: %w", err)
 			}
 		}
 
@@ -800,7 +797,6 @@ func (s *SalesService) UpdateSale(
 			}
 		}
 
-		log.Printf("✅ [Sales] Sale %s updated by user %s (role: %s)", sale.SaleNumber, userID, userRole)
 		return nil
 	})
 
@@ -819,8 +815,8 @@ func (s *SalesService) UpdateSale(
 
 // SalesFilters represents filters for sales
 type SalesFilters struct {
-	ShopID        uuid.UUID `form:"shop_id"`
-	SalesmanID    uuid.UUID `form:"salesman_id"`
+	ShopID        uuid.UUID `form:"-"`
+	SalesmanID    uuid.UUID `form:"-"`
 	Status        string    `form:"status"`
 	PaymentStatus string    `form:"payment_status"`
 	StartDate     time.Time `form:"start_date" time_format:"2006-01-02"`
@@ -901,6 +897,25 @@ func (s *SalesService) mapSaleToResponse(sale *models.Sale) *SaleResponse {
 
 	// Add items
 	if len(sale.Items) > 0 {
+		// Batch-load SaaS category names for items missing local categories (eliminates N+1)
+		saasCategories := make(map[uuid.UUID]string)
+		var missingCatIDs []uuid.UUID
+		for _, item := range sale.Items {
+			if item.Product != nil && item.Product.Category == nil && item.Product.CategoryID != uuid.Nil {
+				missingCatIDs = append(missingCatIDs, item.Product.CategoryID)
+			}
+		}
+		if len(missingCatIDs) > 0 {
+			var catResults []struct {
+				ID   uuid.UUID `gorm:"column:id"`
+				Name string    `gorm:"column:name"`
+			}
+			s.db.Table("brand_categories").Select("id, name").Where("id IN ?", missingCatIDs).Scan(&catResults)
+			for _, cr := range catResults {
+				saasCategories[cr.ID] = cr.Name
+			}
+		}
+
 		response.Items = make([]SaleItemResponse, len(sale.Items))
 		for i, item := range sale.Items {
 			response.Items[i] = SaleItemResponse{
@@ -923,14 +938,10 @@ func (s *SalesService) mapSaleToResponse(sale *models.Sale) *SaleResponse {
 					response.Items[i].BrandName = item.Product.Brand.Name
 				}
 
-				// Try local category first, then fall back to SaaS brand_categories
 				if item.Product.Category != nil {
 					response.Items[i].CategoryName = item.Product.Category.Name
-				} else if item.Product.CategoryID != uuid.Nil {
-					// Fallback to SaaS brand_categories table for products using SaaS-level category_id
-					if saasCategoryName := s.getSaaSCategoryName(item.Product.CategoryID); saasCategoryName != "" {
-						response.Items[i].CategoryName = saasCategoryName
-					}
+				} else if name, ok := saasCategories[item.Product.CategoryID]; ok {
+					response.Items[i].CategoryName = name
 				}
 			}
 		}

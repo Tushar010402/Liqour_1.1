@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -180,24 +181,40 @@ func (s *VendorService) GetVendors(ctx context.Context, tenantID uuid.UUID, incl
 		return nil, fmt.Errorf("failed to get vendors: %w", err)
 	}
 
-	// Calculate totals for each vendor
+	// Batch-fetch totals for all vendors (eliminates N+1 queries)
+	type purchaseTotal struct {
+		VendorID       uuid.UUID `gorm:"column:vendor_id"`
+		TotalPurchases float64   `gorm:"column:total_purchases"`
+	}
+	var purchaseTotals []purchaseTotal
+	s.db.DB.Model(&models.StockPurchase{}).
+		Select("vendor_id, COALESCE(SUM(total_amount), 0) as total_purchases").
+		Where("tenant_id = ?", tenantID).
+		Group("vendor_id").
+		Scan(&purchaseTotals)
+	purchaseMap := make(map[uuid.UUID]float64, len(purchaseTotals))
+	for _, pt := range purchaseTotals {
+		purchaseMap[pt.VendorID] = pt.TotalPurchases
+	}
+
+	type balanceResult struct {
+		VendorID           uuid.UUID `gorm:"column:vendor_id"`
+		OutstandingBalance float64   `gorm:"column:outstanding_balance"`
+	}
+	var balanceResults []balanceResult
+	s.db.DB.Model(&models.VendorTransaction{}).
+		Select("vendor_id, COALESCE(SUM(CASE WHEN transaction_type = 'purchase' THEN amount WHEN transaction_type = 'payment' THEN -amount ELSE 0 END), 0) as outstanding_balance").
+		Where("tenant_id = ?", tenantID).
+		Group("vendor_id").
+		Scan(&balanceResults)
+	balanceMap := make(map[uuid.UUID]float64, len(balanceResults))
+	for _, br := range balanceResults {
+		balanceMap[br.VendorID] = br.OutstandingBalance
+	}
+
 	var responses []VendorResponse
 	for _, vendor := range vendors {
-		// Get total purchases
-		var totalPurchases float64
-		s.db.DB.Model(&models.StockPurchase{}).
-			Where("vendor_id = ? AND tenant_id = ?", vendor.ID, tenantID).
-			Select("COALESCE(SUM(total_amount), 0)").
-			Scan(&totalPurchases)
-
-		// Get outstanding balance
-		var outstandingBalance float64
-		s.db.DB.Model(&models.VendorTransaction{}).
-			Where("vendor_id = ? AND tenant_id = ?", vendor.ID, tenantID).
-			Select("COALESCE(SUM(CASE WHEN transaction_type = 'purchase' THEN amount WHEN transaction_type = 'payment' THEN -amount ELSE 0 END), 0)").
-			Scan(&outstandingBalance)
-
-		response := s.buildVendorResponse(vendor, totalPurchases, outstandingBalance, vendor.BankAccounts)
+		response := s.buildVendorResponse(vendor, purchaseMap[vendor.ID], balanceMap[vendor.ID], vendor.BankAccounts)
 		responses = append(responses, *response)
 	}
 
@@ -573,14 +590,10 @@ func (s *VendorService) GetVendorLedger(ctx context.Context, vendorID, tenantID 
 		allEntries = append(allEntries, entry)
 	}
 
-	// Sort all entries by date
-	for i := 0; i < len(allEntries)-1; i++ {
-		for j := i + 1; j < len(allEntries); j++ {
-			if allEntries[i].Date.After(allEntries[j].Date) {
-				allEntries[i], allEntries[j] = allEntries[j], allEntries[i]
-			}
-		}
-	}
+	// Sort all entries by date (O(n log n) instead of O(n²))
+	sort.Slice(allEntries, func(i, j int) bool {
+		return allEntries[i].Date.Before(allEntries[j].Date)
+	})
 
 	// Calculate running balance and totals
 	var runningBalance, totalDebits, totalCredits float64

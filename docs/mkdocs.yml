@@ -1,0 +1,144 @@
+site_name: LiquorPro Documentation
+site_description: Complete Industrial Documentation for LiquorPro - Liquor Shop Management Platform
+site_author: LiquorPro Team
+site_url: https://docs.liquorpro.io
+
+repo_name: liquorpro/docs
+repo_url: https://github.com/liquorpro/liquorpro
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.annotation
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/liquorpro
+    - icon: fontawesome/brands/docker
+      link: https://hub.docker.com/r/liquorpro
+
+extra_javascript:
+  - assets/javascripts/collaboration.js?v=2.0
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - admonition
+  - pymdownx.arithmatex:
+      generic: true
+  - footnotes
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.mark
+  - attr_list
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.tabbed:
+      alternate_style: true
+  - def_list
+  - tables
+
+nav:
+  - Home: index.md
+  - Product Guide:
+    - Overview: product-guide/index.md
+    - Quick Start: product-guide/quick-start.md
+    - Feature Tour: product-guide/feature-tour.md
+    - FAQ: product-guide/faq.md
+  - System Architecture:
+    - Overview: system/overview.md
+    - Infrastructure: system/infrastructure.md
+    - Security: system/security.md
+    - Scalability: system/scalability.md
+  - Software Specification:
+    - Technical Specification: software/technical-spec.md
+    - Database Design: software/database-design.md
+    - API Design: software/api-design.md
+    - Technology Stack: software/technology-stack.md
+  - User Guide:
+    - Getting Started: user-guide/getting-started.md
+    - Role Journeys: user-guide/role-journeys.md
+    - Daily Operations: user-guide/daily-operations.md
+    - Sales Management: user-guide/sales-management.md
+    - Inventory Management: user-guide/inventory-management.md
+    - Finance Management: user-guide/finance-management.md
+    - Reports & Analytics: user-guide/reports.md
+    - Troubleshooting: user-guide/troubleshooting.md
+  - Product Documentation:
+    - Product Overview: product/overview.md
+    - Features: product/features.md
+    - Roadmap: product/roadmap.md
+    - Release Notes: product/release-notes.md
+  - Workflows:
+    - Sales Workflow: workflows/sales-workflow.md
+    - Approval Workflow: workflows/approval-workflow.md
+    - Inventory Workflow: workflows/inventory-workflow.md
+    - Finance Workflow: workflows/finance-workflow.md
+    - OCR Processing: workflows/ocr-workflow.md
+  - API Reference:
+    - Authentication API: api-reference/auth-api.md
+    - Sales API: api-reference/sales-api.md
+    - Inventory API: api-reference/inventory-api.md
+    - Finance API: api-reference/finance-api.md
+    - WebSocket API: api-reference/websocket-api.md
+  - Deployment:
+    - Installation Guide: deployment/installation.md
+    - Configuration: deployment/configuration.md
+    - Docker Deployment: deployment/docker.md
+    - Kubernetes: deployment/kubernetes.md
+    - Monitoring: deployment/monitoring.md
+  - Development:
+    - Module Architecture: development/module-architecture.md
+    - Implementation Checklist: development/implementation-checklist.md
+    - Module Specifications:
+      - Core Module: development/modules/core-module.md
+      - Auth Module: development/modules/auth-module.md
+      - Tenant Module: development/modules/tenant-module.md
+      - Sales Module: development/modules/sales-module.md
+      - Inventory Module: development/modules/inventory-module.md
+      - Finance Module: development/modules/finance-module.md
+      - Reports Module: development/modules/reports-module.md
+      - Integration Module: development/modules/integration-module.md
+      - Collaboration Module: development/modules/collaboration-module.md
+
+copyright: Copyright &copy; 2024-2025 LiquorPro. All rights reserved.

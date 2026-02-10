@@ -6,8 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/gateway/handlers"
+	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
+	"github.com/liquorpro/go-backend/pkg/shared/database"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
 )
 
@@ -25,7 +27,11 @@ func corsPreflightHandler() gin.HandlerFunc {
 
 // SetupRoutes configures all gateway routes
 // rateLimiter parameter is used for role-based rate limiting AFTER authentication
-func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gatewayHandlers *handlers.GatewayHandlers, rateLimiter *middleware.RedisRateLimiter) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, db *database.DB, gatewayHandlers *handlers.GatewayHandlers, rateLimiter *middleware.RedisRateLimiter) {
+	// Prometheus metrics
+	router.Use(monitoring.PrometheusMiddleware("gateway"))
+	router.GET("/metrics", monitoring.PrometheusHandler())
+
 	// Root-level health check for Docker healthcheck
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -40,6 +46,37 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		gateway.GET("/health", gatewayHandlers.HealthCheck)
 		gateway.GET("/version", gatewayHandlers.GetVersion)
 		gateway.GET("/services", gatewayHandlers.ServiceDiscovery)
+	}
+
+	// Documentation endpoints - with authentication integration
+	docsHandler := handlers.NewDocsHandler(db)
+
+	// Public docs routes (with optional auth for access check)
+	docsPublic := router.Group("/api/docs")
+	docsPublic.Use(middleware.OptionalAuthMiddleware(cfg.JWT, cache))
+	{
+		docsPublic.GET("/access/check", docsHandler.CheckDocsAccess)
+		docsPublic.GET("/comments", docsHandler.GetComments)
+	}
+
+	// Protected docs routes (requires auth + docs access)
+	docsProtected := router.Group("/api/docs")
+	docsProtected.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	{
+		docsProtected.POST("/comments", docsHandler.AddComment)
+		docsProtected.DELETE("/comments/:id", docsHandler.DeleteComment)
+		docsProtected.POST("/comments/:id/resolve", docsHandler.ResolveComment)
+		docsProtected.POST("/edits", docsHandler.SaveEdit)
+		docsProtected.GET("/edits", docsHandler.GetEdits)
+	}
+
+	// Admin docs routes (requires admin role)
+	docsAdmin := router.Group("/api/docs/admin")
+	docsAdmin.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	{
+		docsAdmin.POST("/access", docsHandler.GrantAccess)
+		docsAdmin.GET("/access", docsHandler.ListAccess)
+		docsAdmin.DELETE("/access/:user_id", docsHandler.RevokeAccess)
 	}
 
 	// Authentication service routes (no auth required for login/register)
@@ -209,6 +246,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		sales.POST("/ocr/batch/validate/:id", gatewayHandlers.ProxyRequest("sales"))
 		sales.POST("/ocr/batch/validate-row", gatewayHandlers.ProxyRequest("sales"))
 		sales.GET("/ocr/accuracy/dashboard", gatewayHandlers.ProxyRequest("sales"))
+
+		// Smart Sale (AI-assisted sale creation from images)
+		sales.POST("/smart-sale/process", gatewayHandlers.ProxyRequest("sales"))
+		sales.POST("/smart-sale/finalize", gatewayHandlers.ProxyRequest("sales"))
 	}
 
 	// Reports service routes (protected) - proxied to sales service
@@ -220,6 +261,41 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		// Purcha Report (Daily Sales Register)
 		reports.GET("/purcha/preview", gatewayHandlers.ProxyRequest("sales"))
 		reports.GET("/purcha/pdf", gatewayHandlers.ProxyRequest("sales"))
+	}
+
+	// AI Training Data routes (internal tool - public for static page access)
+	// Security: Restrict access at nginx level to internal IPs only
+	training := router.Group("/api/training")
+	{
+		// V1 routes
+		training.GET("/images", gatewayHandlers.ProxyRequest("sales"))
+		training.GET("/images/export", gatewayHandlers.ProxyRequest("sales"))
+		training.GET("/images/:filename", gatewayHandlers.ProxyRequest("sales"))
+		training.GET("/debug/records", gatewayHandlers.ProxyRequest("sales"))
+
+		// V2 routes - Size detection and processing
+		training.GET("/images/v2", gatewayHandlers.ProxyRequest("sales"))
+		training.GET("/images/export-v2", gatewayHandlers.ProxyRequest("sales"))
+		training.POST("/images/process/:filename", gatewayHandlers.ProxyRequest("sales"))
+		training.POST("/images/process-all", gatewayHandlers.ProxyRequest("sales"))
+		training.POST("/images/detect-size/:filename", gatewayHandlers.ProxyRequest("sales"))
+		training.GET("/mappings/:record_id", gatewayHandlers.ProxyRequest("sales"))
+		training.POST("/mappings/:id/verify", gatewayHandlers.ProxyRequest("sales"))
+		training.GET("/items/:record_id/:size", gatewayHandlers.ProxyRequest("sales"))
+	}
+
+	// AI Training V2 routes - Generic document extraction training (any logged-in user)
+	aiTraining := router.Group("/api/ai-training")
+	aiTraining.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	aiTraining.Use(rateLimiter.RoleBasedMiddleware())
+	aiTraining.Use(middleware.TenantMiddleware())
+	{
+		aiTraining.POST("/upload", gatewayHandlers.ProxyRequest("sales"))
+		aiTraining.GET("/images", gatewayHandlers.ProxyRequest("sales"))
+		aiTraining.GET("/images/:id", gatewayHandlers.ProxyRequest("sales"))
+		aiTraining.PUT("/images/:id/verify", gatewayHandlers.ProxyRequest("sales"))
+		aiTraining.DELETE("/images/:id", gatewayHandlers.ProxyRequest("sales"))
+		aiTraining.GET("/export", gatewayHandlers.ProxyRequest("sales"))
 	}
 
 	// Inventory service routes (protected)
@@ -552,10 +628,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 	{
 		// User notifications
 		notifications.GET("", gatewayHandlers.ProxyRequest("finance"))
+		notifications.GET("/unread-count", gatewayHandlers.ProxyRequest("finance")) // Get unread count only
 		notifications.GET("/counts", gatewayHandlers.ProxyRequest("finance"))
 		notifications.POST("/read", gatewayHandlers.ProxyRequest("finance"))
 		notifications.POST("/read-all", gatewayHandlers.ProxyRequest("finance"))
 		notifications.PATCH("/:id/read", gatewayHandlers.ProxyRequest("finance")) // Mark single notification as read
+		notifications.DELETE("/:id", gatewayHandlers.ProxyRequest("finance"))     // Delete single notification
+		notifications.DELETE("", gatewayHandlers.ProxyRequest("finance"))         // Clear all notifications
 
 		// Device management (FCM token registration)
 		notifications.POST("/register-device", gatewayHandlers.ProxyRequest("finance"))
@@ -748,13 +827,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 	// ==========================================
 	// Physical Audit Routes
 	// ==========================================
-	audit := router.Group("/api/audit")
+	audit := router.Group("/api/audits")
 	audit.Use(middleware.AuthMiddleware(cfg.JWT, cache))
 	audit.Use(rateLimiter.RoleBasedMiddleware()) // Role-based rate limiting AFTER auth
 	audit.Use(middleware.TenantMiddleware())
 	{
 		// Dashboard
 		audit.GET("/dashboard", gatewayHandlers.ProxyRequest("finance"))
+
+		// Pending audits
+		audit.GET("/pending", gatewayHandlers.ProxyRequest("finance"))
 
 		// Schedules (admin/manager only for modification)
 		audit.GET("/schedules", gatewayHandlers.ProxyRequest("finance"))
@@ -969,6 +1051,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 		saas.GET("/subscription", gatewayHandlers.ProxyRequest("saas"))
 	}
 
+	// Static file serving for uploaded images (daily sales, receipts, etc.)
+	router.Static("/uploads", "/var/www/liquorpro/uploads")
+
 	// Default 404 handler for non-API routes
 	router.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Endpoint not found"})
@@ -976,8 +1061,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gat
 }
 
 // SetupAPIRoutes sets up API-only routes (for API-only deployments)
-func SetupAPIRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, gatewayHandlers *handlers.GatewayHandlers, rateLimiter *middleware.RedisRateLimiter) {
+func SetupAPIRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, db *database.DB, gatewayHandlers *handlers.GatewayHandlers, rateLimiter *middleware.RedisRateLimiter) {
 	// This is a variant without frontend routes for pure API deployments
 	// Copy all routes from SetupRoutes except the frontend group
-	SetupRoutes(router, cfg, cache, gatewayHandlers, rateLimiter)
+	SetupRoutes(router, cfg, cache, db, gatewayHandlers, rateLimiter)
 }

@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  docs:
+    build: .
+    container_name: liquorpro-docs
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./docs:/docs/docs:ro
+      - ./mkdocs.yml:/docs/mkdocs.yml:ro
+    restart: unless-stopped
+
+  docs-static:
+    image: nginx:alpine
+    container_name: liquorpro-docs-static
+    ports:
+      - "8080:80"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+    restart: unless-stopped

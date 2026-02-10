@@ -254,88 +254,115 @@ func (c *OpenAIVisionClient) buildExtractionPrompt() string {
 // buildSingleReceiptPrompt creates a focused prompt for single receipt extraction
 // Used after image splitting - simpler, more accurate, lower token usage
 func (c *OpenAIVisionClient) buildSingleReceiptPrompt() string {
-	return `Extract ALL items from this Indian liquor sales receipt.
+	return `Extract ALL items from this Indian liquor sales receipt (handwritten register).
 
-COLUMNS: S.No | Brand | Opening | Receipt | Total | Sale | Rate | Amount | Closing
+RECEIPT FORMAT: Look for "SALE RECEIPT - XXXml" header to determine size (90ml, 180ml, 375ml, 750ml)
+DATE: Extract receipt date from top right (format: DD/MM/YY or DD/M/YY)
 
-RULES:
-1. Extract EVERY row from S.No 1 to Grand Total
-2. Rate = price per bottle (₹80-400 for 180ml)
-3. Amount = Sale × Rate (use this to verify rate)
-4. If rate looks wrong (e.g., 18.00 instead of 180.00), calculate: Amount ÷ Sale
+COLUMNS (left to right): S.No | Brand Name | Opening | Receipt | Total | Sale | Rate | Amount | Closing
 
-COMMON BRANDS: 8 PM, Imperial Blue (IB), Royal Stag (RS), Old Monk (OM), Magic Moments (MM), Blenders Pride (BP), Officers Choice (OC), McDowells (MCD)
+CRITICAL MATH VALIDATION:
+- Opening - Sale = Closing (OR Opening + Receipt - Sale = Closing if Receipt exists)
+- If your extracted Closing ≠ calculated Closing, RE-READ the numbers
+- Amount = Sale × Rate (verify this)
+
+NUMBER READING TIPS (handwritten):
+- "1" vs "7": 1 has no horizontal stroke at top, 7 does
+- "17" looks like "17" not "7" - look for the "1" before
+- "0" vs "6": 0 is round, 6 has a tail
+- Dash "-" in a cell means 0 or blank
+- If a number looks wrong, use math to verify
+
+COMMON BRANDS: 8 PM (Black/Gold/Rare), Imperial Blue (IB), Royal Stag (RS), Old Monk (OM), Magic Moments (MM), Blenders Pride (BP/BPR), Officers Choice (OC), McDowells (MCD), After Dark, Bacardi, Kingfisher
 
 OUTPUT JSON:
 {
-  "receipt_type": "HALF/FULL/QUART",
+  "receipt_type": "90ML/180ML/375ML/750ML",
+  "receipt_date": "DD/MM/YYYY",
   "items": [
     {
       "row_number": 1,
-      "brand_name": "Brand Name",
-      "size": "180ml",
-      "opening_stock": 10,
+      "brand_name": "8 PM Black Whisky",
+      "size": "90ml",
+      "opening_stock": 30,
       "receipt": 0,
-      "total_stock": 10,
-      "sale_qty": 2,
-      "rate": 180.00,
-      "amount": 360.00,
+      "total_stock": 30,
+      "sale_qty": 22,
+      "rate": 90.00,
+      "amount": 1980.00,
       "closing_stock": 8,
+      "math_check": "30-22=8 ✓",
       "confidence": 95.0
     }
   ],
   "total_items": 27,
   "total_amount": 32500.00,
   "grand_total_from_receipt": 32500.00,
-  "warnings": []
+  "warnings": ["List any rows where math doesn't add up"]
 }
 
-Extract ALL items now:`
+Extract ALL items with careful number reading:`
 }
 
 // buildMultiReceiptPrompt creates prompt for images that may contain multiple receipts
 // Used when image splitting is not possible or as fallback
 func (c *OpenAIVisionClient) buildMultiReceiptPrompt() string {
-	return `Extract ALL items from this Indian liquor sales receipt image.
+	return `Extract ALL items from this Indian liquor sales receipt image (handwritten register).
 
 ⚠️ CHECK FIRST: Does this image contain MULTIPLE receipt pages SIDE-BY-SIDE?
 If yes: Extract from BOTH receipts completely (LEFT first, then RIGHT)
 
-COLUMNS: S.No | Brand | Opening | Receipt | Total | Sale | Rate | Amount | Closing
+RECEIPT FORMAT: Look for "SALE RECEIPT - XXXml" header to determine size
+DATE: Extract receipt date from top right corner (format: DD/MM/YY)
+
+COLUMNS (left to right): S.No | Brand Name | Opening | Receipt | Total | Sale | Rate | Amount | Closing
+
+CRITICAL MATH VALIDATION:
+- Opening - Sale = Closing (OR Opening + Receipt - Sale = Closing)
+- If extracted Closing ≠ calculated Closing, RE-READ the numbers
+- Amount = Sale × Rate
+
+NUMBER READING TIPS (handwritten):
+- "1" vs "7": 1 has no horizontal stroke at top, 7 does
+- "17" looks like "17" not "7" - look for the "1" before
+- "0" vs "6": 0 is round, 6 has a tail
+- Dash "-" means 0 or blank
 
 RULES:
 1. Extract EVERY row - if 2 receipts, expect 35-45 items total
-2. For side-by-side: LEFT receipt rows 1-27, then RIGHT receipt continues numbering
-3. Rate = price per bottle (₹80-400 for 180ml)
-4. Amount = Sale × Rate (verify rate using this)
-5. If your total_amount is HALF the grand_total, you missed half the items!
+2. For side-by-side: LEFT receipt rows 1-27, then RIGHT receipt continues
+3. Rate = price per bottle (₹80-400 for 180ml, ₹300-900 for 375ml, ₹500-2000 for 750ml)
+4. Amount = Sale × Rate (use to verify rate)
+5. If total_amount is HALF the grand_total, you missed half the items!
 
 OUTPUT JSON:
 {
-  "receipt_type": "HALF/FULL/QUART",
+  "receipt_type": "90ML/180ML/375ML/750ML",
+  "receipt_date": "DD/MM/YYYY",
   "receipt_count": 2,
   "items": [
     {
       "row_number": 1,
-      "brand_name": "Brand Name",
+      "brand_name": "8 PM Black Whisky",
       "size": "180ml",
-      "opening_stock": 10,
+      "opening_stock": 30,
       "receipt": 0,
-      "total_stock": 10,
-      "sale_qty": 2,
+      "total_stock": 30,
+      "sale_qty": 5,
       "rate": 180.00,
-      "amount": 360.00,
-      "closing_stock": 8,
+      "amount": 900.00,
+      "closing_stock": 25,
+      "math_check": "30-5=25 ✓",
       "confidence": 95.0
     }
   ],
   "total_items": 38,
   "total_amount": 65390.00,
   "grand_total_from_receipt": 65390.00,
-  "warnings": []
+  "warnings": ["List any rows where math doesn't add up"]
 }
 
-Extract ALL items from ALL receipts:`
+Extract ALL items with careful number reading:`
 }
 
 // ExtractSalesFromImageWithPrompt extracts using a specific prompt

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/liquorpro/go-backend/internal/sales/validators"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
 	"github.com/liquorpro/go-backend/pkg/shared/models"
@@ -45,6 +46,53 @@ func NewDailySalesService(db *database.DB, cache *cache.Cache) *DailySalesServic
 // SetWorkflowNotificationService sets the workflow notification service for sending approval notifications
 func (s *DailySalesService) SetWorkflowNotificationService(wn *notifservices.WorkflowNotificationService) {
 	s.workflowNotification = wn
+}
+
+// GetDB returns the underlying database connection for direct queries
+func (s *DailySalesService) GetDB() *database.DB {
+	return s.db
+}
+
+// DebugDatabaseTest runs raw SQL queries to diagnose database connection issues
+func (s *DailySalesService) DebugDatabaseTest(tenantID uuid.UUID) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// Test 1: Raw SQL COUNT
+	var rawCount int64
+	rawErr := s.db.Raw("SELECT COUNT(*) FROM daily_sales_records WHERE tenant_id = ? AND deleted_at IS NULL", tenantID.String()).Scan(&rawCount).Error
+	result["raw_count"] = rawCount
+	result["raw_count_error"] = fmt.Sprintf("%v", rawErr)
+
+	// Test 2: Raw SQL to get IDs
+	var ids []string
+	rawIDsErr := s.db.Raw("SELECT id::text FROM daily_sales_records WHERE tenant_id = ? AND deleted_at IS NULL LIMIT 5", tenantID.String()).Scan(&ids).Error
+	result["raw_ids"] = ids
+	result["raw_ids_error"] = fmt.Sprintf("%v", rawIDsErr)
+
+	// Test 3: GORM Model query count
+	var gormCount int64
+	gormErr := s.db.Model(&models.DailySalesRecord{}).Where("tenant_id = ?", tenantID).Count(&gormCount).Error
+	result["gorm_count"] = gormCount
+	result["gorm_count_error"] = fmt.Sprintf("%v", gormErr)
+
+	// Test 4: Database connection info
+	sqlDB, _ := s.db.DB.DB()
+	stats := sqlDB.Stats()
+	result["db_open_connections"] = stats.OpenConnections
+	result["db_in_use"] = stats.InUse
+	result["db_idle"] = stats.Idle
+
+	// Test 5: Check current database
+	var dbName string
+	s.db.Raw("SELECT current_database()").Scan(&dbName)
+	result["current_database"] = dbName
+
+	// Test 6: Check current user
+	var dbUser string
+	s.db.Raw("SELECT current_user").Scan(&dbUser)
+	result["current_user"] = dbUser
+
+	return result
 }
 
 // DailySalesRecordRequest represents daily sales record creation/update request
@@ -84,6 +132,18 @@ type DailySalesItemRequest struct {
 	CardAmount   float64   `json:"card_amount"`
 	UpiAmount    float64   `json:"upi_amount"`
 	CreditAmount float64   `json:"credit_amount"`
+
+	// Stock audit fields
+	OpeningStock int `json:"opening_stock"`
+	ClosingStock int `json:"closing_stock"`
+
+	// OCR-extracted data (from Smart Sale / GPT-5.2) - for manager review
+	OCRBrandName string  `json:"ocr_brand_name"` // Brand name extracted from image
+	OCRSize      string  `json:"ocr_size"`       // Size extracted from image
+	OCRReceipt   int     `json:"ocr_receipt"`    // New stock received (from image)
+	OCRTotal     int     `json:"ocr_total"`      // Opening + Receipt (from image)
+	DBStock      int     `json:"db_stock"`       // Stock in database at submission time
+	OCRRate      float64 `json:"ocr_rate"`       // Rate from image (for comparison)
 }
 
 // DailySalesExpenseRequest represents expense entry within daily record
@@ -164,6 +224,15 @@ type DailySalesItemResponse struct {
 	// Stock audit fields - for inventory tracking and mismatch detection
 	OpeningStock int `json:"opening_stock"` // Stock BEFORE this sale was recorded
 	ClosingStock int `json:"closing_stock"` // Expected stock AFTER (opening - quantity)
+
+	// OCR-extracted data (from Smart Sale / GPT-5.2) - for manager review
+	// These show what was extracted from the image for comparison with system data
+	OCRBrandName string  `json:"ocr_brand_name,omitempty"` // Brand name extracted from image
+	OCRSize      string  `json:"ocr_size,omitempty"`       // Size extracted from image
+	OCRReceipt   int     `json:"ocr_receipt,omitempty"`    // New stock received (from image)
+	OCRTotal     int     `json:"ocr_total,omitempty"`      // Opening + Receipt (from image)
+	DBStock      int     `json:"db_stock,omitempty"`       // Stock in database at submission time
+	OCRRate      float64 `json:"ocr_rate,omitempty"`       // Rate from image (for comparison)
 }
 
 // RecordExistsResponse - Response for record existence check (SINGLE SOURCE OF TRUTH for draft management)
@@ -179,11 +248,18 @@ type RecordExistsResponse struct {
 
 // CreateDailySalesRecord creates a new daily sales record with bulk items
 func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req DailySalesRecordRequest, tenantID, createdByID uuid.UUID) (*DailySalesRecordResponse, error) {
-	// Validate payment amounts sum up correctly
-	totalPaymentAmount := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
-	if utils.AbsFloat(totalPaymentAmount-req.TotalSalesAmount) > 0.01 {
+	// Validate payment amounts using centralized validator
+	// Formula: Cash + Card + UPI + Credit + Expenses = TotalSalesAmount
+	// Expenses are paid from collected cash, so they count towards the total
+	if err := validators.ValidatePaymentAmounts(
+		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount,
+		req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount,
+	); err != nil {
+		log.Printf("❌ [DailySales] Payment validation failed: %v", err)
 		return nil, errors.New("total payment amounts do not match total sales amount")
 	}
+	log.Printf("✅ [DailySales] Payment validation passed: Cash=%.2f + Card=%.2f + UPI=%.2f + Credit=%.2f + Expenses=%.2f = %.2f",
+		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount, req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount)
 
 	// Verify shop exists and belongs to tenant FIRST (before checking duplicates)
 	var shop models.Shop
@@ -287,7 +363,7 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 				currentStock = 0
 			}
 
-			// Create item with stock audit fields
+			// Create item with stock audit fields and OCR data
 			item := models.DailySalesItem{
 				TenantModel:        models.TenantModel{TenantID: &tenantID},
 				DailySalesRecordID: record.ID,
@@ -299,8 +375,15 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 				CardAmount:         itemReq.CardAmount,
 				UpiAmount:          itemReq.UpiAmount,
 				CreditAmount:       itemReq.CreditAmount,
-				OpeningStock:       currentStock,                        // Stock BEFORE this sale
-				ClosingStock:       currentStock - itemReq.Quantity,     // Expected stock AFTER
+				OpeningStock:       currentStock,                    // Stock BEFORE this sale
+				ClosingStock:       currentStock - itemReq.Quantity, // Expected stock AFTER
+				// OCR-extracted data for manager review
+				OCRBrandName: itemReq.OCRBrandName,
+				OCRSize:      itemReq.OCRSize,
+				OCRReceipt:   itemReq.OCRReceipt,
+				OCRTotal:     itemReq.OCRTotal,
+				DBStock:      itemReq.DBStock,
+				OCRRate:      itemReq.OCRRate,
 			}
 
 			if err := tx.Create(&item).Error; err != nil {
@@ -319,27 +402,23 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 			return errors.New("total items amount does not match record total sales amount")
 		}
 
-		// Create expense entries (NEW - Expense Table Feature)
+		// Create expense entries in batch (single INSERT instead of N)
 		totalExpensesAmount := 0.0
-		for _, expenseReq := range req.Expenses {
-			expense := models.DailySalesExpense{
-				TenantModel:        models.TenantModel{TenantID: &tenantID},
-				DailySalesRecordID: record.ID,
-				HeaderID:           expenseReq.HeaderID,
-				HeaderName:         expenseReq.HeaderName,
-				Amount:             expenseReq.Amount,
+		if len(req.Expenses) > 0 {
+			expenses := make([]models.DailySalesExpense, 0, len(req.Expenses))
+			for _, expenseReq := range req.Expenses {
+				expenses = append(expenses, models.DailySalesExpense{
+					TenantModel:        models.TenantModel{TenantID: &tenantID},
+					DailySalesRecordID: record.ID,
+					HeaderID:           expenseReq.HeaderID,
+					HeaderName:         expenseReq.HeaderName,
+					Amount:             expenseReq.Amount,
+				})
+				totalExpensesAmount += expenseReq.Amount
 			}
-
-			if err := tx.Create(&expense).Error; err != nil {
-				return fmt.Errorf("failed to create expense entry: %w", err)
+			if err := tx.CreateInBatches(&expenses, 100).Error; err != nil {
+				return fmt.Errorf("failed to create expense entries: %w", err)
 			}
-
-			totalExpensesAmount += expenseReq.Amount
-		}
-
-		// Verify total expenses amount matches (if provided)
-		if req.TotalExpenseAmount > 0 && utils.AbsFloat(totalExpensesAmount-req.TotalExpenseAmount) > 0.01 {
-			log.Printf("⚠️ [DailySales] Expense amount mismatch: calculated=%.2f, provided=%.2f", totalExpensesAmount, req.TotalExpenseAmount)
 		}
 
 		return nil
@@ -371,30 +450,27 @@ func (s *DailySalesService) GetDailySalesRecords(ctx context.Context, tenantID u
 	var totalCount int64
 
 	query := s.db.Model(&models.DailySalesRecord{}).
-		Where("tenant_id = ?", tenantID).
-		Preload("Shop").
-		Preload("Salesman").
-		Preload("CreatedBy").
-		Preload("ApprovedBy").
+		Where("daily_sales_records.tenant_id = ?", tenantID).
+		Joins("Shop").Joins("Salesman").Joins("CreatedBy").Joins("ApprovedBy").
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category").
-		Preload("Expenses") // NEW: Load expense breakdown
+		Preload("Expenses")
 
-	// Apply filters
+	// Apply filters (qualify with table name to avoid ambiguity from joins)
 	if filters.ShopID != uuid.Nil {
-		query = query.Where("shop_id = ?", filters.ShopID)
+		query = query.Where("daily_sales_records.shop_id = ?", filters.ShopID)
 	}
 	if filters.SalesmanID != uuid.Nil {
-		query = query.Where("salesman_id = ?", filters.SalesmanID)
+		query = query.Where("daily_sales_records.salesman_id = ?", filters.SalesmanID)
 	}
 	if filters.Status != "" {
-		query = query.Where("status = ?", filters.Status)
+		query = query.Where("daily_sales_records.status = ?", filters.Status)
 	}
 	if !filters.StartDate.IsZero() {
-		query = query.Where("record_date >= ?", filters.StartDate)
+		query = query.Where("daily_sales_records.record_date >= ?", filters.StartDate)
 	}
 	if !filters.EndDate.IsZero() {
-		query = query.Where("record_date <= ?", filters.EndDate)
+		query = query.Where("daily_sales_records.record_date <= ?", filters.EndDate)
 	}
 
 	// Count total records
@@ -406,7 +482,7 @@ func (s *DailySalesService) GetDailySalesRecords(ctx context.Context, tenantID u
 	offset := (filters.Page - 1) * filters.PageSize
 	if err := query.Offset(offset).
 		Limit(filters.PageSize).
-		Order("record_date DESC, created_at DESC").
+		Order("daily_sales_records.record_date DESC, daily_sales_records.created_at DESC").
 		Find(&records).Error; err != nil {
 		return nil, fmt.Errorf("failed to get daily sales records: %w", err)
 	}
@@ -432,14 +508,11 @@ func (s *DailySalesService) GetDailySalesRecords(ctx context.Context, tenantID u
 func (s *DailySalesService) GetDailySalesRecordByID(ctx context.Context, recordID, tenantID uuid.UUID) (*DailySalesRecordResponse, error) {
 	var record models.DailySalesRecord
 
-	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
-		Preload("Shop").
-		Preload("Salesman").
-		Preload("CreatedBy").
-		Preload("ApprovedBy").
+	err := s.db.Where("daily_sales_records.id = ? AND daily_sales_records.tenant_id = ?", recordID, tenantID).
+		Joins("Shop").Joins("Salesman").Joins("CreatedBy").Joins("ApprovedBy").
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category").
-		Preload("Expenses"). // NEW: Load expense breakdown
+		Preload("Expenses").
 		First(&record).Error
 
 	if err != nil {
@@ -463,9 +536,10 @@ func (s *DailySalesService) CheckRecordExistsForShopDate(
 	checkDate := utils.StartOfDay(recordDate)
 
 	var records []models.DailySalesRecord
+	nextDay := checkDate.AddDate(0, 0, 1)
 	err := s.db.Where(
-		"tenant_id = ? AND shop_id = ? AND DATE(record_date) = DATE(?)",
-		tenantID, shopID, checkDate,
+		"tenant_id = ? AND shop_id = ? AND record_date >= ? AND record_date < ?",
+		tenantID, shopID, checkDate, nextDay,
 	).Order("created_at DESC").Find(&records).Error
 
 	if err != nil {
@@ -527,11 +601,17 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 		log.Printf("⚠️ [DailySales] Admin override: %s editing %s record %s", userRole, record.Status, recordID)
 	}
 
-	// Validate payment amounts
-	totalPaymentAmount := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
-	if utils.AbsFloat(totalPaymentAmount-req.TotalSalesAmount) > 0.01 {
+	// Validate payment amounts using centralized validator
+	// Formula: Cash + Card + UPI + Credit + Expenses = TotalSalesAmount
+	if err := validators.ValidatePaymentAmounts(
+		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount,
+		req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount,
+	); err != nil {
+		log.Printf("❌ [DailySales] Update payment validation failed: %v", err)
 		return nil, errors.New("total payment amounts do not match total sales amount")
 	}
+	log.Printf("✅ [DailySales] Update payment validation passed: Cash=%.2f + Card=%.2f + UPI=%.2f + Credit=%.2f + Expenses=%.2f = %.2f",
+		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount, req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount)
 
 	// Load original items BEFORE deletion (needed for stock reversal on approved records)
 	var originalItems []models.DailySalesItem
@@ -650,7 +730,7 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 				return fmt.Errorf("payment amounts for product %s do not match total amount", product.Name)
 			}
 
-			// Create new item
+			// Create new item with OCR data for manager review
 			item := models.DailySalesItem{
 				TenantModel:        models.TenantModel{TenantID: &tenantID},
 				DailySalesRecordID: recordID,
@@ -662,6 +742,15 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 				CardAmount:         itemReq.CardAmount,
 				UpiAmount:          itemReq.UpiAmount,
 				CreditAmount:       itemReq.CreditAmount,
+				OpeningStock:       itemReq.OpeningStock,
+				ClosingStock:       itemReq.ClosingStock,
+				// OCR-extracted data for manager review
+				OCRBrandName: itemReq.OCRBrandName,
+				OCRSize:      itemReq.OCRSize,
+				OCRReceipt:   itemReq.OCRReceipt,
+				OCRTotal:     itemReq.OCRTotal,
+				DBStock:      itemReq.DBStock,
+				OCRRate:      itemReq.OCRRate,
 			}
 
 			if err := tx.Create(&item).Error; err != nil {
@@ -1045,8 +1134,8 @@ func deduplicateImageURLs(urls []string) []string {
 
 // DailySalesFilters represents filters for daily sales records
 type DailySalesFilters struct {
-	ShopID     uuid.UUID `form:"shop_id"`
-	SalesmanID uuid.UUID `form:"salesman_id"`
+	ShopID     uuid.UUID `form:"-"`
+	SalesmanID uuid.UUID `form:"-"`
 	Status     string    `form:"status"`
 	StartDate  time.Time `form:"start_date" time_format:"2006-01-02"`
 	EndDate    time.Time `form:"end_date" time_format:"2006-01-02"`
@@ -1129,6 +1218,25 @@ func (s *DailySalesService) mapDailySalesRecordToResponse(record *models.DailySa
 
 	// Add items
 	if len(record.Items) > 0 {
+		// Batch-load SaaS category names for items missing local categories (eliminates N+1)
+		saasCategories := make(map[uuid.UUID]string)
+		var missingCatIDs []uuid.UUID
+		for _, item := range record.Items {
+			if item.Product != nil && item.Product.Category == nil && item.Product.CategoryID != uuid.Nil {
+				missingCatIDs = append(missingCatIDs, item.Product.CategoryID)
+			}
+		}
+		if len(missingCatIDs) > 0 {
+			var catResults []struct {
+				ID   uuid.UUID `gorm:"column:id"`
+				Name string    `gorm:"column:name"`
+			}
+			s.db.Table("brand_categories").Select("id, name").Where("id IN ?", missingCatIDs).Scan(&catResults)
+			for _, cr := range catResults {
+				saasCategories[cr.ID] = cr.Name
+			}
+		}
+
 		response.Items = make([]DailySalesItemResponse, len(record.Items))
 		for i, item := range record.Items {
 			response.Items[i] = DailySalesItemResponse{
@@ -1143,9 +1251,14 @@ func (s *DailySalesService) mapDailySalesRecordToResponse(record *models.DailySa
 				CreditAmount: item.CreditAmount,
 				OpeningStock: item.OpeningStock,
 				ClosingStock: item.ClosingStock,
+				OCRBrandName: item.OCRBrandName,
+				OCRSize:      item.OCRSize,
+				OCRReceipt:   item.OCRReceipt,
+				OCRTotal:     item.OCRTotal,
+				DBStock:      item.DBStock,
+				OCRRate:      item.OCRRate,
 			}
 
-			// Add product info
 			if item.Product != nil {
 				response.Items[i].ProductName = item.Product.Name
 				response.Items[i].Size = item.Product.Size
@@ -1155,14 +1268,10 @@ func (s *DailySalesService) mapDailySalesRecordToResponse(record *models.DailySa
 					response.Items[i].BrandName = item.Product.Brand.Name
 				}
 
-				// Try local category first, then fall back to SaaS brand_categories
 				if item.Product.Category != nil {
 					response.Items[i].CategoryName = item.Product.Category.Name
-				} else if item.Product.CategoryID != uuid.Nil {
-					// Fallback to SaaS brand_categories table for products using SaaS-level category_id
-					if saasCategoryName := s.getSaaSCategoryName(item.Product.CategoryID); saasCategoryName != "" {
-						response.Items[i].CategoryName = saasCategoryName
-					}
+				} else if name, ok := saasCategories[item.Product.CategoryID]; ok {
+					response.Items[i].CategoryName = name
 				}
 			}
 		}

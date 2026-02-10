@@ -5546,6 +5546,54 @@ func (h *FinanceHandlers) GetUnreadNotifications(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": response})
 }
 
+// GetUnreadCount returns just the unread notification count
+func (h *FinanceHandlers) GetUnreadCount(c *gin.Context) {
+	if h.notificationService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Notification service not available"})
+		return
+	}
+
+	tenantID, userID, err := h.extractTenantAndUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	count, err := h.notificationService.GetUnreadCount(c.Request.Context(), tenantID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"count": count,
+		},
+	})
+}
+
+// ClearAllNotifications deletes all notifications for the user
+func (h *FinanceHandlers) ClearAllNotifications(c *gin.Context) {
+	if h.notificationService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Notification service not available"})
+		return
+	}
+
+	tenantID, userID, err := h.extractTenantAndUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.notificationService.ClearAllNotifications(c.Request.Context(), tenantID, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "All notifications cleared"})
+}
+
 // DeleteNotification deletes a notification
 func (h *FinanceHandlers) DeleteNotification(c *gin.Context) {
 	if h.notificationService == nil {

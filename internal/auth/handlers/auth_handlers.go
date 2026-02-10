@@ -64,9 +64,16 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 		return
 	}
 
-	// Validate request
+	// Support both email and username fields - use email if username is empty
+	if req.Username == "" && req.Email != "" {
+		req.Username = req.Email
+	}
+
+	// Validate request - require either username or email
 	validator := validators.New()
-	validator.Required(req.Username, "username")
+	if req.Username == "" && req.Email == "" {
+		validator.Required("", "username or email")
+	}
 	validator.Required(req.Password, "password")
 
 	if validator.HasErrors() {

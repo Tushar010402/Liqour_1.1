@@ -1,5 +1,6 @@
-# Uncomment this line to define a global platform for your project
-# platform :ios, '13.0'
+# Define a global platform for your project
+# Required: iOS 15.5+ for google_mlkit_text_recognition and Firebase
+platform :ios, '15.5'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -31,6 +32,8 @@ target 'Runner' do
   use_frameworks!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+
   target 'RunnerTests' do
     inherit! :search_paths
   end
@@ -39,5 +42,25 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # Enable permission_handler permissions for iOS 18+
+    # Required for camera, photos, location, etc. to work correctly
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
+        '$(inherited)',
+        # Camera permission
+        'PERMISSION_CAMERA=1',
+        # Photo library permissions
+        'PERMISSION_PHOTOS=1',
+        'PERMISSION_PHOTOS_ADD_ONLY=1',
+        # Location permissions
+        'PERMISSION_LOCATION=1',
+        'PERMISSION_LOCATION_ALWAYS=1',
+        'PERMISSION_LOCATION_WHENINUSE=1',
+        # Other permissions used by the app
+        'PERMISSION_NOTIFICATIONS=1',
+        'PERMISSION_CONTACTS=1',
+      ]
+    end
   end
 end

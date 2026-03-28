@@ -1,10 +1,10 @@
 import 'package:flutter/foundation.dart';
-import '../../../core/services/api_service.dart';
+import '../../../core/services/dio_api_service.dart';
 import '../../../core/models/api_response.dart';
 
 /// Stock Service - Handles stock management operations
 class StockService {
-  final ApiService _apiService;
+  final DioApiService _apiService;
 
   StockService(this._apiService);
 

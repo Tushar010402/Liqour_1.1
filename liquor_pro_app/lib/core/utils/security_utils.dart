@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart';
-import '../api/api_config.dart';
+import '../config/api_config.dart';
 
 /// Security utilities for the LiquorPro app
 class SecurityUtils {
@@ -70,7 +70,7 @@ class SecurityUtils {
   /// Validate input to prevent injection attacks
   static String sanitizeInput(String input) {
     return input
-        .replaceAll(RegExp(r'[<>"\']'), '')
+        .replaceAll(RegExp(r'''[<>"']'''), '')
         .replaceAll(RegExp(r'script', caseSensitive: false), '')
         .replaceAll(RegExp(r'javascript', caseSensitive: false), '')
         .trim();

@@ -1,16 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
-import '../../../core/theme/app_theme.dart';
 import '../providers/auth_provider.dart';
+import '../../admin/providers/shop_provider.dart';
 
-/// Registration Form Screen - Complete registration after OTP verification
+/// Registration Form Screen - Collects business/shop info and completes registration
 class RegistrationFormScreen extends StatefulWidget {
   final String phoneNumber;
+  final String? email;
+  final String? fullName;
+  final String? registrationToken;
+  final String companyName;
+  final String tenantName;
+  final String shopName;
+  final String shopAddress;
+  final String? shopPhone;
+  final String? shopLicense;
 
   const RegistrationFormScreen({
     super.key,
     required this.phoneNumber,
+    this.email,
+    this.fullName,
+    this.registrationToken,
+    required this.companyName,
+    required this.tenantName,
+    required this.shopName,
+    required this.shopAddress,
+    this.shopPhone,
+    this.shopLicense,
   });
 
   @override
@@ -19,138 +37,150 @@ class RegistrationFormScreen extends StatefulWidget {
 
 class _RegistrationFormScreenState extends State<RegistrationFormScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _confirmPasswordController = TextEditingController();
-  final _firstNameController = TextEditingController();
-  final _lastNameController = TextEditingController();
-  final _tenantNameController = TextEditingController();
-  final _companyNameController = TextEditingController();
-
+  late final TextEditingController _companyController;
+  late final TextEditingController _shopNameController;
+  late final TextEditingController _shopAddressController;
   bool _isLoading = false;
-  bool _obscurePassword = true;
-  bool _obscureConfirmPassword = true;
+  String? _registrationError;
+
+  @override
+  void initState() {
+    super.initState();
+    _companyController = TextEditingController(text: widget.companyName);
+    _shopNameController = TextEditingController(text: widget.shopName);
+    _shopAddressController = TextEditingController(text: widget.shopAddress);
+  }
 
   @override
   void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
-    _confirmPasswordController.dispose();
-    _firstNameController.dispose();
-    _lastNameController.dispose();
-    _tenantNameController.dispose();
-    _companyNameController.dispose();
+    _companyController.dispose();
+    _shopNameController.dispose();
+    _shopAddressController.dispose();
     super.dispose();
+  }
+
+  /// Generate a tenant name slug from company name
+  String _generateTenantName(String companyName) {
+    return companyName
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9\s]'), '')
+        .replaceAll(RegExp(r'\s+'), '-');
   }
 
   Future<void> _handleRegister() async {
     if (!_formKey.currentState!.validate()) return;
-
     if (!mounted) return;
-    setState(() => _isLoading = true);
+
+    setState(() {
+      _isLoading = true;
+      _registrationError = null;
+    });
 
     final authProvider = context.read<AuthProvider>();
+    final companyName = _companyController.text.trim();
+    final shopName = _shopNameController.text.trim();
+    final shopAddress = _shopAddressController.text.trim();
+    final tenantName = widget.tenantName.isNotEmpty
+        ? widget.tenantName
+        : _generateTenantName(companyName);
+
+    // Split full name into first and last name
+    final fullName = (widget.fullName ?? '').trim();
+    final nameParts = fullName.split(' ');
+    final firstName = nameParts.first;
+    final lastName = nameParts.length > 1
+        ? nameParts.sublist(1).join(' ')
+        : nameParts.first;
+
+    final email = (widget.email ?? '').trim();
+
+    debugPrint('[Registration] Submitting:');
+    debugPrint('  company=$companyName, tenant=$tenantName');
+    debugPrint('  shop=$shopName, address=$shopAddress');
+    debugPrint('  email=$email, name=$fullName');
 
     final success = await authProvider.register(
-      email: _emailController.text.trim(),
-      password: _passwordController.text,
-      firstName: _firstNameController.text.trim(),
-      lastName: _lastNameController.text.trim(),
+      email: email,
+      password: '',
+      firstName: firstName,
+      lastName: lastName,
       phone: widget.phoneNumber,
-      tenantName: _tenantNameController.text.trim(),
-      companyName: _companyNameController.text.trim(),
+      tenantName: tenantName,
+      companyName: companyName,
+      registrationToken: widget.registrationToken ?? '',
+    );
+
+    if (!mounted) return;
+
+    if (success) {
+      // Registration successful - create the shop
+      await _createShop(shopName, shopAddress);
+    } else {
+      setState(() {
+        _isLoading = false;
+        _registrationError =
+            authProvider.errorMessage ?? 'Registration failed. Please try again.';
+      });
+    }
+  }
+
+  Future<void> _createShop(String shopName, String shopAddress) async {
+    if (!mounted) return;
+
+    final shopProvider = context.read<ShopProvider>();
+
+    final shopSuccess = await shopProvider.createShop(
+      name: shopName,
+      address: shopAddress,
+      phone: widget.shopPhone ?? widget.phoneNumber,
+      licenseNumber: widget.shopLicense ?? '',
+      latitude: null,
+      longitude: null,
     );
 
     if (!mounted) return;
     setState(() => _isLoading = false);
 
-    if (success && mounted) {
-      // Registration successful - navigate to home
-      context.goNamed('home');
-    } else if (mounted && authProvider.errorMessage != null) {
-      _showError(authProvider.errorMessage!);
+    if (shopSuccess) {
+      debugPrint('[Registration] Complete! Navigating to home...');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Registration successful! Welcome to LiquorPro.'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        context.goNamed('home');
+      }
+    } else {
+      // Shop creation failed but registration succeeded - still go home
+      debugPrint('[Registration] Shop creation failed, but user is registered. Going home.');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Registration successful! You can set up your shop later.'),
+            backgroundColor: Colors.orange,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        context.goNamed('home');
+      }
     }
-  }
-
-  void _showError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
-  String? _validateEmail(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'Please enter your email';
-    }
-    final emailRegex = RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$');
-    if (!emailRegex.hasMatch(value)) {
-      return 'Please enter a valid email';
-    }
-    return null;
-  }
-
-  String? _validatePassword(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'Please enter a password';
-    }
-    if (value.length < 8) {
-      return 'Password must be at least 8 characters';
-    }
-    return null;
-  }
-
-  String? _validateConfirmPassword(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'Please confirm your password';
-    }
-    if (value != _passwordController.text) {
-      return 'Passwords do not match';
-    }
-    return null;
-  }
-
-  String? _validateRequired(String? value, String fieldName) {
-    if (value == null || value.isEmpty) {
-      return 'Please enter $fieldName';
-    }
-    if (value.length < 2) {
-      return '$fieldName must be at least 2 characters';
-    }
-    return null;
-  }
-
-  String? _validateTenantName(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'Please enter a tenant name';
-    }
-    // Tenant name should be lowercase, no spaces, alphanumeric with hyphens
-    final tenantRegex = RegExp(r'^[a-z0-9-]+$');
-    if (!tenantRegex.hasMatch(value)) {
-      return 'Use lowercase letters, numbers, and hyphens only';
-    }
-    if (value.length < 3) {
-      return 'Tenant name must be at least 3 characters';
-    }
-    return null;
   }
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: const Text(
-          'Complete Registration',
-          style: TextStyle(color: Colors.black),
+          icon: const Icon(Icons.arrow_back),
+          onPressed: _isLoading ? null : () => Navigator.of(context).pop(),
         ),
       ),
       body: SafeArea(
@@ -161,135 +191,182 @@ class _RegistrationFormScreenState extends State<RegistrationFormScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const SizedBox(height: 8),
-
-                Text(
-                  'Almost there! Complete your profile',
-                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                    color: Colors.grey[600],
-                  ),
+                // Progress dots
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _buildProgressDot(true),
+                    _buildProgressLine(true),
+                    _buildProgressDot(true),
+                    _buildProgressLine(true),
+                    _buildProgressDot(true),
+                  ],
                 ),
 
                 const SizedBox(height: 32),
 
-                // First Name
-                _buildLabel('First Name'),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _firstNameController,
-                  keyboardType: TextInputType.name,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: _buildInputDecoration('John', Icons.person_outline),
-                  validator: (v) => _validateRequired(v, 'first name'),
-                  enabled: !_isLoading,
-                ),
-
-                const SizedBox(height: 20),
-
-                // Last Name
-                _buildLabel('Last Name'),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _lastNameController,
-                  keyboardType: TextInputType.name,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: _buildInputDecoration('Doe', Icons.person_outline),
-                  validator: (v) => _validateRequired(v, 'last name'),
-                  enabled: !_isLoading,
-                ),
-
-                const SizedBox(height: 20),
-
-                // Email
-                _buildLabel('Email'),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: _buildInputDecoration('john@example.com', Icons.email_outlined),
-                  validator: _validateEmail,
-                  enabled: !_isLoading,
-                ),
-
-                const SizedBox(height: 20),
-
-                // Password
-                _buildLabel('Password'),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _passwordController,
-                  obscureText: _obscurePassword,
-                  decoration: _buildInputDecoration('••••••••', Icons.lock_outline).copyWith(
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        _obscurePassword ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                Text(
+                  'Set up your business',
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.bold,
                       ),
-                      onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
-                    ),
-                  ),
-                  validator: _validatePassword,
-                  enabled: !_isLoading,
                 ),
 
-                const SizedBox(height: 20),
-
-                // Confirm Password
-                _buildLabel('Confirm Password'),
                 const SizedBox(height: 8),
-                TextFormField(
-                  controller: _confirmPasswordController,
-                  obscureText: _obscureConfirmPassword,
-                  decoration: _buildInputDecoration('••••••••', Icons.lock_outline).copyWith(
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        _obscureConfirmPassword ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+
+                Text(
+                  'Tell us about your business to get started',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: cs.onSurfaceVariant,
                       ),
-                      onPressed: () => setState(() => _obscureConfirmPassword = !_obscureConfirmPassword),
-                    ),
-                  ),
-                  validator: _validateConfirmPassword,
-                  enabled: !_isLoading,
                 ),
 
-                const SizedBox(height: 20),
+                const SizedBox(height: 32),
+
+                // User info summary
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: cs.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 20,
+                        backgroundColor: cs.primaryContainer,
+                        child: Icon(Icons.person, color: cs.onPrimaryContainer),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (widget.fullName != null && widget.fullName!.isNotEmpty)
+                              Text(
+                                widget.fullName!,
+                                style: const TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                            Text(
+                              widget.phoneNumber,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(Icons.check_circle, color: Colors.green[600], size: 20),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 24),
 
                 // Company Name
-                _buildLabel('Company Name'),
-                const SizedBox(height: 8),
                 TextFormField(
-                  controller: _companyNameController,
-                  keyboardType: TextInputType.name,
+                  controller: _companyController,
                   textCapitalization: TextCapitalization.words,
-                  decoration: _buildInputDecoration('My Liquor Store', Icons.business_outlined),
-                  validator: (v) => _validateRequired(v, 'company name'),
-                  enabled: !_isLoading,
-                ),
-
-                const SizedBox(height: 20),
-
-                // Tenant Name (Subdomain)
-                _buildLabel('Tenant Name (Subdomain)'),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _tenantNameController,
-                  keyboardType: TextInputType.text,
-                  decoration: _buildInputDecoration('my-store', Icons.domain_outlined).copyWith(
-                    helperText: 'This will be your unique identifier (e.g., my-store)',
-                    helperMaxLines: 2,
+                  decoration: InputDecoration(
+                    labelText: 'Company / Business Name',
+                    hintText: 'e.g. Sharma Wine Shop',
+                    prefixIcon: const Icon(Icons.business_rounded),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    filled: true,
+                    fillColor: cs.surfaceContainerHighest,
                   ),
-                  validator: _validateTenantName,
-                  enabled: !_isLoading,
-                  onChanged: (value) {
-                    // Auto-convert to lowercase and replace spaces with hyphens
-                    final newValue = value.toLowerCase().replaceAll(' ', '-');
-                    if (newValue != value) {
-                      _tenantNameController.value = TextEditingValue(
-                        text: newValue,
-                        selection: TextSelection.collapsed(offset: newValue.length),
-                      );
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) {
+                      return 'Please enter your business name';
                     }
+                    if (v.trim().length < 2) {
+                      return 'Business name must be at least 2 characters';
+                    }
+                    return null;
                   },
+                  enabled: !_isLoading,
                 ),
+
+                const SizedBox(height: 16),
+
+                // Shop Name
+                TextFormField(
+                  controller: _shopNameController,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: InputDecoration(
+                    labelText: 'Shop Name',
+                    hintText: 'e.g. Main Branch',
+                    prefixIcon: const Icon(Icons.store_rounded),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    filled: true,
+                    fillColor: cs.surfaceContainerHighest,
+                  ),
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) {
+                      return 'Please enter your shop name';
+                    }
+                    return null;
+                  },
+                  enabled: !_isLoading,
+                ),
+
+                const SizedBox(height: 16),
+
+                // Shop Address
+                TextFormField(
+                  controller: _shopAddressController,
+                  textCapitalization: TextCapitalization.sentences,
+                  maxLines: 2,
+                  decoration: InputDecoration(
+                    labelText: 'Shop Address',
+                    hintText: 'e.g. 123 MG Road, Mumbai',
+                    prefixIcon: const Padding(
+                      padding: EdgeInsets.only(bottom: 24),
+                      child: Icon(Icons.location_on_rounded),
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    filled: true,
+                    fillColor: cs.surfaceContainerHighest,
+                  ),
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) {
+                      return 'Please enter your shop address';
+                    }
+                    return null;
+                  },
+                  enabled: !_isLoading,
+                ),
+
+                if (_registrationError != null) ...[
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.red.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.error_outline, color: Colors.red, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _registrationError!,
+                            style: const TextStyle(color: Colors.red, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
 
                 const SizedBox(height: 32),
 
@@ -297,7 +374,7 @@ class _RegistrationFormScreenState extends State<RegistrationFormScreen> {
                 ElevatedButton(
                   onPressed: _isLoading ? null : _handleRegister,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.primaryColor,
+                    backgroundColor: cs.primary,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
@@ -311,46 +388,13 @@ class _RegistrationFormScreenState extends State<RegistrationFormScreen> {
                           width: 20,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              Colors.white,
-                            ),
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                           ),
                         )
                       : const Text(
                           'Complete Registration',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                          ),
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                         ),
-                ),
-
-                const SizedBox(height: 16),
-
-                // Phone number display
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.grey[100],
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.phone, size: 16, color: Colors.grey[600]),
-                      const SizedBox(width: 8),
-                      Text(
-                        widget.phoneNumber,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey[600],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Icon(Icons.check_circle, size: 16, color: Colors.green),
-                    ],
-                  ),
                 ),
 
                 const SizedBox(height: 24),
@@ -362,33 +406,25 @@ class _RegistrationFormScreenState extends State<RegistrationFormScreen> {
     );
   }
 
-  Widget _buildLabel(String text) {
-    return Text(
-      text,
-      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-        fontWeight: FontWeight.w600,
+  Widget _buildProgressDot(bool isActive) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: 12,
+      height: 12,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: isActive ? cs.primary : cs.outlineVariant,
       ),
     );
   }
 
-  InputDecoration _buildInputDecoration(String hint, IconData icon) {
-    return InputDecoration(
-      hintText: hint,
-      prefixIcon: Icon(icon),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: Colors.grey[300]!),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(
-          color: AppTheme.primaryColor,
-          width: 2,
-        ),
-      ),
+  Widget _buildProgressLine(bool isActive) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: 40,
+      height: 2,
+      color: isActive ? cs.primary : cs.outlineVariant,
+      margin: const EdgeInsets.symmetric(horizontal: 4),
     );
   }
 }

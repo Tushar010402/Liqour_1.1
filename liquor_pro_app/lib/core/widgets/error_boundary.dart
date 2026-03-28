@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../constants/app_colors.dart';
 import '../constants/app_text_styles.dart';
-import '../utils/logger.dart';
+import '../exceptions/app_exception.dart';
+import '../utils/exception_handler.dart';
+import '../utils/app_logger.dart';
 
 /// Error Boundary Widget - Catches and displays errors gracefully
 /// Prevents white screen crashes by providing fallback UI
@@ -22,27 +24,50 @@ class ErrorBoundary extends StatefulWidget {
 }
 
 class _ErrorBoundaryState extends State<ErrorBoundary> {
-  Object? _error;
-  StackTrace? _stackTrace;
+  AppException? _error;
 
   @override
   void initState() {
     super.initState();
-    // Set up error handler
+    debugPrint('🛡️ [ErrorBoundary] initState - setting up error handler');
+    // Set up error handler with proper async handling
     FlutterError.onError = (FlutterErrorDetails details) {
+      debugPrint('🛡️ [ErrorBoundary] FlutterError.onError TRIGGERED!');
+      debugPrint('🛡️ [ErrorBoundary] Error: ${details.exception}');
+      debugPrint('🛡️ [ErrorBoundary] Stack: ${details.stack}');
+
       if (mounted) {
-        setState(() {
-          _error = details.exception;
-          _stackTrace = details.stack;
+        // Ignore overflow errors - they're visual warnings, not crashes
+        final errorMessage = details.exception.toString().toLowerCase();
+        final isOverflowError = errorMessage.contains('overflowed') ||
+                                errorMessage.contains('renderflex') ||
+                                errorMessage.contains('renderbox');
+
+        if (isOverflowError) {
+          // Just log overflow errors, don't show error screen
+          AppLogger.warning('Overflow warning: ${details.exception}');
+          return;
+        }
+
+        final appException = ExceptionHandler.handle(details.exception, details.stack);
+
+        // Use addPostFrameCallback to avoid setState during build
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            debugPrint('🛡️ [ErrorBoundary] Setting _error state...');
+            setState(() {
+              _error = appException;
+            });
+          }
         });
-      }
 
-      // Log the error
-      Logger.error('ErrorBoundary caught error', details.exception, details.stack);
+        // Log the error
+        ExceptionHandler.logException(appException, context: 'ErrorBoundary');
 
-      // Call custom error handler if provided
-      if (widget.onError != null && details.stack != null) {
-        widget.onError!(details.exception, details.stack!);
+        // Call custom error handler if provided
+        if (widget.onError != null && details.stack != null) {
+          widget.onError!(details.exception, details.stack!);
+        }
       }
     };
   }
@@ -50,34 +75,25 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
   void _retry() {
     setState(() {
       _error = null;
-      _stackTrace = null;
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    debugPrint('🛡️ [ErrorBoundary] build() called, _error: ${_error != null ? "HAS ERROR" : "null"}');
     if (_error != null) {
+      debugPrint('🛡️ [ErrorBoundary] Showing error UI: ${_error!.userMessage}');
       return widget.fallback ?? _buildDefaultErrorUI();
     }
 
-    return ErrorWidget.builder = (FlutterErrorDetails details) {
-      if (mounted) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            setState(() {
-              _error = details.exception;
-              _stackTrace = details.stack;
-            });
-          }
-        });
-      }
-      return widget.fallback ?? _buildDefaultErrorUI();
-    } as Widget;
+    debugPrint('🛡️ [ErrorBoundary] Returning child widget');
+    return widget.child;
   }
 
   Widget _buildDefaultErrorUI() {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: AppColors.surface,
+      backgroundColor: cs.surface,
       body: SafeArea(
         child: Center(
           child: Padding(
@@ -89,7 +105,7 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
                 Container(
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
-                    color: AppColors.error.withOpacity(0.1),
+                    color: AppColors.error.withValues(alpha:0.1),
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
@@ -114,9 +130,9 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
 
                 // Error Message
                 Text(
-                  'We encountered an unexpected error. Please try again.',
+                  _error!.userMessage,
                   style: AppTextStyles.bodyMedium.copyWith(
-                    color: AppColors.textSecondary,
+                    color: cs.onSurfaceVariant,
                   ),
                   textAlign: TextAlign.center,
                 ),
@@ -129,9 +145,9 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.grey[200],
+                      color: cs.surfaceContainerHighest,
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.grey[400]!),
+                      border: Border.all(color: cs.outlineVariant),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -144,12 +160,12 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          _error.toString(),
+                          _error!.technicalDetails,
                           style: AppTextStyles.bodySmall.copyWith(
                             fontFamily: 'monospace',
                             fontSize: 10,
                           ),
-                          maxLines: 5,
+                          maxLines: 10,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ],
@@ -169,7 +185,7 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
                       icon: const Icon(Icons.refresh),
                       label: const Text('Try Again'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
+                        backgroundColor: cs.primary,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(
                           horizontal: 24,
@@ -183,13 +199,17 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
                     // Go Home Button
                     OutlinedButton.icon(
                       onPressed: () {
-                        Navigator.of(context).popUntil((route) => route.isFirst);
+                        // Safely check if Navigator exists to prevent recursive errors
+                        final navigator = Navigator.maybeOf(context);
+                        if (navigator != null && navigator.canPop()) {
+                          navigator.popUntil((route) => route.isFirst);
+                        }
                         _retry();
                       },
                       icon: const Icon(Icons.home),
                       label: const Text('Go Home'),
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.primary,
+                        foregroundColor: cs.primary,
                         padding: const EdgeInsets.symmetric(
                           horizontal: 24,
                           vertical: 12,
@@ -221,15 +241,18 @@ class WidgetErrorBoundary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ErrorWidget.builder = (FlutterErrorDetails details) {
-      Logger.error('WidgetErrorBoundary caught error', details.exception, details.stack);
+    try {
+      return child;
+    } catch (error, stackTrace) {
+      final appException = ExceptionHandler.handle(error, stackTrace);
+      ExceptionHandler.logException(appException, context: 'WidgetErrorBoundary');
 
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: AppColors.error.withOpacity(0.1),
+          color: AppColors.error.withValues(alpha:0.1),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: AppColors.error.withOpacity(0.3)),
+          border: Border.all(color: AppColors.error.withValues(alpha:0.3)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -241,7 +264,7 @@ class WidgetErrorBoundary extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              errorMessage ?? 'Error loading content',
+              errorMessage ?? appException.userMessage,
               style: AppTextStyles.bodySmall.copyWith(
                 color: AppColors.error,
                 fontWeight: FontWeight.w500,
@@ -251,6 +274,6 @@ class WidgetErrorBoundary extends StatelessWidget {
           ],
         ),
       );
-    } as Widget;
+    }
   }
 }

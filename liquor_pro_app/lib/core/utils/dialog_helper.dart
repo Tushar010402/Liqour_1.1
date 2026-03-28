@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_animate/flutter_animate.dart';
-import 'haptic_feedback_helper.dart';
+import '../constants/app_colors.dart';
+import 'haptic_feedback.dart';
 
 /// Dialog Helper - Best Practice Dialogs
 /// Centralized dialog management for consistent UX
@@ -32,7 +32,8 @@ class DialogHelper {
     IconData? icon,
     bool isDangerous = false,
   }) async {
-    HapticFeedbackHelper.medium();
+    HapticFeedbackUtil.medium();
+    final cs = Theme.of(context).colorScheme;
 
     return _showBaseDialog<bool>(
       context: context,
@@ -45,7 +46,7 @@ class DialogHelper {
             if (icon != null) ...[
               Icon(
                 icon,
-                color: isDangerous ? Colors.red : confirmColor ?? Theme.of(context).primaryColor,
+                color: isDangerous ? AppColors.error : confirmColor ?? Theme.of(context).primaryColor,
                 size: 28,
               ),
               const SizedBox(width: 12),
@@ -65,13 +66,13 @@ class DialogHelper {
           message,
           style: TextStyle(
             fontSize: 16,
-            color: Colors.grey[700],
+            color: cs.onSurface,
           ),
         ),
         actions: [
           TextButton(
             onPressed: () {
-              HapticFeedbackHelper.light();
+              HapticFeedbackUtil.light();
               Navigator.of(context).pop(false);
             },
             child: Text(
@@ -84,12 +85,12 @@ class DialogHelper {
           ),
           ElevatedButton(
             onPressed: () {
-              HapticFeedbackHelper.medium();
+              HapticFeedbackUtil.medium();
               Navigator.of(context).pop(true);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: isDangerous
-                  ? Colors.red
+                  ? AppColors.error
                   : (confirmColor ?? Theme.of(context).primaryColor),
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
@@ -116,7 +117,7 @@ class DialogHelper {
     required String itemName,
     String? message,
   }) {
-    HapticFeedbackHelper.warning();
+    HapticFeedbackUtil.warning();
 
     return confirm(
       context: context,
@@ -137,7 +138,8 @@ class DialogHelper {
     String buttonText = 'OK',
     IconData? icon,
   }) {
-    HapticFeedbackHelper.light();
+    HapticFeedbackUtil.light();
+    final cs = Theme.of(context).colorScheme;
 
     return _showBaseDialog(
       context: context,
@@ -150,7 +152,7 @@ class DialogHelper {
             if (icon != null) ...[
               Icon(
                 icon,
-                color: Colors.blue,
+                color: AppColors.info,
                 size: 28,
               ),
               const SizedBox(width: 12),
@@ -170,17 +172,17 @@ class DialogHelper {
           message,
           style: TextStyle(
             fontSize: 16,
-            color: Colors.grey[700],
+            color: cs.onSurface,
           ),
         ),
         actions: [
           ElevatedButton(
             onPressed: () {
-              HapticFeedbackHelper.light();
+              HapticFeedbackUtil.light();
               Navigator.of(context).pop();
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.blue,
+              backgroundColor: AppColors.info,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
@@ -207,7 +209,8 @@ class DialogHelper {
     required String message,
     String buttonText = 'OK',
   }) {
-    HapticFeedbackHelper.error();
+    HapticFeedbackUtil.error();
+    final cs = Theme.of(context).colorScheme;
 
     return _showBaseDialog(
       context: context,
@@ -217,19 +220,19 @@ class DialogHelper {
         ),
         title: Row(
           children: [
-            const Icon(
+            Icon(
               Icons.error_outline,
-              color: Colors.red,
+              color: AppColors.error,
               size: 28,
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
                 title,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
-                  color: Colors.red,
+                  color: AppColors.error,
                 ),
               ),
             ),
@@ -239,17 +242,17 @@ class DialogHelper {
           message,
           style: TextStyle(
             fontSize: 16,
-            color: Colors.grey[700],
+            color: cs.onSurface,
           ),
         ),
         actions: [
           ElevatedButton(
             onPressed: () {
-              HapticFeedbackHelper.light();
+              HapticFeedbackUtil.light();
               Navigator.of(context).pop();
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
+              backgroundColor: AppColors.error,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
@@ -276,7 +279,8 @@ class DialogHelper {
     required String message,
     String buttonText = 'OK',
   }) {
-    HapticFeedbackHelper.success();
+    HapticFeedbackUtil.success();
+    final cs = Theme.of(context).colorScheme;
 
     return _showBaseDialog(
       context: context,
@@ -286,19 +290,19 @@ class DialogHelper {
         ),
         title: Row(
           children: [
-            const Icon(
+            Icon(
               Icons.check_circle_outline,
-              color: Colors.green,
+              color: AppColors.success,
               size: 28,
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
                 title,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
-                  color: Colors.green,
+                  color: AppColors.success,
                 ),
               ),
             ),
@@ -308,17 +312,17 @@ class DialogHelper {
           message,
           style: TextStyle(
             fontSize: 16,
-            color: Colors.grey[700],
+            color: cs.onSurface,
           ),
         ),
         actions: [
           ElevatedButton(
             onPressed: () {
-              HapticFeedbackHelper.light();
+              HapticFeedbackUtil.light();
               Navigator.of(context).pop();
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.green,
+              backgroundColor: AppColors.success,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
@@ -346,8 +350,8 @@ class DialogHelper {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => WillPopScope(
-        onWillPop: () async => false,
+      builder: (context) => PopScope(
+        canPop: false,
         child: Dialog(
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
@@ -408,7 +412,8 @@ class DialogHelper {
     bool isDismissible = true,
     bool enableDrag = true,
   }) {
-    HapticFeedbackHelper.light();
+    HapticFeedbackUtil.light();
+    final cs = Theme.of(context).colorScheme;
 
     return showModalBottomSheet<T>(
       context: context,
@@ -417,9 +422,9 @@ class DialogHelper {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -429,7 +434,7 @@ class DialogHelper {
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                color: Colors.grey[300],
+                color: cs.outlineVariant,
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -449,7 +454,7 @@ class DialogHelper {
     required String Function(T) optionLabel,
     IconData Function(T)? optionIcon,
   }) {
-    HapticFeedbackHelper.light();
+    HapticFeedbackUtil.light();
 
     return _showBaseDialog<T>(
       context: context,
@@ -473,7 +478,7 @@ class DialogHelper {
                   : null,
               title: Text(optionLabel(option)),
               onTap: () {
-                HapticFeedbackHelper.light();
+                HapticFeedbackUtil.light();
                 Navigator.of(context).pop(option);
               },
             );

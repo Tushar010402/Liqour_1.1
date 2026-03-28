@@ -26,6 +26,7 @@ class EmptyStateWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -37,7 +38,7 @@ class EmptyStateWidget extends StatelessWidget {
             Icon(
               icon,
               size: iconSize,
-              color: iconColor ?? Colors.grey[400],
+              color: iconColor ?? cs.onSurfaceVariant,
             ).animate().fadeIn(duration: 400.ms).scale(delay: 100.ms),
 
             const SizedBox(height: 24),
@@ -47,7 +48,7 @@ class EmptyStateWidget extends StatelessWidget {
               title,
               style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     fontWeight: FontWeight.w600,
-                    color: Colors.grey[700],
+                    color: cs.onSurface,
                   ),
               textAlign: TextAlign.center,
             ).animate().fadeIn(delay: 200.ms).slideY(begin: 0.2, end: 0),
@@ -57,7 +58,7 @@ class EmptyStateWidget extends StatelessWidget {
               Text(
                 message!,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Colors.grey[600],
+                      color: cs.onSurfaceVariant,
                     ),
                 textAlign: TextAlign.center,
               ).animate().fadeIn(delay: 300.ms).slideY(begin: 0.2, end: 0),
@@ -214,7 +215,74 @@ class EmptyStates {
       icon: Icons.check_box_outline_blank,
       title: title,
       message: message ?? 'Select items to continue',
-      iconColor: Colors.grey[400],
+      // iconColor defaults to cs.onSurfaceVariant (theme-aware)
+    );
+  }
+
+  /// No products - Inventory specific
+  static Widget noProducts({
+    String title = 'No Products Yet',
+    String? message,
+    VoidCallback? onAddBrands,
+  }) {
+    return EmptyStateWidget(
+      icon: Icons.inventory_2_outlined,
+      title: title,
+      message: message ??
+          'Get started by adding brands to your inventory.\n\nImport products from our catalog to begin managing your stock.',
+      actionLabel: onAddBrands != null ? 'Add Brands' : null,
+      onAction: onAddBrands,
+      iconColor: Colors.blue[300],
+      iconSize: 100,
+    );
+  }
+
+  /// Low stock alert
+  static Widget lowStockAlert({
+    required int count,
+    VoidCallback? onView,
+  }) {
+    return EmptyStateWidget(
+      icon: Icons.warning_amber_rounded,
+      title: '$count Items Low on Stock',
+      message:
+          'Some products are running low and need restocking.\n\nReview and update your inventory to avoid stockouts.',
+      actionLabel: onView != null ? 'View Low Stock' : null,
+      onAction: onView,
+      iconColor: Colors.orange[600],
+      iconSize: 100,
+    );
+  }
+
+  /// All brands onboarded
+  static Widget allBrandsOnboarded({
+    VoidCallback? onViewInventory,
+  }) {
+    return EmptyStateWidget(
+      icon: Icons.celebration,
+      title: '🎉 All Brands Added!',
+      message:
+          'You\'ve successfully onboarded all available brands.\n\nCheck back later for new additions to our catalog.',
+      actionLabel: onViewInventory != null ? 'View Inventory' : null,
+      onAction: onViewInventory,
+      iconColor: Colors.green[400],
+      iconSize: 100,
+    );
+  }
+
+  /// No stock set
+  static Widget noStockSet({
+    VoidCallback? onSetStock,
+  }) {
+    return EmptyStateWidget(
+      icon: Icons.inventory_outlined,
+      title: 'Set Initial Stock',
+      message:
+          'You have products but no stock quantities set.\n\nSet your initial stock levels to start tracking inventory.',
+      actionLabel: onSetStock != null ? 'Set Stock Now' : null,
+      onAction: onSetStock,
+      iconColor: Colors.orange[300],
+      iconSize: 100,
     );
   }
 }

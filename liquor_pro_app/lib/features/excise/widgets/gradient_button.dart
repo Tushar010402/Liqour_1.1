@@ -10,7 +10,7 @@ class GradientButton extends StatelessWidget {
   final bool isLoading;
 
   const GradientButton({
-    Key? key,
+    super.key,
     required this.label,
     this.icon,
     required this.onPressed,
@@ -18,7 +18,7 @@ class GradientButton extends StatelessWidget {
     this.width,
     this.height = 56,
     this.isLoading = false,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -34,7 +34,7 @@ class GradientButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: gradientColors.first.withOpacity(0.3),
+            color: gradientColors.first.withValues(alpha:0.3),
             blurRadius: 8,
             offset: const Offset(0, 4),
           ),

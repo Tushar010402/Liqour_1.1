@@ -1,29 +1,23 @@
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import '../../../core/models/api_response.dart';
-import '../../../core/services/api_service.dart';
+import '../../../core/services/dio_api_service.dart';
 import '../models/saas_brand.dart';
 import '../models/brand.dart';
 import '../models/product.dart';
-import '../../../core/utils/logger.dart';
+import '../models/brand_metadata.dart';
 
 /// Brand Onboarding Service - API client for SaaS brand onboarding
 class BrandOnboardingService {
-  final ApiService _apiService;
+  final DioApiService _apiService;
 
-  BrandOnboardingService(this._apiService) {
-    Logger.debug('🎯 BrandOnboardingService created');
-    Logger.debug('   - ApiService: ${_apiService != null ? "✅" : "❌"}');
-    Logger.debug('   - AuthService (from ApiService): ${_apiService.authService != null ? "✅" : "❌"}');
-  }
+  BrandOnboardingService(this._apiService);
 
   /// Get available SaaS brand templates for onboarding
   Future<ApiResponse<List<SaasBrand>>> getAvailableBrands() async {
-    Logger.debug('🎯 BrandOnboardingService.getAvailableBrands() called');
-
     final response = await _apiService.get<List<SaasBrand>>(
       '/api/inventory/saas-brands/available',
       fromJson: (data) {
-        Logger.debug('🎯 Parsing available brands response: ${data.runtimeType}');
-
         if (data is List) {
           return data
               .map((json) => SaasBrand.fromJson(json as Map<String, dynamic>))
@@ -34,7 +28,6 @@ class BrandOnboardingService {
         if (data is Map<String, dynamic>) {
           // Try 'data' key first (new backend format)
           if (data['data'] is List) {
-            Logger.debug('🎯 Parsing from "data" key (${(data['data'] as List).length} brands)');
             return (data['data'] as List)
                 .map((json) => SaasBrand.fromJson(json as Map<String, dynamic>))
                 .toList();
@@ -42,73 +35,79 @@ class BrandOnboardingService {
 
           // Fallback to 'brands' key (legacy format)
           if (data['brands'] is List) {
-            Logger.debug('🎯 Parsing from "brands" key (${(data['brands'] as List).length} brands)');
             return (data['brands'] as List)
                 .map((json) => SaasBrand.fromJson(json as Map<String, dynamic>))
                 .toList();
           }
         }
 
-        Logger.debug('⚠️  Unable to parse brands from response');
         return [];
       },
     );
 
-    Logger.debug('🎯 BrandOnboardingService: Response - success: ${response.success}');
     return response;
   }
 
-  /// Onboard selected brands to tenant inventory
+  /// Onboard selected brands to tenant inventory with initial stock quantities
   Future<ApiResponse<OnboardingResult>> onboardBrands({
     required List<String> brandIds,
     required List<String> variantIds,
     String? shopId,
+    Map<String, int>? variantStockQuantities,
   }) async {
-    Logger.debug('🎯 BrandOnboardingService.onboardBrands() called');
-    Logger.debug('   - Brand IDs: $brandIds');
-    Logger.debug('   - Variant IDs: $variantIds');
-
-    // Get tenant ID from ApiService's AuthService
-    final tenantId = await _apiService.authService.getTenantId();
-    Logger.debug('🎯 Tenant ID retrieved: $tenantId');
+    // Get tenant ID from DioApiService
+    final tenantId = await _apiService.getTenantId();
 
     if (tenantId == null || tenantId.isEmpty) {
-      Logger.debug('❌ Tenant ID is null or empty!');
       return ApiResponse<OnboardingResult>(
         success: false,
         message: 'Tenant ID is required for onboarding',
       );
     }
 
-    final requestBody = {
+    // Build request body
+    final requestBody = <String, dynamic>{
       'brand_ids': brandIds,
       'variant_ids': variantIds,
       'tenant_id': tenantId,
-      if (shopId != null) 'shop_id': shopId,
     };
+
+    // Add shop_id if provided
+    if (shopId != null && shopId.isNotEmpty) {
+      requestBody['shop_id'] = shopId;
+    }
+
+    // Add brand_variants with stock quantities if provided
+    if (variantStockQuantities != null && variantStockQuantities.isNotEmpty) {
+      final brandVariants = variantStockQuantities.entries
+          .where((e) => e.value > 0) // Only include variants with stock > 0
+          .map((e) => {
+                'saas_brand_variant_id': e.key,
+                'initial_stock': e.value,
+              })
+          .toList();
+
+      if (brandVariants.isNotEmpty) {
+        requestBody['brand_variants'] = brandVariants;
+      }
+    }
 
     final response = await _apiService.post<OnboardingResult>(
       '/api/inventory/saas-brands/onboard',
       body: requestBody,
       fromJson: (data) {
-        Logger.debug('🎯 Parsing onboarding result: ${data.runtimeType}');
         return OnboardingResult.fromJson(data as Map<String, dynamic>);
       },
     );
 
-    Logger.debug('🎯 BrandOnboardingService: Onboarding response - success: ${response.success}');
     return response;
   }
 
   /// Get onboarded products (from SaaS templates)
   Future<ApiResponse<List<Product>>> getOnboardedProducts() async {
-    Logger.debug('🎯 BrandOnboardingService.getOnboardedProducts() called');
-
     final response = await _apiService.get<List<Product>>(
       '/api/inventory/saas-brands/onboarded',
       fromJson: (data) {
-        Logger.debug('🎯 Parsing onboarded products: ${data.runtimeType}');
-
         if (data is List) {
           return data
               .map((json) => Product.fromJson(json as Map<String, dynamic>))
@@ -130,13 +129,9 @@ class BrandOnboardingService {
 
   /// Get custom brands (created by tenant)
   Future<ApiResponse<List<Brand>>> getCustomBrands() async {
-    Logger.debug('🎯 BrandOnboardingService.getCustomBrands() called');
-
     final response = await _apiService.get<List<Brand>>(
       '/api/inventory/brands/custom',
       fromJson: (data) {
-        Logger.debug('🎯 Parsing custom brands: ${data.runtimeType}');
-
         if (data is List) {
           return data
               .map((json) => Brand.fromJson(json as Map<String, dynamic>))
@@ -158,13 +153,9 @@ class BrandOnboardingService {
 
   /// Get brand packages (Starter, Premium, Full)
   Future<ApiResponse<List<BrandPackage>>> getBrandPackages() async {
-    Logger.debug('🎯 BrandOnboardingService.getBrandPackages() called');
-
     final response = await _apiService.get<List<BrandPackage>>(
       '/api/super-admin/brands/packages',
       fromJson: (data) {
-        Logger.debug('🎯 Parsing brand packages: ${data.runtimeType}');
-
         if (data is List) {
           return data
               .map((json) => BrandPackage.fromJson(json as Map<String, dynamic>))
@@ -182,6 +173,70 @@ class BrandOnboardingService {
     );
 
     return response;
+  }
+
+  /// Download Excel template for bulk brand import
+  Future<ApiResponse<String>> downloadBrandTemplate() async {
+    try {
+      // Get app's temporary directory
+      final tempDir = await getTemporaryDirectory();
+      final savePath = '${tempDir.path}/brand_template.xlsx';
+
+      // Delete existing file if it exists
+      final file = File(savePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+
+      final response = await _apiService.downloadFile(
+        '/api/super-admin/brands/template/download',
+        savePath,
+      );
+
+      return response;
+    } catch (e) {
+      return ApiResponse(
+        success: false,
+        message: 'Failed to download template: $e',
+      );
+    }
+  }
+
+  /// Upload Excel file for bulk brand import with shop support
+  Future<ApiResponse<BrandImportResult>> uploadBrandExcel(
+    String filePath, {
+    String? shopId,
+    String? shopName,
+  }) async {
+    try {
+      // Build additional form data for shop context
+      final additionalData = <String, dynamic>{};
+      if (shopId != null) {
+        additionalData['shop_id'] = shopId;
+      }
+      if (shopName != null) {
+        additionalData['shop_name'] = shopName;
+      }
+
+      final response = await _apiService.uploadFile<BrandImportResult>(
+        '/api/super-admin/brands/bulk-import',
+        filePath,
+        fromJson: (data) {
+          if (data is Map<String, dynamic>) {
+            return BrandImportResult.fromJson(data);
+          }
+          throw Exception('Invalid response format');
+        },
+        additionalData: additionalData,
+      );
+
+      return response;
+    } catch (e) {
+      return ApiResponse(
+        success: false,
+        message: 'Failed to upload Excel file: $e',
+      );
+    }
   }
 }
 
@@ -257,6 +312,129 @@ class BrandPackage {
               ?.map((e) => e.toString())
               .toList() ??
           [],
+    );
+  }
+}
+
+/// Get brand metadata (categories, subcategories, common sizes) for custom brand creation
+Future<ApiResponse<BrandMetadata>> getBrandMetadata(DioApiService apiService) async {
+  final response = await apiService.get<BrandMetadata>(
+    '/api/inventory/saas-brands/metadata',
+    fromJson: (data) {
+      if (data is Map<String, dynamic>) {
+        // Backend sends: {"message": "...", "data": {...}}
+        final metadataJson = data['data'] as Map<String, dynamic>? ?? data;
+        return BrandMetadata.fromJson(metadataJson);
+      }
+
+      return BrandMetadata(categories: [], subcategories: [], commonSizes: []);
+    },
+  );
+
+  return response;
+}
+
+/// Brand Import Result - Response from bulk brand import
+class BrandImportResult {
+  final int totalRows;
+  final int successCount;
+  final int errorCount;
+  final List<BrandImportError> errors;
+  final List<ImportedBrandData> importedBrands;
+  final String message;
+
+  BrandImportResult({
+    required this.totalRows,
+    required this.successCount,
+    required this.errorCount,
+    required this.errors,
+    required this.importedBrands,
+    required this.message,
+  });
+
+  factory BrandImportResult.fromJson(Map<String, dynamic> json) {
+    return BrandImportResult(
+      totalRows: json['total_rows'] ?? 0,
+      successCount: json['success_count'] ?? 0,
+      errorCount: json['error_count'] ?? 0,
+      errors: (json['errors'] as List<dynamic>?)
+              ?.map((e) => BrandImportError.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [],
+      importedBrands: (json['imported_brands'] as List<dynamic>?)
+              ?.map((e) => ImportedBrandData.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [],
+      message: json['message'] ?? '',
+    );
+  }
+}
+
+/// Brand Import Error - Individual row error
+class BrandImportError {
+  final int row;
+  final String message;
+
+  BrandImportError({
+    required this.row,
+    required this.message,
+  });
+
+  factory BrandImportError.fromJson(Map<String, dynamic> json) {
+    return BrandImportError(
+      row: json['row'] ?? 0,
+      message: json['message'] ?? '',
+    );
+  }
+}
+
+/// Imported Brand Data - Parsed data from Excel
+class ImportedBrandData {
+  final String brandName;
+  final String description;
+  final String category;
+  final String subcategory;
+  final String size;
+  final String alcoholContent;
+  final String mrp;
+  final String governmentDuty;
+  final String buyingPrice;
+  final String sellingPrice;
+  final String barcode;
+  final String originCountry;
+  final String notes;
+
+  ImportedBrandData({
+    required this.brandName,
+    required this.description,
+    required this.category,
+    required this.subcategory,
+    required this.size,
+    required this.alcoholContent,
+    required this.mrp,
+    required this.governmentDuty,
+    required this.buyingPrice,
+    required this.sellingPrice,
+    required this.barcode,
+    required this.originCountry,
+    required this.notes,
+  });
+
+  factory ImportedBrandData.fromJson(Map<String, dynamic> json) {
+    return ImportedBrandData(
+      brandName: json['brand_name'] ?? '',
+      description: json['description'] ?? '',
+      category: json['category'] ?? '',
+      subcategory: json['subcategory'] ?? '',
+      size: json['size'] ?? '',
+      alcoholContent: json['alcohol_content'] ?? '',
+      mrp: json['mrp'] ?? '',
+      governmentDuty: json['government_duty'] ?? '',
+      buyingPrice: json['buying_price'] ?? '',
+      sellingPrice: json['selling_price'] ?? '',
+      barcode: json['barcode'] ?? '',
+      originCountry: json['origin_country'] ?? '',
+      notes: json['notes'] ?? '',
     );
   }
 }

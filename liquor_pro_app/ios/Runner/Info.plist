@@ -2,10 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Liquor Pro App</string>
+	<string>LiquorPro</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -24,15 +26,56 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>LiquorPro needs camera access to scan barcodes, capture product images, and process invoices using OCR for faster inventory management.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>LiquorPro uses Face ID or Touch ID to securely authenticate your identity and protect sensitive business data.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>LiquorPro needs local network access to connect to your business management server for real-time inventory and sales tracking.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>LiquorPro needs permission to save product images and invoices to your photo library for record keeping.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>LiquorPro needs access to your photo library to select product images and invoices for inventory management and OCR processing.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>LiquorPro uses your location to record where sales are made for reporting and analytics purposes. Location is optional and you can proceed without it.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>LiquorPro uses your location to record where sales are made for reporting and analytics purposes. Location is optional and you can proceed without it.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>LiquorPro may access contacts to help you quickly add customer or vendor information. This is optional and your contacts are never shared.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dartobservatory._tcp</string>
+	</array>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+	<key>UIStatusBarHidden</key>
+	<false/>
+	<key>PrefersOpenGL</key>
+	<false/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
@@ -41,9 +84,12 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>CADisableMinimumFrameDurationOnPhone</key>
-	<true/>
-	<key>UIApplicationSupportsIndirectInputEvents</key>
-	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>remote-notification</string>
+	</array>
+	<key>FirebaseAppDelegateProxyEnabled</key>
+	<false/>
 </dict>
 </plist>

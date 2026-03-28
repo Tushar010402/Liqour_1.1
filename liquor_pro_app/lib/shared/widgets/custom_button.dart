@@ -31,7 +31,8 @@ class CustomButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final buttonColor = color ?? AppColors.primary;
+    final cs = Theme.of(context).colorScheme;
+    final buttonColor = color ?? cs.primary;
     final buttonTextColor = textColor ?? AppColors.textWhite;
 
     if (isOutlined) {
@@ -66,7 +67,7 @@ class CustomButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(borderRadius),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 24),
-          elevation: 2,
+          elevation: 0,
         ),
         child: _buildContent(buttonTextColor),
       ),

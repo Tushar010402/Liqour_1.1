@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'app_logger.dart';
 import 'snackbar_helper.dart';
+import '../config/environment_config.dart';
 
 /// Connectivity Helper - Best Practice Network Connectivity
 /// Centralized connectivity monitoring and checking
@@ -17,14 +19,37 @@ class ConnectivityHelper {
 
   // ==================== Connectivity Check ====================
 
+  /// Fallback: verify actual internet reachability via HTTP to our API
+  static Future<bool> _verifyWithHttpPing() async {
+    try {
+      final uri = Uri.parse(EnvironmentConfig.apiBaseUrl);
+      final result = await InternetAddress.lookup(uri.host)
+          .timeout(const Duration(seconds: 3));
+      return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Check if device has internet connection
+  /// Uses connectivity_plus first, then falls back to an actual network check
+  /// to avoid false negatives on iOS Simulator
   static Future<bool> hasConnection() async {
     try {
       final result = await _connectivity.checkConnectivity();
-      final hasConnection = !result.contains(ConnectivityResult.none);
+      final pluginSaysConnected = !result.contains(ConnectivityResult.none);
 
-      AppLogger.info('Has connection: $hasConnection');
-      return hasConnection;
+      if (pluginSaysConnected) {
+        return true;
+      }
+
+      // connectivity_plus says no connection — verify with actual network check
+      // (iOS Simulator sometimes reports no connectivity incorrectly)
+      final actuallyReachable = await _verifyWithHttpPing();
+      if (actuallyReachable) {
+        AppLogger.info('connectivity_plus reported offline, but API is reachable');
+      }
+      return actuallyReachable;
     } catch (e, stackTrace) {
       AppLogger.exception(
         exception: e,
@@ -83,6 +108,12 @@ class ConnectivityHelper {
       } else if (result.contains(ConnectivityResult.ethernet)) {
         return ConnectivityStatus.ethernet;
       } else {
+        // connectivity_plus says none — verify with actual network check
+        final actuallyReachable = await _verifyWithHttpPing();
+        if (actuallyReachable) {
+          // API reachable but plugin can't determine interface type
+          return ConnectivityStatus.wifi; // Best guess for simulator/desktop
+        }
         return ConnectivityStatus.none;
       }
     } catch (e, stackTrace) {
@@ -113,7 +144,7 @@ class ConnectivityHelper {
     }
 
     _subscription = _connectivity.onConnectivityChanged.listen(
-      (List<ConnectivityResult> results) {
+      (List<ConnectivityResult> results) async {
         ConnectivityStatus status;
 
         if (results.contains(ConnectivityResult.wifi)) {
@@ -123,7 +154,9 @@ class ConnectivityHelper {
         } else if (results.contains(ConnectivityResult.ethernet)) {
           status = ConnectivityStatus.ethernet;
         } else {
-          status = ConnectivityStatus.none;
+          // Verify with actual network check before declaring offline
+          final actuallyReachable = await _verifyWithHttpPing();
+          status = actuallyReachable ? ConnectivityStatus.wifi : ConnectivityStatus.none;
         }
 
         AppLogger.info('Connectivity changed: $status');
@@ -178,8 +211,8 @@ class ConnectivityHelper {
       AppLogger.warning('No connection available');
 
       SnackbarHelper.error(
-        context: context,
-        message: errorMessage ?? 'No internet connection',
+        context,
+        errorMessage ?? 'No internet connection',
       );
 
       return null;
@@ -198,8 +231,8 @@ class ConnectivityHelper {
       AppLogger.warning('WiFi not available');
 
       SnackbarHelper.error(
-        context: context,
-        message: errorMessage ?? 'WiFi connection required',
+        context,
+        errorMessage ?? 'WiFi connection required',
       );
 
       return null;
@@ -298,13 +331,13 @@ class _ConnectivityListenerState extends State<ConnectivityListener> {
     if (widget.showSnackbar && _previousStatus != null && _previousStatus != status) {
       if (status == ConnectivityStatus.none) {
         SnackbarHelper.error(
-          context: context,
-          message: 'No internet connection',
+          context,
+          'No internet connection',
         );
       } else if (_previousStatus == ConnectivityStatus.none) {
         SnackbarHelper.success(
-          context: context,
-          message: 'Internet connection restored',
+          context,
+          'Internet connection restored',
         );
       }
     }
@@ -398,14 +431,15 @@ class _ConnectivityGuardState extends State<ConnectivityGuard> {
   }
 
   Widget _buildDefaultOfflineWidget() {
+    final cs = Theme.of(context).colorScheme;
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(
+          Icon(
             Icons.signal_wifi_off,
             size: 64,
-            color: Colors.grey,
+            color: cs.onSurfaceVariant,
           ),
           const SizedBox(height: 16),
           const Text(
@@ -416,10 +450,10 @@ class _ConnectivityGuardState extends State<ConnectivityGuard> {
             ),
           ),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             'Please check your internet connection',
             style: TextStyle(
-              color: Colors.grey,
+              color: cs.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: 24),
@@ -448,7 +482,8 @@ class ConnectivityIndicator extends StatefulWidget {
 }
 
 class _ConnectivityIndicatorState extends State<ConnectivityIndicator> {
-  ConnectivityStatus _status = ConnectivityStatus.none;
+  // Start as null (unknown) — don't show the banner until we've confirmed offline
+  ConnectivityStatus? _status;
 
   @override
   void initState() {
@@ -483,23 +518,28 @@ class _ConnectivityIndicatorState extends State<ConnectivityIndicator> {
 
   @override
   Widget build(BuildContext context) {
+    // Don't show anything until we've actually checked connectivity
+    if (_status == null) {
+      return const SizedBox.shrink();
+    }
+
     if (!widget.showWhenOnline && _status != ConnectivityStatus.none) {
       return const SizedBox.shrink();
     }
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: ConnectivityHelper.getStatusColor(_status),
+      color: ConnectivityHelper.getStatusColor(_status!),
       child: Row(
         children: [
           Icon(
-            ConnectivityHelper.getStatusIcon(_status),
+            ConnectivityHelper.getStatusIcon(_status!),
             color: Colors.white,
             size: 16,
           ),
           const SizedBox(width: 8),
           Text(
-            ConnectivityHelper.getStatusString(_status),
+            ConnectivityHelper.getStatusString(_status!),
             style: const TextStyle(
               color: Colors.white,
               fontSize: 12,

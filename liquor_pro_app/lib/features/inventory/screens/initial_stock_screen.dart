@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
-import '../../../core/services/api_service.dart';
+import '../../../core/services/dio_api_service.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 import '../../../shared/widgets/custom_button.dart';
 import '../../admin/models/shop_model.dart';
@@ -11,7 +11,9 @@ import '../../admin/services/shop_service.dart';
 import '../models/product.dart';
 import '../providers/product_provider.dart';
 import '../services/stock_service.dart';
+import '../../../core/theme/ios_design_tokens.dart';
 import '../../../core/utils/logger.dart';
+import 'ai_stock_setup_screen.dart';
 
 /// Initial Stock Setup Screen - Set stock for newly onboarded products
 class InitialStockScreen extends StatefulWidget {
@@ -41,7 +43,10 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
   void initState() {
     super.initState();
     _selectedShopId = widget.shopId;
-    _loadInitialData();
+    // Defer loading until after build phase to avoid setState during build
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadInitialData();
+    });
   }
 
   Future<void> _loadInitialData() async {
@@ -53,7 +58,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
 
   Future<void> _loadShops() async {
     try {
-      final apiService = context.read<ApiService>();
+      final apiService = context.read<DioApiService>();
       final shopService = ShopService(apiService);
       final response = await shopService.getShops();
 
@@ -79,12 +84,23 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
     super.dispose();
   }
 
+  Future<void> _openAiStockSetup() async {
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => const AiStockSetupScreen()),
+    );
+    if (result == true && mounted) {
+      // Data already refreshed by AiStockSetupScreen before pop
+      Navigator.pop(context, true);
+    }
+  }
+
   Future<void> _loadProducts() async {
     setState(() => _isLoading = true);
 
     try {
       final productProvider = context.read<ProductProvider>();
-      await productProvider.loadProducts();
+      await productProvider.loadProducts(shopId: _selectedShopId);
 
       // Filter to only show newly onboarded products
       _products = productProvider.products
@@ -129,7 +145,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
     setState(() => _isSaving = true);
 
     try {
-      final apiService = context.read<ApiService>();
+      final apiService = context.read<DioApiService>();
       final stockService = StockService(apiService);
       int successCount = 0;
       int errorCount = 0;
@@ -160,15 +176,14 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Successfully set stock for $successCount product${successCount > 1 ? 's' : ''}' +
-                  (errorCount > 0 ? ' ($errorCount failed)' : ''),
+              'Successfully set stock for $successCount product${successCount > 1 ? 's' : ''}${errorCount > 0 ? ' ($errorCount failed)' : ''}',
             ),
             backgroundColor: errorCount > 0 ? AppColors.warning : AppColors.success,
           ),
         );
 
         // Refresh product list
-        context.read<ProductProvider>().loadProducts();
+        context.read<ProductProvider>().loadProducts(shopId: _selectedShopId);
 
         // Navigate back
         Navigator.pop(context, true);
@@ -199,21 +214,31 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: cs.surface,
       appBar: CustomAppBar(
         title: 'Set Initial Stock',
         actions: [
-          if (_products.isNotEmpty && !_isLoading)
+          if (_products.isNotEmpty && !_isLoading) ...[
+            IconButton(
+              onPressed: _isSaving ? null : _openAiStockSetup,
+              icon: Icon(
+                Icons.auto_awesome,
+                color: _isSaving ? cs.onSurfaceVariant : cs.primary,
+              ),
+              tooltip: 'AI Stock Setup',
+            ),
             TextButton(
               onPressed: _isSaving ? null : () => Navigator.pop(context),
               child: Text(
                 'Skip',
                 style: TextStyle(
-                  color: _isSaving ? AppColors.textSecondary : AppColors.primary,
+                  color: _isSaving ? cs.onSurfaceVariant : cs.primary,
                 ),
               ),
             ),
+          ],
         ],
       ),
       body: _isLoading
@@ -226,13 +251,13 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                       Icon(
                         Icons.inventory_2_outlined,
                         size: 64,
-                        color: AppColors.textSecondary.withOpacity(0.5),
+                        color: cs.onSurfaceVariant.withValues(alpha:0.5),
                       ),
                       const SizedBox(height: 16),
                       Text(
                         'No products to set stock for',
                         style: AppTextStyles.bodyLarge.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                       const SizedBox(height: 24),
@@ -249,12 +274,12 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                     // Info Banner
                     Container(
                       padding: const EdgeInsets.all(16),
-                      color: AppColors.primary.withOpacity(0.1),
+                      color: cs.primary.withValues(alpha: 0.1),
                       child: Row(
                         children: [
                           Icon(
                             Icons.info_outline,
-                            color: AppColors.primary,
+                            color: cs.primary,
                             size: 24,
                           ),
                           const SizedBox(width: 12),
@@ -262,7 +287,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                             child: Text(
                               'Set initial stock quantities for your newly onboarded products',
                               style: AppTextStyles.bodySmall.copyWith(
-                                color: AppColors.primary,
+                                color: cs.primary,
                               ),
                             ),
                           ),
@@ -274,7 +299,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                     if (_shops.isNotEmpty)
                       Container(
                         padding: const EdgeInsets.all(16),
-                        color: Colors.white,
+                        color: cs.surface,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -286,7 +311,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                             ),
                             const SizedBox(height: 8),
                             DropdownButtonFormField<String>(
-                              value: _selectedShopId,
+                              initialValue: _selectedShopId,
                               decoration: InputDecoration(
                                 border: OutlineInputBorder(
                                   borderRadius: BorderRadius.circular(8),
@@ -331,14 +356,8 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: Colors.white,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.05),
-                            blurRadius: 10,
-                            offset: const Offset(0, -5),
-                          ),
-                        ],
+                        color: cs.surface,
+                        border: Border(top: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
                       ),
                       child: SafeArea(
                         child: Column(
@@ -353,7 +372,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                                       Text(
                                         'Total Products',
                                         style: AppTextStyles.bodySmall.copyWith(
-                                          color: AppColors.textSecondary,
+                                          color: cs.onSurfaceVariant,
                                         ),
                                       ),
                                       const SizedBox(height: 4),
@@ -361,7 +380,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                                         '${_products.length}',
                                         style: AppTextStyles.h5.copyWith(
                                           fontWeight: FontWeight.bold,
-                                          color: AppColors.primary,
+                                          color: cs.primary,
                                         ),
                                       ),
                                     ],
@@ -374,7 +393,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                                       Text(
                                         'Total Units',
                                         style: AppTextStyles.bodySmall.copyWith(
-                                          color: AppColors.textSecondary,
+                                          color: cs.onSurfaceVariant,
                                         ),
                                       ),
                                       const SizedBox(height: 4),
@@ -406,19 +425,20 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
   }
 
   Widget _buildProductStockCard(Product product) {
+    final cs = Theme.of(context).colorScheme;
     final controller = _stockControllers[product.id]!;
 
-    return Card(
+    return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      elevation: 2,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
             // Product Info
             Row(
               children: [
@@ -426,12 +446,12 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                   width: 48,
                   height: 48,
                   decoration: BoxDecoration(
-                    color: AppColors.primary.withOpacity(0.1),
+                    color: cs.primary.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.liquor,
-                    color: AppColors.primary,
+                    color: cs.primary,
                     size: 24,
                   ),
                 ),
@@ -450,7 +470,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                       Text(
                         '${product.brand?.name ?? 'Unknown Brand'} • ${product.category?.name ?? 'Unknown Category'}',
                         style: AppTextStyles.bodySmall.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                     ],
@@ -471,7 +491,7 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
                       Text(
                         'Initial Stock Quantity',
                         style: AppTextStyles.bodySmall.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -541,7 +561,6 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
               ],
             ),
           ],
-        ),
       ),
     );
   }
@@ -551,22 +570,23 @@ class _InitialStockScreenState extends State<InitialStockScreen> {
     required VoidCallback onPressed,
     required String label,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return InkWell(
       onTap: onPressed,
       borderRadius: BorderRadius.circular(8),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: AppColors.primary.withOpacity(0.1),
+          color: cs.primary.withValues(alpha: 0.1),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: AppColors.primary.withOpacity(0.3),
+            color: cs.primary.withValues(alpha: 0.3),
           ),
         ),
         child: Text(
           label,
           style: AppTextStyles.bodySmall.copyWith(
-            color: AppColors.primary,
+            color: cs.primary,
             fontWeight: FontWeight.w600,
           ),
         ),

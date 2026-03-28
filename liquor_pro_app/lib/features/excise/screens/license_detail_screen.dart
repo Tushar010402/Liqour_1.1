@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/excise_models.dart';
 import '../providers/excise_provider.dart';
 
@@ -7,17 +8,15 @@ class LicenseDetailScreen extends StatelessWidget {
   final ExciseLicense license;
 
   const LicenseDetailScreen({
-    Key? key,
+    super.key,
     required this.license,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('License Details'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: CustomAppBar(
+        title: 'License Details',
         actions: [
           IconButton(
             icon: const Icon(Icons.edit),
@@ -38,7 +37,7 @@ class LicenseDetailScreen extends StatelessWidget {
                 gradient: LinearGradient(
                   colors: [
                     license.statusColor,
-                    license.statusColor.withOpacity(0.7),
+                    license.statusColor.withValues(alpha:0.7),
                   ],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
@@ -75,7 +74,7 @@ class LicenseDetailScreen extends StatelessWidget {
                       vertical: 8,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
+                      color: Colors.white.withValues(alpha:0.2),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
@@ -170,7 +169,7 @@ class LicenseDetailScreen extends StatelessWidget {
                               .map((category) => Chip(
                                     label: Text(category),
                                     backgroundColor:
-                                        license.licenseType.color.withOpacity(0.1),
+                                        license.licenseType.color.withValues(alpha:0.1),
                                     labelStyle: TextStyle(
                                       color: license.licenseType.color,
                                       fontWeight: FontWeight.w500,
@@ -209,8 +208,13 @@ class LicenseDetailScreen extends StatelessWidget {
     required String title,
     required List<Widget> children,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -236,6 +240,7 @@ class LicenseDetailScreen extends StatelessWidget {
     String value, {
     Color? valueColor,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -244,7 +249,7 @@ class LicenseDetailScreen extends StatelessWidget {
           Text(
             label,
             style: TextStyle(
-              color: Colors.grey[600],
+              color: cs.onSurface,
               fontSize: 14,
             ),
           ),
@@ -262,9 +267,14 @@ class LicenseDetailScreen extends StatelessWidget {
   }
 
   Widget _buildAlertCard(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
-      color: license.statusColor.withOpacity(0.1),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+      ),
+      color: license.statusColor.withValues(alpha:0.1),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
@@ -296,7 +306,7 @@ class LicenseDetailScreen extends StatelessWidget {
                         : 'This license will expire in ${license.daysUntilExpiry} days. Please renew before expiry.',
                     style: TextStyle(
                       fontSize: 13,
-                      color: license.statusColor.withOpacity(0.8),
+                      color: license.statusColor.withValues(alpha:0.8),
                     ),
                   ),
                 ],
@@ -449,7 +459,7 @@ class LicenseDetailScreen extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
-              value: paymentMethod,
+              initialValue: paymentMethod,
               decoration: const InputDecoration(
                 labelText: 'Payment Method',
                 border: OutlineInputBorder(),

@@ -58,26 +58,29 @@ class AnalyticsService {
   // ==================== Event Tracking ====================
 
   /// Track generic event
+  /// OPTIMIZED: Disabled in debug mode to reduce overhead
+  /// Analytics should only run in production/profile mode
   static void trackEvent(String eventName, {Map<String, dynamic>? parameters}) {
+    // BEST PRACTICE: Don't track analytics in debug mode
+    // Development should be fast; analytics adds significant overhead
+    if (kDebugMode) return;
+
     if (!_isEnabled) return;
 
     try {
-      Logger.info('📊 Analytics Event: $eventName', parameters);
-
       // In production, integrate with:
-      // - Firebase Analytics
-      // - Mixpanel
-      // - Amplitude
+      // - Firebase Analytics: FirebaseAnalytics.instance.logEvent(...)
+      // - Mixpanel: Mixpanel.track(eventName, parameters)
+      // - Amplitude: Amplitude.getInstance().logEvent(eventName, parameters)
       // - Custom backend analytics
 
-      if (kDebugMode) {
-        debugPrint('📊 Event: $eventName');
-        if (parameters != null) {
-          debugPrint('   Parameters: $parameters');
-        }
-      }
+      // OPTIMIZED: Removed Logger.info() call that was adding overhead
+      // Only log analytics errors in production
     } catch (e) {
-      Logger.error('Failed to track event: $eventName', e);
+      // Only log errors - don't spam logs for successful events
+      if (kReleaseMode) {
+        Logger.error('Failed to track event: $eventName', e);
+      }
     }
   }
 
@@ -325,17 +328,23 @@ class AnalyticsService {
   // ==================== User Properties ====================
 
   /// Set user ID
+  /// OPTIMIZED: Disabled in debug mode
   static void setUserId(String userId) {
+    if (kDebugMode) return; // Skip in debug mode
     if (!_isEnabled) return;
-    Logger.info('📊 Set User ID: $userId');
-    // In production: analytics.setUserId(userId);
+    // In production:
+    // FirebaseAnalytics.instance.setUserId(id: userId);
+    // Mixpanel.identify(userId);
   }
 
   /// Set user property
+  /// OPTIMIZED: Disabled in debug mode
   static void setUserProperty(String name, String value) {
+    if (kDebugMode) return; // Skip in debug mode
     if (!_isEnabled) return;
-    Logger.info('📊 Set User Property: $name = $value');
-    // In production: analytics.setUserProperty(name, value);
+    // In production:
+    // FirebaseAnalytics.instance.setUserProperty(name: name, value: value);
+    // Mixpanel.getPeople().set(name, value);
   }
 
   /// Set user properties

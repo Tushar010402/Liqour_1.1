@@ -362,10 +362,7 @@ Total: ₹${totalAmount.toStringAsFixed(2)}
   /// Show error message
   static void _showError(BuildContext? context, String message) {
     if (context != null) {
-      SnackbarHelper.error(
-        context: context,
-        message: message,
-      );
+      SnackbarHelper.showError(context, message);
     }
   }
 

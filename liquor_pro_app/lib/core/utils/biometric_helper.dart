@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:local_auth_android/local_auth_android.dart';
-import 'package:local_auth_ios/local_auth_ios.dart';
+import 'package:local_auth_darwin/local_auth_darwin.dart';
 import 'app_logger.dart';
 import 'snackbar_helper.dart';
 
@@ -96,10 +96,7 @@ class BiometricHelper {
       if (!await isDeviceSupported()) {
         AppLogger.warning('Biometric authentication not supported');
         if (context != null) {
-          SnackbarHelper.error(
-            context: context,
-            message: 'Biometric authentication not supported',
-          );
+          SnackbarHelper.showError(context, 'Biometric authentication not supported');
         }
         return false;
       }
@@ -108,10 +105,7 @@ class BiometricHelper {
       if (!await canCheckBiometrics()) {
         AppLogger.warning('Biometrics not available');
         if (context != null) {
-          SnackbarHelper.error(
-            context: context,
-            message: 'Please set up biometric authentication',
-          );
+          SnackbarHelper.showError(context, 'Please set up biometric authentication');
         }
         return false;
       }
@@ -159,10 +153,7 @@ class BiometricHelper {
       );
 
       if (context != null) {
-        SnackbarHelper.error(
-          context: context,
-          message: 'Authentication failed',
-        );
+        SnackbarHelper.showError(context, 'Authentication failed');
       }
 
       return false;
@@ -363,14 +354,15 @@ class _BiometricGuardState extends State<BiometricGuard> {
     }
 
     if (!_isAuthenticated) {
+      final cs = Theme.of(context).colorScheme;
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
+            Icon(
               Icons.lock,
               size: 64,
-              color: Colors.grey,
+              color: cs.onSurfaceVariant,
             ),
             const SizedBox(height: 16),
             const Text(
@@ -381,10 +373,10 @@ class _BiometricGuardState extends State<BiometricGuard> {
               ),
             ),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               'Please authenticate to view this content',
               style: TextStyle(
-                color: Colors.grey,
+                color: cs.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 24),

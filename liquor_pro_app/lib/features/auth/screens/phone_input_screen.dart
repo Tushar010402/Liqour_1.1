@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
-import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/logger.dart';
 import '../providers/auth_provider.dart';
-import 'otp_verification_screen.dart';
 
 /// Phone Input Screen - First step in authentication
 class PhoneInputScreen extends StatefulWidget {
@@ -57,68 +55,43 @@ class _PhoneInputScreenState extends State<PhoneInputScreen> {
     final authProvider = context.read<AuthProvider>();
     final phone = _formatPhoneNumber(_phoneController.text.trim());
 
-    Logger.debug('Phone input: ${_phoneController.text.trim()}');
-    Logger.debug('Formatted phone: $phone');
+    debugPrint('[PhoneInput] Raw input: "${_phoneController.text.trim()}"');
+    debugPrint('[PhoneInput] Formatted phone: "$phone"');
 
-    // Step 1: Check if user exists
-    Logger.info('Checking if user exists');
+    // Backend check-user now sends OTP and returns session info
     final checkResponse = await authProvider.checkUser(phone);
-    Logger.debug('Check response', checkResponse);
 
     try {
-      if (!mounted) {
-        Logger.warning('Widget unmounted after checkUser');
-        return;
-      }
+      if (!mounted) return;
       setState(() => _isLoading = false);
 
+      debugPrint('[PhoneInput] checkUser response: sessionId=${checkResponse?.sessionId}, message="${checkResponse?.message}"');
+
       if (checkResponse == null) {
-        // Error occurred - show error from provider
-        Logger.error('Check user response is null');
         if (mounted && authProvider.errorMessage != null) {
           _showError(authProvider.errorMessage!);
         }
         return;
       }
 
-      Logger.debug('User exists: ${checkResponse.exists}');
-      if (checkResponse.exists) {
-      // Existing user - send OTP for login
-      Logger.info('User exists, sending OTP');
-      if (!mounted) return;
-      setState(() => _isLoading = true);
-      final sendOtpResponse = await authProvider.sendOtp(phone);
-      Logger.debug('Send OTP response', sendOtpResponse);
-      if (!mounted) return;
-      setState(() => _isLoading = false);
+      if (!checkResponse.hasOtpSession) {
+        _showError('Failed to send verification code. Please try again.');
+        return;
+      }
 
-      if (sendOtpResponse != null && mounted) {
-        Logger.info('OTP sent, navigating to verification');
-        // Navigate to OTP verification for login
+      // OTP sent — go to OTP screen. Don't pass isRegistration here;
+      // the verify-otp response will tell us login vs registration.
+      if (mounted) {
         context.pushNamed(
           'otp-verification',
           extra: {
             'phone': phone,
-            'sessionId': sendOtpResponse.sessionId,
-            'expiresAt': sendOtpResponse.expiresAt,
-            'isRegistration': false,
+            'sessionId': checkResponse.sessionId,
+            'expiresAt': checkResponse.expiresAt ?? DateTime.now().add(const Duration(minutes: 10)),
+            'isRegistration': false, // Determined by verify-otp response, not check-user
           },
         );
-      } else if (mounted && authProvider.errorMessage != null) {
-        Logger.error('OTP send failed', authProvider.errorMessage);
-        _showError(authProvider.errorMessage!);
-      } else {
-        Logger.warning('No response and no error message');
       }
-    } else {
-      // New user - navigate to pre-registration to get email and name
-      if (mounted) {
-        context.pushNamed(
-          'pre-registration',
-          extra: {'phone': phone},
-        );
-      }
-    }
     } catch (e, stackTrace) {
       Logger.error('Exception in phone input continue', e, stackTrace);
       if (mounted) {
@@ -152,122 +125,127 @@ class _PhoneInputScreenState extends State<PhoneInputScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const SizedBox(height: 60),
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const SizedBox(height: 60),
 
-                // Logo/Title
-                Text(
-                  'LiquorPro',
-                  style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: AppTheme.primaryColor,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-
-                const SizedBox(height: 8),
-
-                Text(
-                  'Welcome back',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.grey[600],
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-
-                const SizedBox(height: 60),
-
-                // Phone input
-                Text(
-                  'Enter your phone number',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-
-                const SizedBox(height: 16),
-
-                TextFormField(
-                  controller: _phoneController,
-                  keyboardType: TextInputType.phone,
-                  decoration: InputDecoration(
-                    hintText: '+91 98765 43210',
-                    prefixIcon: const Icon(Icons.phone_android_rounded),
-                    suffixIcon: Icon(Icons.check_circle_rounded, color: Colors.grey[300]),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(16),
+                  // Logo/Title
+                  Text(
+                    'LiquorPro',
+                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: cs.primary,
                     ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(16),
-                      borderSide: BorderSide(color: Colors.grey[300]!),
+                    textAlign: TextAlign.center,
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  Text(
+                    'Welcome back',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: cs.onSurfaceVariant,
                     ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(16),
-                      borderSide: const BorderSide(
-                        color: AppTheme.primaryColor,
-                        width: 2,
+                    textAlign: TextAlign.center,
+                  ),
+
+                  const SizedBox(height: 60),
+
+                  // Phone input
+                  Text(
+                    'Enter your phone number',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  TextFormField(
+                    controller: _phoneController,
+                    keyboardType: TextInputType.phone,
+                    decoration: InputDecoration(
+                      hintText: '98765 43210',
+                      prefixIcon: const Icon(Icons.phone_android_rounded),
+                      suffixIcon: Icon(Icons.check_circle_rounded, color: cs.outlineVariant),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
                       ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: BorderSide(color: cs.outlineVariant),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: BorderSide(
+                          color: cs.primary,
+                          width: 2,
+                        ),
+                      ),
+                      filled: true,
+                      fillColor: cs.surfaceContainerHighest,
                     ),
-                    filled: true,
-                    fillColor: Colors.grey[50],
+                    validator: _validatePhone,
+                    enabled: !_isLoading,
                   ),
-                  validator: _validatePhone,
-                  enabled: !_isLoading,
-                ),
 
-                const SizedBox(height: 24),
+                  const SizedBox(height: 24),
 
-                // Continue button
-                ElevatedButton(
-                  onPressed: _isLoading ? null : _handleContinue,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.primaryColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                  // Continue button
+                  ElevatedButton(
+                    onPressed: _isLoading ? null : _handleContinue,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: cs.primary,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 0,
                     ),
-                    elevation: 0,
-                  ),
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              Colors.white,
+                    child: _isLoading
+                        ? const SizedBox(
+                            height: 20,
+                            width: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.white,
+                              ),
+                            ),
+                          )
+                        : const Text(
+                            'Continue',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
-                        )
-                      : const Text(
-                          'Continue',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                ),
-
-                const Spacer(),
-
-                // Terms and conditions
-                Text(
-                  'By continuing, you agree to our Terms of Service and Privacy Policy',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.grey[600],
                   ),
-                  textAlign: TextAlign.center,
-                ),
-              ],
+
+                  const SizedBox(height: 40),
+
+                  // Terms and conditions
+                  Text(
+                    'By continuing, you agree to our Terms of Service and Privacy Policy',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+
+                  const SizedBox(height: 24),
+                ],
+              ),
             ),
           ),
         ),

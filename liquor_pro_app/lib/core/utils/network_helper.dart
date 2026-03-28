@@ -51,7 +51,7 @@ class NetworkHelper {
   }
 
   /// Get current connectivity type
-  static Future<ConnectivityResult> getConnectivityType() async {
+  static Future<List<ConnectivityResult>> getConnectivityType() async {
     try {
       final result = await _connectivity.checkConnectivity();
       AppLogger.debug('Network: Connectivity type - $result');
@@ -62,32 +62,32 @@ class NetworkHelper {
         stackTrace: stackTrace,
         context: 'Network getConnectivityType',
       );
-      return ConnectivityResult.none;
+      return [ConnectivityResult.none];
     }
   }
 
   /// Check if connected via WiFi
   static Future<bool> isWifi() async {
     final result = await getConnectivityType();
-    return result == ConnectivityResult.wifi;
+    return result.contains(ConnectivityResult.wifi);
   }
 
   /// Check if connected via Mobile data
   static Future<bool> isMobile() async {
     final result = await getConnectivityType();
-    return result == ConnectivityResult.mobile;
+    return result.contains(ConnectivityResult.mobile);
   }
 
   /// Check if connected via Ethernet
   static Future<bool> isEthernet() async {
     final result = await getConnectivityType();
-    return result == ConnectivityResult.ethernet;
+    return result.contains(ConnectivityResult.ethernet);
   }
 
   // ==================== Network Monitoring ====================
 
   /// Stream of connectivity changes
-  static Stream<ConnectivityResult> get onConnectivityChanged {
+  static Stream<List<ConnectivityResult>> get onConnectivityChanged {
     return _connectivity.onConnectivityChanged;
   }
 
@@ -96,7 +96,7 @@ class NetworkHelper {
     required Function(bool isConnected) onChanged,
   }) {
     _connectivity.onConnectivityChanged.listen((result) async {
-      final connected = result != ConnectivityResult.none;
+      final connected = !result.contains(ConnectivityResult.none);
 
       if (connected) {
         // Double check with actual internet connection
@@ -349,7 +349,7 @@ enum NetworkRequirement {
 
 /// Network info model
 class NetworkInfo {
-  final ConnectivityResult type;
+  final List<ConnectivityResult> type;
   final bool isConnected;
   final NetworkQuality quality;
   final String status;
@@ -392,7 +392,7 @@ typedef NetworkCallback = void Function(bool isConnected);
 /// Network listener
 class NetworkListener {
   NetworkCallback? _onChanged;
-  Stream<ConnectivityResult>? _subscription;
+  Stream<List<ConnectivityResult>>? _subscription;
 
   /// Start listening to network changes
   void start(NetworkCallback onChanged) {
@@ -400,7 +400,7 @@ class NetworkListener {
     _subscription = NetworkHelper.onConnectivityChanged;
 
     _subscription?.listen((result) async {
-      final connected = result != ConnectivityResult.none;
+      final connected = !result.contains(ConnectivityResult.none);
 
       if (connected) {
         final hasInternet = await NetworkHelper.hasInternetConnection();

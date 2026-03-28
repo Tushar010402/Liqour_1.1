@@ -7,6 +7,8 @@ import '../../../core/config/api_config.dart';
 import '../../../core/models/api_response.dart';
 import '../../../core/services/auth_service.dart';
 import '../../../core/utils/app_logger.dart';
+import '../../../core/utils/image_compressor.dart';
+import '../../../core/utils/logger.dart';
 import '../models/daily_sales_models.dart';
 import '../models/sale.dart' show RevertOtpResponse;
 
@@ -24,18 +26,18 @@ class DailySalesService {
   ) async {
     try {
       if (kDebugMode) {
-        print('🌐 DailySalesService: Creating record - ${request.recordDate}, Shop: ${request.shopId}, Total: ${request.totalSalesAmount}');
+        Logger.debug('DailySalesService: Creating record - ${request.recordDate}, Shop: ${request.shopId}, Total: ${request.totalSalesAmount}');
       }
 
       final token = await _authService.getToken();
       if (token == null) {
-        if (kDebugMode) print('❌ DailySalesService: Authentication failed');
+        if (kDebugMode) Logger.error('DailySalesService: Authentication failed');
         return ApiResponse.error(error: 'Not authenticated');
       }
 
       final tenantId = await _authService.getTenantId();
       if (tenantId == null) {
-        if (kDebugMode) print('❌ DailySalesService: Tenant ID not found');
+        if (kDebugMode) Logger.error('DailySalesService: Tenant ID not found');
         return ApiResponse.error(error: 'Tenant ID not found');
       }
 
@@ -53,22 +55,22 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('🌐 DailySalesService: Response - Status: ${response.statusCode}');
+        Logger.debug('DailySalesService: Response - Status: ${response.statusCode}');
       }
 
       if (response.statusCode == 201 || response.statusCode == 200) {
         final data = json.decode(response.body);
         final record = DailySalesRecord.fromJson(data['data'] ?? data);
-        if (kDebugMode) print('✅ DailySalesService: Record created - ID: ${record.id}');
+        if (kDebugMode) Logger.info('DailySalesService: Record created - ID: ${record.id}');
         return ApiResponse.success(record);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Failed (${response.statusCode}) - ${error['error']}');
-        AppLogger.error('Daily sales API error: ${error}');
+        if (kDebugMode) Logger.error('DailySalesService: Failed (${response.statusCode}) - ${error['error']}');
+        AppLogger.error('Daily sales API error: $error');
         return ApiResponse.error(error: error['error'] ?? error['errors']?.toString() ?? 'Failed to create daily sales record');
       }
     } catch (e, stackTrace) {
-      if (kDebugMode) print('❌ DailySalesService: Exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Exception - $e');
       AppLogger.error('Error creating daily sales record: $e', e, stackTrace);
       return ApiResponse.error(error: 'Error creating daily sales record: $e');
     }
@@ -115,6 +117,10 @@ class DailySalesService {
       final uri = Uri.parse('${ApiConfig.baseUrl}/api/sales/daily-sales')
           .replace(queryParameters: queryParams);
 
+      // Debug: Log the full URL with query params
+      debugPrint('📡 [DailySalesService] API Call: ${uri.toString()}');
+      debugPrint('📡 [DailySalesService] Query params: $queryParams');
+
       final response = await http.get(
         uri,
         headers: {
@@ -129,10 +135,28 @@ class DailySalesService {
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         // Backend returns: { "records": [...], "total_count": 14, "page": 1, ... }
-        final recordsData = data['records'] as List;
+        final totalCount = data['total_count'] ?? 0;
+        final returnedPage = data['page'] ?? 1;
+        final returnedPageSize = data['page_size'] ?? pageSize;
+        debugPrint('📡 [DailySalesService] Response: total_count=$totalCount, page=$returnedPage/${ (totalCount / pageSize).ceil()}, page_size=$returnedPageSize');
+
+        final recordsData = data['records'] as List? ?? [];
         final records = recordsData
             .map((record) => DailySalesRecord.fromJson(record))
             .toList();
+
+        debugPrint('📡 [DailySalesService] Parsed ${records.length} records (total available: $totalCount)');
+        if (records.isNotEmpty) {
+          final dates = records.map((r) => r.recordDate).toList()..sort();
+          debugPrint('📡 [DailySalesService] Date range in response: ${dates.first} to ${dates.last}');
+        }
+
+        // Log if there are more records to fetch
+        if (totalCount > records.length && returnedPage == 1) {
+          final remainingRecords = totalCount - records.length;
+          debugPrint('⚠️ [DailySalesService] WARNING: $remainingRecords more records exist - pagination required!');
+        }
+
         return ApiResponse.success(records);
       } else {
         final error = json.decode(response.body);
@@ -207,13 +231,13 @@ class DailySalesService {
 
       // Debug: Log the full request body
       if (kDebugMode) {
-        print('🔍 UPDATE DAILY SALES REQUEST:');
-        print('   URL: ${ApiConfig.baseUrl}/api/sales/daily-sales/$id');
-        print('   shop_id: ${requestBody['shop_id']}');
-        print('   record_date: ${requestBody['record_date']}');
-        print('   total_sales_amount: ${requestBody['total_sales_amount']}');
-        print('   items count: ${(requestBody['items'] as List?)?.length ?? 0}');
-        print('   Full body: ${json.encode(requestBody)}');
+        Logger.debug('UPDATE DAILY SALES REQUEST:');
+        Logger.debug('   URL: ${ApiConfig.baseUrl}/api/sales/daily-sales/$id');
+        Logger.debug('   shop_id: ${requestBody['shop_id']}');
+        Logger.debug('   record_date: ${requestBody['record_date']}');
+        Logger.debug('   total_sales_amount: ${requestBody['total_sales_amount']}');
+        Logger.debug('   items count: ${(requestBody['items'] as List?)?.length ?? 0}');
+        Logger.debug('   Full body: ${json.encode(requestBody)}');
       }
 
       final response = await http.put(
@@ -230,7 +254,7 @@ class DailySalesService {
 
       // Debug: Log response body for errors
       if (kDebugMode && response.statusCode != 200) {
-        print('❌ UPDATE FAILED - Response: ${response.body}');
+        Logger.error('UPDATE FAILED - Response: ${response.body}');
       }
 
       if (response.statusCode == 200) {
@@ -336,7 +360,7 @@ class DailySalesService {
   }) async {
     try {
       if (kDebugMode) {
-        print('🔍 DailySalesService: Validating ${items.length} products for shop $shopId');
+        Logger.debug('DailySalesService: Validating ${items.length} products for shop $shopId');
       }
 
       final token = await _authService.getToken();
@@ -364,23 +388,23 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('🔍 DailySalesService: Validation response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Validation response - ${response.statusCode}');
       }
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         final result = BatchValidationResult.fromJson(data);
         if (kDebugMode) {
-          print('✅ DailySalesService: Validation complete - ${result.validCount} valid, ${result.invalidCount} invalid');
+          Logger.info('DailySalesService: Validation complete - ${result.validCount} valid, ${result.invalidCount} invalid');
         }
         return ApiResponse.success(result);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Validation failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: Validation failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to validate products');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: Validation exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Validation exception - $e');
       AppLogger.error('Error validating products batch: $e');
       return ApiResponse.error(error: 'Error validating products: $e');
     }
@@ -395,7 +419,7 @@ class DailySalesService {
   Future<ApiResponse<String>> uploadSalesImage(File imageFile) async {
     try {
       if (kDebugMode) {
-        print('📸 DailySalesService: Uploading image - ${imageFile.path}');
+        Logger.debug('DailySalesService: Uploading image - ${imageFile.path}');
       }
 
       final token = await _authService.getToken();
@@ -434,14 +458,14 @@ class DailySalesService {
       final response = await http.Response.fromStream(streamedResponse);
 
       if (kDebugMode) {
-        print('📸 DailySalesService: Upload response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Upload response - ${response.statusCode}');
       }
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         final data = json.decode(response.body);
 
         if (kDebugMode) {
-          print('📸 DailySalesService: Response body - ${response.body}');
+          Logger.debug('DailySalesService: Response body - ${response.body}');
         }
 
         // Backend returns image_urls as array - get first URL
@@ -462,26 +486,37 @@ class DailySalesService {
                      data['data']?['url']?.toString();
 
         if (imageUrl != null && imageUrl.isNotEmpty) {
+          // ═══════════════════════════════════════════════════════════════════════
+          // CRITICAL FIX: Convert relative paths to full URLs
+          // Backend returns relative paths like "/uploads/daily_sales/..."
+          // CachedNetworkImageProvider requires full URLs with host
+          // ═══════════════════════════════════════════════════════════════════════
+          if (imageUrl.startsWith('/') && !imageUrl.startsWith('http')) {
+            imageUrl = '${ApiConfig.baseUrl}$imageUrl';
+            if (kDebugMode) {
+              Logger.debug('DailySalesService: Converted relative path to full URL');
+            }
+          }
           if (kDebugMode) {
-            print('✅ DailySalesService: Image uploaded - $imageUrl');
+            Logger.info('DailySalesService: Image uploaded - $imageUrl');
           }
           return ApiResponse.success(imageUrl);
         } else {
           if (kDebugMode) {
-            print('❌ DailySalesService: No URL in response - $data');
+            Logger.error('DailySalesService: No URL in response - $data');
           }
           return ApiResponse.error(error: 'No URL returned from upload');
         }
       } else {
         final error = json.decode(response.body);
         if (kDebugMode) {
-          print('❌ DailySalesService: Upload failed - ${error['error']}');
+          Logger.error('DailySalesService: Upload failed - ${error['error']}');
         }
         return ApiResponse.error(error: error['error'] ?? 'Failed to upload image');
       }
     } catch (e) {
       if (kDebugMode) {
-        print('❌ DailySalesService: Upload exception - $e');
+        Logger.error('DailySalesService: Upload exception - $e');
       }
       AppLogger.error('Error uploading sales image: $e');
       return ApiResponse.error(error: 'Error uploading image: $e');
@@ -489,35 +524,168 @@ class DailySalesService {
   }
 
   /// Upload multiple images and return list of URLs
-  Future<ApiResponse<List<String>>> uploadSalesImages(List<File> imageFiles) async {
+  ///
+  /// INDUSTRIAL-GRADE IMPLEMENTATION:
+  /// - Compresses images in background isolate before upload (9MB → ~200KB)
+  /// - Sequential uploads with delay to prevent backend race condition
+  /// - Backend generates filenames using timestamp+counter (e.g., 201945_1.jpg)
+  /// - If uploads happen within same second, backend may return duplicate URLs
+  /// - Solution: Add 1.1 second delay between uploads to ensure unique timestamps
+  /// - Also deduplicates URLs as a safety net
+  ///
+  /// [onCompressionProgress] - Callback for compression progress (current, total, filename)
+  /// [onUploadProgress] - Callback for upload progress (current, total, filename)
+  Future<ApiResponse<List<String>>> uploadSalesImages(
+    List<File> imageFiles, {
+    Function(int current, int total, String fileName)? onCompressionProgress,
+    Function(int current, int total, String fileName)? onUploadProgress,
+  }) async {
     try {
       if (kDebugMode) {
-        print('📸 DailySalesService: Uploading ${imageFiles.length} images');
+        Logger.info('DailySalesService: Starting upload of ${imageFiles.length} images');
+        Logger.debug('DailySalesService: Phase 1 - Compressing images in background...');
+        int totalOriginalSize = 0;
+        for (int i = 0; i < imageFiles.length; i++) {
+          final file = imageFiles[i];
+          final fileName = file.path.split('/').last;
+          final fileSize = await file.length();
+          totalOriginalSize += fileSize;
+          Logger.debug('   Image ${i + 1}: $fileName (${(fileSize / 1024).toStringAsFixed(1)} KB)');
+        }
+        Logger.debug('   Total original size: ${(totalOriginalSize / 1024 / 1024).toStringAsFixed(1)} MB');
       }
 
-      final List<String> uploadedUrls = [];
+      // ═══════════════════════════════════════════════════════════════════════
+      // PHASE 1: COMPRESS IMAGES IN BACKGROUND (Non-blocking)
+      // Uses native compression (libjpeg-turbo/ImageIO) for 10-50x faster than Dart
+      // Runs in isolate - UI remains responsive
+      // ═══════════════════════════════════════════════════════════════════════
+      final List<File> compressedFiles = await ImageCompressor.compressImages(
+        imageFiles,
+        quality: 85, // High quality JPEG
+        maxWidth: 2048,
+        maxHeight: 2048,
+        onProgress: (current, total, fileName) {
+          onCompressionProgress?.call(current, total, fileName);
+          if (kDebugMode) {
+            Logger.debug('DailySalesService: Compressing $current/$total - $fileName');
+          }
+        },
+      );
 
-      for (int i = 0; i < imageFiles.length; i++) {
-        final result = await uploadSalesImage(imageFiles[i]);
+      // Log compression results
+      if (kDebugMode) {
+        int totalCompressedSize = 0;
+        for (final file in compressedFiles) {
+          totalCompressedSize += await file.length();
+        }
+        Logger.info('DailySalesService: Compression complete!');
+        Logger.debug('   Total compressed size: ${(totalCompressedSize / 1024).toStringAsFixed(0)} KB');
+        Logger.debug('DailySalesService: Phase 2 - Uploading compressed images...');
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // PHASE 2: UPLOAD COMPRESSED IMAGES
+      // ═══════════════════════════════════════════════════════════════════════
+      final List<String> uploadedUrls = [];
+      final Set<String> seenUrls = {}; // Track URLs to detect duplicates in real-time
+
+      for (int i = 0; i < compressedFiles.length; i++) {
+        // Report upload progress
+        final fileName = compressedFiles[i].path.split('/').last;
+        onUploadProgress?.call(i + 1, compressedFiles.length, fileName);
+
+        // Add delay between uploads to prevent backend race condition
+        // Backend uses timestamp (HHMMSS) in filename - uploads within same second
+        // get the same filename and overwrite each other
+        // Delay of 1100ms ensures each upload gets a unique timestamp
+        if (i > 0) {
+          if (kDebugMode) {
+            Logger.debug('DailySalesService: Waiting 1.1s before next upload...');
+          }
+          await Future.delayed(const Duration(milliseconds: 1100));
+        }
+
+        final result = await uploadSalesImage(compressedFiles[i]);
 
         if (result.success && result.data != null) {
-          uploadedUrls.add(result.data!);
-          if (kDebugMode) {
-            print('📸 DailySalesService: Image ${i + 1}/${imageFiles.length} uploaded');
+          final url = result.data!;
+
+          // Real-time duplicate detection
+          if (seenUrls.contains(url)) {
+            if (kDebugMode) {
+              Logger.warning('DailySalesService: DUPLICATE URL detected for image ${i + 1}: $url');
+              Logger.warning('   This indicates backend race condition - retrying with additional delay...');
+            }
+            // Retry with extra delay
+            await Future.delayed(const Duration(milliseconds: 2000));
+            final retryResult = await uploadSalesImage(compressedFiles[i]);
+            if (retryResult.success && retryResult.data != null && !seenUrls.contains(retryResult.data!)) {
+              uploadedUrls.add(retryResult.data!);
+              seenUrls.add(retryResult.data!);
+              if (kDebugMode) {
+                Logger.info('DailySalesService: Retry successful with unique URL: ${retryResult.data}');
+              }
+            } else {
+              // Still got duplicate or error - add anyway with warning
+              uploadedUrls.add(url);
+              if (kDebugMode) {
+                Logger.warning('DailySalesService: Retry still returned duplicate - proceeding anyway');
+              }
+            }
+          } else {
+            uploadedUrls.add(url);
+            seenUrls.add(url);
+            if (kDebugMode) {
+              Logger.info('DailySalesService: Image ${i + 1}/${compressedFiles.length} uploaded -> $url');
+            }
           }
         } else {
-          // If any upload fails, return error
-          return ApiResponse.error(error: result.error ?? 'Failed to upload image ${i + 1}');
+          // CRITICAL FIX: Don't fail entire batch on single upload failure!
+          // Continue uploading remaining images and return partial success
+          if (kDebugMode) {
+            Logger.error('DailySalesService: Image ${i + 1} upload FAILED: ${result.error}');
+            Logger.warning('   Continuing with remaining images (partial upload)');
+          }
         }
       }
 
+      // ═══════════════════════════════════════════════════════════════════════
+      // CLEANUP: Delete temporary compressed files
+      // ═══════════════════════════════════════════════════════════════════════
+      await ImageCompressor.cleanupTempFiles(compressedFiles);
+
+      // SAFETY NET: Final deduplication (should not be needed with delays)
+      final uniqueUrls = uploadedUrls.toSet().toList();
+
       if (kDebugMode) {
-        print('✅ DailySalesService: All ${uploadedUrls.length} images uploaded successfully');
+        final successCount = uniqueUrls.length;
+        final failCount = imageFiles.length - successCount;
+        if (failCount > 0) {
+          Logger.warning('DailySalesService: Partial upload - $successCount/${imageFiles.length} succeeded ($failCount failed)');
+        } else {
+          Logger.info('DailySalesService: All ${imageFiles.length} images uploaded successfully');
+        }
+        Logger.debug('Final URLs: ${uniqueUrls.length} unique (uploaded: ${uploadedUrls.length})');
+        if (uniqueUrls.length != uploadedUrls.length) {
+          Logger.warning('WARNING: ${uploadedUrls.length - uniqueUrls.length} duplicate(s) removed');
+        }
+        for (int i = 0; i < uniqueUrls.length; i++) {
+          Logger.debug('   ${i + 1}. ${uniqueUrls[i]}');
+        }
       }
-      return ApiResponse.success(uploadedUrls);
+
+      // CRITICAL: Only fail if NO images were uploaded
+      // Return partial success if at least some images uploaded
+      if (uniqueUrls.isEmpty && imageFiles.isNotEmpty) {
+        return ApiResponse.error(error: 'All image uploads failed');
+      }
+
+      // Return whatever URLs we successfully collected
+      return ApiResponse.success(uniqueUrls);
     } catch (e) {
       if (kDebugMode) {
-        print('❌ DailySalesService: Upload batch exception - $e');
+        Logger.error('DailySalesService: Upload batch exception - $e');
       }
       AppLogger.error('Error uploading sales images: $e');
       return ApiResponse.error(error: 'Error uploading images: $e');
@@ -548,7 +716,7 @@ class DailySalesService {
   Future<ApiResponse<void>> deleteDailySalesRecord(String id) async {
     try {
       if (kDebugMode) {
-        print('🗑️ DailySalesService: Deleting record $id');
+        Logger.info('DailySalesService: Deleting record $id');
       }
 
       final token = await _authService.getToken();
@@ -572,19 +740,19 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('🗑️ DailySalesService: Delete response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Delete response - ${response.statusCode}');
       }
 
       if (response.statusCode == 200 || response.statusCode == 204) {
-        if (kDebugMode) print('✅ DailySalesService: Record deleted successfully');
+        if (kDebugMode) Logger.info('DailySalesService: Record deleted successfully');
         return ApiResponse.success(null);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Delete failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: Delete failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to delete record');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: Delete exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Delete exception - $e');
       AppLogger.error('Error deleting daily sales record: $e');
       return ApiResponse.error(error: 'Error deleting record: $e');
     }
@@ -599,7 +767,7 @@ class DailySalesService {
   Future<ApiResponse<AIValidationResult>> getValidation(String recordId) async {
     try {
       if (kDebugMode) {
-        print('🤖 DailySalesService: Fetching AI validation for record $recordId');
+        Logger.debug('DailySalesService: Fetching AI validation for record $recordId');
       }
 
       final token = await _authService.getToken();
@@ -623,7 +791,7 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('🤖 DailySalesService: Validation response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Validation response - ${response.statusCode}');
       }
 
       if (response.statusCode == 200) {
@@ -632,7 +800,7 @@ class DailySalesService {
         final validationData = data['data'] ?? data;
         final result = AIValidationResult.fromJson(validationData);
         if (kDebugMode) {
-          print('✅ DailySalesService: Validation fetched - Status: ${result.status}, Mismatches: ${result.mismatchCount}');
+          Logger.info('DailySalesService: Validation fetched - Status: ${result.status}, Mismatches: ${result.mismatchCount}');
         }
         return ApiResponse.success(result);
       } else if (response.statusCode == 404) {
@@ -640,11 +808,11 @@ class DailySalesService {
         return ApiResponse.success(const AIValidationResult(status: 'pending'));
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Validation fetch failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: Validation fetch failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to fetch validation');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: Validation exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Validation exception - $e');
       AppLogger.error('Error fetching AI validation: $e');
       return ApiResponse.error(error: 'Error fetching validation: $e');
     }
@@ -654,7 +822,7 @@ class DailySalesService {
   Future<ApiResponse<void>> triggerValidation(String recordId) async {
     try {
       if (kDebugMode) {
-        print('🤖 DailySalesService: Triggering AI validation for record $recordId');
+        Logger.debug('DailySalesService: Triggering AI validation for record $recordId');
       }
 
       final token = await _authService.getToken();
@@ -678,19 +846,19 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('🤖 DailySalesService: Trigger response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Trigger response - ${response.statusCode}');
       }
 
       if (response.statusCode == 200 || response.statusCode == 202) {
-        if (kDebugMode) print('✅ DailySalesService: Validation triggered successfully');
+        if (kDebugMode) Logger.info('DailySalesService: Validation triggered successfully');
         return ApiResponse.success(null);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Trigger failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: Trigger failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to trigger validation');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: Trigger exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Trigger exception - $e');
       AppLogger.error('Error triggering AI validation: $e');
       return ApiResponse.error(error: 'Error triggering validation: $e');
     }
@@ -710,7 +878,7 @@ class DailySalesService {
   }) async {
     try {
       if (kDebugMode) {
-        print('📅 DailySalesService: Changing date for record $id to ${newDate.toIso8601String().split('T')[0]}');
+        Logger.info('DailySalesService: Changing date for record $id to ${newDate.toIso8601String().split('T')[0]}');
       }
 
       final token = await _authService.getToken();
@@ -738,9 +906,9 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('📅 DailySalesService: Change date response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Change date response - ${response.statusCode}');
         if (response.statusCode != 200) {
-          print('📅 DailySalesService: Response body - ${response.body}');
+          Logger.debug('DailySalesService: Response body - ${response.body}');
         }
       }
 
@@ -748,18 +916,18 @@ class DailySalesService {
         final data = json.decode(response.body);
         final result = ChangeDateResponse.fromJson(data);
         if (kDebugMode) {
-          print('✅ DailySalesService: Date changed successfully');
-          print('   Old date: ${result.oldDate}');
-          print('   New date: ${result.newDate}');
+          Logger.info('DailySalesService: Date changed successfully');
+          Logger.debug('   Old date: ${result.oldDate}');
+          Logger.debug('   New date: ${result.newDate}');
         }
         return ApiResponse.success(result);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Change date failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: Change date failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to change date');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: Change date exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Change date exception - $e');
       AppLogger.error('Error changing daily sales record date: $e');
       return ApiResponse.error(error: 'Error changing date: $e');
     }
@@ -774,7 +942,7 @@ class DailySalesService {
   Future<ApiResponse<RevertOtpResponse>> requestRevertOtp(String recordId) async {
     try {
       if (kDebugMode) {
-        print('🔐 DailySalesService: Requesting revert OTP for record $recordId');
+        Logger.info('DailySalesService: Requesting revert OTP for record $recordId');
       }
 
       final token = await _authService.getToken();
@@ -798,23 +966,23 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('🔐 DailySalesService: OTP request response - ${response.statusCode}');
+        Logger.debug('DailySalesService: OTP request response - ${response.statusCode}');
       }
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         final result = RevertOtpResponse.fromJson(data);
         if (kDebugMode) {
-          print('✅ DailySalesService: OTP sent - Email: ${result.emailSent}, Phone: ${result.phoneSent}');
+          Logger.info('DailySalesService: OTP sent - Email: ${result.emailSent}, Phone: ${result.phoneSent}');
         }
         return ApiResponse.success(result);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: OTP request failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: OTP request failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to request OTP');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: OTP request exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: OTP request exception - $e');
       AppLogger.error('Error requesting revert OTP: $e');
       return ApiResponse.error(error: 'Error requesting OTP: $e');
     }
@@ -831,7 +999,7 @@ class DailySalesService {
   }) async {
     try {
       if (kDebugMode) {
-        print('🔐 DailySalesService: Verifying OTPs and reverting record $recordId');
+        Logger.info('DailySalesService: Verifying OTPs and reverting record $recordId');
       }
 
       final token = await _authService.getToken();
@@ -860,20 +1028,20 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('🔐 DailySalesService: Revert response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Revert response - ${response.statusCode}');
       }
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        if (kDebugMode) print('✅ DailySalesService: Record reverted successfully');
+        if (kDebugMode) Logger.info('DailySalesService: Record reverted successfully');
         return ApiResponse.success(data as Map<String, dynamic>);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Revert failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: Revert failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to revert record');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: Revert exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Revert exception - $e');
       AppLogger.error('Error reverting record: $e');
       return ApiResponse.error(error: 'Error reverting record: $e');
     }
@@ -885,12 +1053,140 @@ class DailySalesService {
     return requestRevertOtp(recordId);
   }
 
+  // ============================================================================
+  // BACKEND VERIFICATION METHODS (Industrial-Grade)
+  // ============================================================================
+
+  /// Verify a record exists on backend by fetching it
+  /// INDUSTRIAL-GRADE: Used to confirm successful submission before clearing draft
+  ///
+  /// Returns:
+  /// - ApiResponse.success(true) if record exists and is valid
+  /// - ApiResponse.success(false) if record doesn't exist (404)
+  /// - ApiResponse.error() if network/server error
+  Future<ApiResponse<bool>> verifyRecordExists(String recordId) async {
+    try {
+      if (kDebugMode) {
+        Logger.debug('DailySalesService: Verifying record exists - $recordId');
+      }
+
+      final token = await _authService.getToken();
+      if (token == null) {
+        return ApiResponse.error(error: 'Not authenticated');
+      }
+
+      final tenantId = await _authService.getTenantId();
+      if (tenantId == null) {
+        return ApiResponse.error(error: 'Tenant ID not found');
+      }
+
+      final url = '${ApiConfig.baseUrl}/api/sales/daily-sales/$recordId';
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+          'X-Tenant-ID': tenantId,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+        },
+      );
+
+      if (kDebugMode) {
+        Logger.debug('DailySalesService: Verify response - ${response.statusCode}');
+      }
+
+      if (response.statusCode == 200) {
+        // Record exists - parse to make sure it's valid JSON
+        try {
+          final data = json.decode(response.body);
+          // Check for record ID in response to double-confirm
+          final returnedId = data['id']?.toString() ?? data['data']?['id']?.toString();
+          if (returnedId == recordId) {
+            if (kDebugMode) Logger.info('DailySalesService: Record verified - $recordId');
+            return ApiResponse.success(true);
+          } else {
+            if (kDebugMode) Logger.warning('DailySalesService: ID mismatch - expected $recordId, got $returnedId');
+            return ApiResponse.success(false);
+          }
+        } catch (e) {
+          if (kDebugMode) Logger.warning('DailySalesService: Invalid JSON in verify response');
+          return ApiResponse.error(error: 'Invalid response format');
+        }
+      } else if (response.statusCode == 404) {
+        if (kDebugMode) Logger.error('DailySalesService: Record not found - $recordId');
+        return ApiResponse.success(false);
+      } else {
+        if (kDebugMode) Logger.error('DailySalesService: Verify failed - ${response.statusCode}');
+        return ApiResponse.error(error: 'Failed to verify record (${response.statusCode})');
+      }
+    } catch (e) {
+      if (kDebugMode) Logger.error('DailySalesService: Verify exception - $e');
+      return ApiResponse.error(error: 'Error verifying record: $e');
+    }
+  }
+
+  /// Verify record exists with retry and exponential backoff
+  /// INDUSTRIAL-GRADE: Handles network flakiness gracefully
+  ///
+  /// Parameters:
+  /// - recordId: The record ID to verify
+  /// - maxRetries: Maximum number of retry attempts (default: 3)
+  /// - initialDelayMs: Initial delay before first retry in milliseconds (default: 500)
+  ///
+  /// Returns true only if record is confirmed to exist on backend
+  Future<bool> verifyRecordExistsWithRetry(
+    String recordId, {
+    int maxRetries = 3,
+    int initialDelayMs = 500,
+  }) async {
+    int attempt = 0;
+    int delay = initialDelayMs;
+
+    while (attempt < maxRetries) {
+      attempt++;
+
+      if (kDebugMode) {
+        Logger.debug('DailySalesService: Verify attempt $attempt/$maxRetries for record $recordId');
+      }
+
+      final result = await verifyRecordExists(recordId);
+
+      if (result.success && result.data == true) {
+        // Record confirmed to exist
+        return true;
+      }
+
+      if (result.success && result.data == false) {
+        // Record definitively doesn't exist (404) - don't retry
+        if (kDebugMode) {
+          Logger.error('DailySalesService: Record definitely doesn\'t exist, stopping retries');
+        }
+        return false;
+      }
+
+      // Network/server error - retry with exponential backoff
+      if (attempt < maxRetries) {
+        if (kDebugMode) {
+          Logger.debug('DailySalesService: Waiting ${delay}ms before retry...');
+        }
+        await Future.delayed(Duration(milliseconds: delay));
+        delay *= 2; // Exponential backoff: 500ms -> 1000ms -> 2000ms
+      }
+    }
+
+    if (kDebugMode) {
+      Logger.error('DailySalesService: Failed to verify after $maxRetries attempts');
+    }
+    return false;
+  }
+
   /// Copy a rejected record to create a new draft
   /// Useful for recovering rejected records after fixes
   Future<ApiResponse<DailySalesRecord>> copyDailySalesRecord(String id) async {
     try {
       if (kDebugMode) {
-        print('📋 DailySalesService: Copying record $id');
+        Logger.info('DailySalesService: Copying record $id');
       }
 
       final token = await _authService.getToken();
@@ -914,23 +1210,74 @@ class DailySalesService {
       );
 
       if (kDebugMode) {
-        print('📋 DailySalesService: Copy response - ${response.statusCode}');
+        Logger.debug('DailySalesService: Copy response - ${response.statusCode}');
       }
 
       if (response.statusCode == 201 || response.statusCode == 200) {
         final data = json.decode(response.body);
         final record = DailySalesRecord.fromJson(data['data'] ?? data);
-        if (kDebugMode) print('✅ DailySalesService: Record copied - New ID: ${record.id}');
+        if (kDebugMode) Logger.info('DailySalesService: Record copied - New ID: ${record.id}');
         return ApiResponse.success(record);
       } else {
         final error = json.decode(response.body);
-        if (kDebugMode) print('❌ DailySalesService: Copy failed - ${error['error']}');
+        if (kDebugMode) Logger.error('DailySalesService: Copy failed - ${error["error"]}');
         return ApiResponse.error(error: error['error'] ?? 'Failed to copy record');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ DailySalesService: Copy exception - $e');
+      if (kDebugMode) Logger.error('DailySalesService: Copy exception - $e');
       AppLogger.error('Error copying daily sales record: $e');
       return ApiResponse.error(error: 'Error copying record: $e');
+    }
+  }
+
+  /// Get status counts from dashboard summary API
+  /// Returns accurate counts for pending, approved, rejected records
+  Future<ApiResponse<DailySalesStatusCounts>> getStatusCounts({String? shopId}) async {
+    try {
+      final token = await _authService.getToken();
+      if (token == null) {
+        return ApiResponse.error(error: 'Not authenticated');
+      }
+
+      final tenantId = await _authService.getTenantId();
+      if (tenantId == null) {
+        return ApiResponse.error(error: 'Tenant ID not found');
+      }
+
+      String url = '${ApiConfig.baseUrl}/api/sales/dashboard/summary';
+      if (shopId != null && shopId.isNotEmpty) {
+        url += '?shop_id=$shopId';
+      }
+
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+          'X-Tenant-ID': tenantId,
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final todaySales = data['todays_sales'] ?? {};
+
+        // Extract counts from dashboard summary
+        final counts = DailySalesStatusCounts(
+          pendingCount: data['pending_sales'] ?? todaySales['pending_sales'] ?? 0,
+          approvedCount: todaySales['approved_sales'] ?? 0,
+          totalCount: todaySales['total_sales'] ?? 0,
+          pendingAmount: (todaySales['pending_amount'] ?? 0).toDouble(),
+          approvedAmount: (todaySales['approved_amount'] ?? 0).toDouble(),
+          totalAmount: (todaySales['total_amount'] ?? 0).toDouble(),
+        );
+        return ApiResponse.success(counts);
+      } else {
+        return ApiResponse.error(error: 'Failed to fetch status counts');
+      }
+    } catch (e) {
+      AppLogger.error('Error fetching status counts: $e');
+      return ApiResponse.error(error: 'Error fetching status counts: $e');
     }
   }
 }
@@ -1063,4 +1410,25 @@ class ChangeDateResponse {
     }
     return DateTime.now();
   }
+}
+
+/// Model for daily sales status counts - fetched from backend for accuracy
+class DailySalesStatusCounts {
+  final int pendingCount;
+  final int approvedCount;
+  final int totalCount;
+  final double pendingAmount;
+  final double approvedAmount;
+  final double totalAmount;
+
+  DailySalesStatusCounts({
+    required this.pendingCount,
+    required this.approvedCount,
+    required this.totalCount,
+    required this.pendingAmount,
+    required this.approvedAmount,
+    required this.totalAmount,
+  });
+
+  int get rejectedCount => totalCount - pendingCount - approvedCount;
 }

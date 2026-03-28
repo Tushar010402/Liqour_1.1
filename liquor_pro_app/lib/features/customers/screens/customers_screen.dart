@@ -17,7 +17,6 @@ class CustomersScreen extends StatefulWidget {
 class _CustomersScreenState extends State<CustomersScreen> {
   bool _isLoading = false;
   final List<Map<String, dynamic>> _customers = [];
-  String _searchQuery = '';
 
   @override
   void initState() {
@@ -33,6 +32,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
   }
 
   void _showAddCustomerDialog() {
+    final cs = Theme.of(context).colorScheme;
     final nameController = TextEditingController();
     final phoneController = TextEditingController();
     final emailController = TextEditingController();
@@ -86,7 +86,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
               Navigator.pop(context);
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
+              backgroundColor: cs.primary,
               foregroundColor: Colors.white,
             ),
             child: const Text('Add'),
@@ -98,6 +98,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: const CustomAppBar(
         title: 'Customers',
@@ -108,9 +109,6 @@ class _CustomersScreenState extends State<CustomersScreen> {
           Padding(
             padding: const EdgeInsets.all(16),
             child: TextField(
-              onChanged: (value) {
-                setState(() => _searchQuery = value);
-              },
               decoration: InputDecoration(
                 hintText: 'Search customers...',
                 prefixIcon: const Icon(Icons.search),
@@ -118,7 +116,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 filled: true,
-                fillColor: AppColors.background,
+                fillColor: cs.surface,
               ),
             ),
           ),
@@ -149,7 +147,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _showAddCustomerDialog,
-        backgroundColor: AppColors.primary,
+        backgroundColor: cs.primary,
         icon: const Icon(Icons.person_add, color: Colors.white),
         label: const Text('Add Customer', style: TextStyle(color: Colors.white)),
       ),
@@ -157,16 +155,17 @@ class _CustomersScreenState extends State<CustomersScreen> {
   }
 
   Widget _buildCustomerCard(Map<String, dynamic> customer) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: ListTile(
         contentPadding: const EdgeInsets.all(16),
         leading: CircleAvatar(
-          backgroundColor: AppColors.primary.withOpacity(0.1),
+          backgroundColor: cs.primary.withValues(alpha:0.1),
           child: Text(
             (customer['name'] ?? 'C').substring(0, 1).toUpperCase(),
             style: AppTextStyles.h5.copyWith(
-              color: AppColors.primary,
+              color: cs.primary,
             ),
           ),
         ),
@@ -182,16 +181,16 @@ class _CustomersScreenState extends State<CustomersScreen> {
             const SizedBox(height: 4),
             Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.phone_outlined,
                   size: 16,
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
                 const SizedBox(width: 4),
                 Text(
                   customer['phone'] ?? '',
                   style: AppTextStyles.bodySmall.copyWith(
-                    color: AppColors.textSecondary,
+                    color: cs.onSurfaceVariant,
                   ),
                 ),
               ],
@@ -200,16 +199,16 @@ class _CustomersScreenState extends State<CustomersScreen> {
               const SizedBox(height: 4),
               Row(
                 children: [
-                  const Icon(
+                  Icon(
                     Icons.email_outlined,
                     size: 16,
-                    color: AppColors.textSecondary,
+                    color: cs.onSurfaceVariant,
                   ),
                   const SizedBox(width: 4),
                   Text(
                     customer['email'],
                     style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                   ),
                 ],
@@ -224,7 +223,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
             Text(
               '${customer['total_purchases'] ?? 0} orders',
               style: AppTextStyles.bodySmall.copyWith(
-                color: AppColors.textSecondary,
+                color: cs.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 4),
@@ -232,7 +231,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
               '₹${customer['total_spent'] ?? 0}',
               style: AppTextStyles.bodyMedium.copyWith(
                 fontWeight: FontWeight.bold,
-                color: AppColors.primary,
+                color: cs.primary,
               ),
             ),
           ],

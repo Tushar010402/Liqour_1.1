@@ -1,11 +1,22 @@
+import 'dart:io';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../../core/utils/logger.dart';
 
 /// Authentication Service
 class AuthService {
   final FlutterSecureStorage _secureStorage;
   final SharedPreferences _prefs;
+
+  // iOS Keychain Options - ensures tokens persist across app restarts on physical devices
+  static const _iosOptions = IOSOptions(
+    accessibility: KeychainAccessibility.first_unlock,
+    accountName: 'com.liquorproapp.store',
+  );
+
+  // Android Options - ensures encrypted shared preferences work correctly
+  static const _androidOptions = AndroidOptions(
+    encryptedSharedPreferences: true,
+  );
 
   // Storage keys
   static const String _keyToken = 'auth_token';
@@ -15,12 +26,17 @@ class AuthService {
   static const String _keyUserName = 'user_name';
   static const String _keyUserEmail = 'user_email';
   static const String _keyUserRole = 'user_role';
+  static const String _keySessionId = 'session_id';  // For device management
 
   AuthService({
     required FlutterSecureStorage secureStorage,
     required SharedPreferences prefs,
   })  : _secureStorage = secureStorage,
         _prefs = prefs;
+
+  // Get platform-specific options for secure storage
+  IOSOptions? get _platformIosOptions => Platform.isIOS ? _iosOptions : null;
+  AndroidOptions? get _platformAndroidOptions => Platform.isAndroid ? _androidOptions : null;
 
   // Save authentication data
   Future<void> saveAuthData({
@@ -32,17 +48,19 @@ class AuthService {
     required String email,
     required String role,
   }) async {
-    Logger.debug('💾 Saving auth data...');
-    Logger.debug('💾 Token (first 20 chars): ${token.substring(0, 20)}...');
-    Logger.debug('💾 User ID: $userId');
-    Logger.debug('💾 Tenant ID: $tenantId');
-    Logger.debug('💾 User Name: $userName');
-    Logger.debug('💾 Email: $email');
-    Logger.debug('💾 Role: $role');
-
-    await _secureStorage.write(key: _keyToken, value: token);
+    await _secureStorage.write(
+      key: _keyToken,
+      value: token,
+      iOptions: _platformIosOptions,
+      aOptions: _platformAndroidOptions,
+    );
     if (refreshToken != null) {
-      await _secureStorage.write(key: _keyRefreshToken, value: refreshToken);
+      await _secureStorage.write(
+        key: _keyRefreshToken,
+        value: refreshToken,
+        iOptions: _platformIosOptions,
+        aOptions: _platformAndroidOptions,
+      );
     }
 
     await _prefs.setString(_keyUserId, userId);
@@ -52,20 +70,25 @@ class AuthService {
     await _prefs.setString(_keyUserName, userName);
     await _prefs.setString(_keyUserEmail, email);
     await _prefs.setString(_keyUserRole, role);
-
-    Logger.debug('✅ Auth data saved successfully');
   }
 
   // Get token
   Future<String?> getToken() async {
-    final token = await _secureStorage.read(key: _keyToken);
-    Logger.debug('🔑 AuthService.getToken() called - Token exists: ${token != null}, Length: ${token?.length}');
+    final token = await _secureStorage.read(
+      key: _keyToken,
+      iOptions: _platformIosOptions,
+      aOptions: _platformAndroidOptions,
+    );
     return token;
   }
 
   // Get refresh token
   Future<String?> getRefreshToken() async {
-    return await _secureStorage.read(key: _keyRefreshToken);
+    return await _secureStorage.read(
+      key: _keyRefreshToken,
+      iOptions: _platformIosOptions,
+      aOptions: _platformAndroidOptions,
+    );
   }
 
   // Get user ID
@@ -93,26 +116,51 @@ class AuthService {
     return _prefs.getString(_keyUserRole);
   }
 
+  // Save session ID (for device management - identifying current session)
+  Future<void> saveSessionId(String sessionId) async {
+    await _prefs.setString(_keySessionId, sessionId);
+    print('[AuthService] Session ID saved: $sessionId');
+  }
+
+  // Get session ID
+  Future<String?> getSessionId() async {
+    return _prefs.getString(_keySessionId);
+  }
+
   // Check if user is authenticated
   Future<bool> isAuthenticated() async {
     final token = await getToken();
-    return token != null && token.isNotEmpty;
+    final isAuth = token != null && token.isNotEmpty;
+    print('🔐 [AuthService] isAuthenticated check: $isAuth');
+    return isAuth;
   }
 
   // Logout
   Future<void> logout() async {
-    await _secureStorage.delete(key: _keyToken);
-    await _secureStorage.delete(key: _keyRefreshToken);
+    await _secureStorage.delete(
+      key: _keyToken,
+      iOptions: _platformIosOptions,
+      aOptions: _platformAndroidOptions,
+    );
+    await _secureStorage.delete(
+      key: _keyRefreshToken,
+      iOptions: _platformIosOptions,
+      aOptions: _platformAndroidOptions,
+    );
     await _prefs.remove(_keyUserId);
     await _prefs.remove(_keyTenantId);
     await _prefs.remove(_keyUserName);
     await _prefs.remove(_keyUserEmail);
     await _prefs.remove(_keyUserRole);
+    await _prefs.remove(_keySessionId);  // Clear session ID for device management
   }
 
   // Clear all data
   Future<void> clearAll() async {
-    await _secureStorage.deleteAll();
+    await _secureStorage.deleteAll(
+      iOptions: _platformIosOptions,
+      aOptions: _platformAndroidOptions,
+    );
     await _prefs.clear();
   }
 }

@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import '../config/environment_config.dart';
 import '../utils/logger.dart';
 
 /// Connectivity Service - Network status monitoring
@@ -48,11 +48,12 @@ class ConnectivityService {
   }
 
   /// Check connectivity status
+  /// Tries Google DNS first, then falls back to the actual API host
   Future<bool> _checkConnectivity() async {
     try {
       // Try to resolve a reliable host (Google DNS)
       final result = await InternetAddress.lookup('google.com')
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 3));
 
       final wasConnected = _isConnected;
       _isConnected = result.isNotEmpty && result[0].rawAddress.isNotEmpty;
@@ -63,27 +64,32 @@ class ConnectivityService {
       }
 
       return _isConnected;
-    } on SocketException catch (_) {
-      final wasConnected = _isConnected;
-      _isConnected = false;
+    } catch (_) {
+      // Google DNS failed — try our actual API endpoint as fallback
+      // (iOS Simulator may fail DNS for google.com but still reach our API)
+      try {
+        final apiUri = Uri.parse(EnvironmentConfig.apiBaseUrl);
+        final apiResult = await InternetAddress.lookup(apiUri.host)
+            .timeout(const Duration(seconds: 3));
 
-      if (wasConnected != _isConnected) {
-        _notifyConnectivityChange();
+        final wasConnected = _isConnected;
+        _isConnected = apiResult.isNotEmpty && apiResult[0].rawAddress.isNotEmpty;
+
+        if (wasConnected != _isConnected) {
+          _notifyConnectivityChange();
+        }
+
+        return _isConnected;
+      } catch (_) {
+        final wasConnected = _isConnected;
+        _isConnected = false;
+
+        if (wasConnected != _isConnected) {
+          _notifyConnectivityChange();
+        }
+
+        return false;
       }
-
-      return false;
-    } on TimeoutException catch (_) {
-      final wasConnected = _isConnected;
-      _isConnected = false;
-
-      if (wasConnected != _isConnected) {
-        _notifyConnectivityChange();
-      }
-
-      return false;
-    } catch (e) {
-      Logger.error('Connectivity check failed', e);
-      return _isConnected;
     }
   }
 

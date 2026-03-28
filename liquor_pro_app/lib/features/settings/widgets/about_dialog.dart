@@ -4,6 +4,7 @@ import '../../../core/constants/app_text_styles.dart';
 
 /// About LiquorPro Dialog
 void showAboutAppDialog(BuildContext context) {
+  final cs = Theme.of(context).colorScheme;
   showDialog(
     context: context,
     builder: (context) => AlertDialog(
@@ -17,7 +18,7 @@ void showAboutAppDialog(BuildContext context) {
               width: double.infinity,
               padding: const EdgeInsets.all(32),
               decoration: BoxDecoration(
-                color: AppColors.primary.withOpacity(0.1),
+                color: cs.primary.withOpacity(0.1),
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(4),
                 ),
@@ -27,7 +28,7 @@ void showAboutAppDialog(BuildContext context) {
                   Container(
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
-                      color: AppColors.primary,
+                      color: cs.primary,
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: const Icon(
@@ -40,7 +41,7 @@ void showAboutAppDialog(BuildContext context) {
                   Text(
                     'LiquorPro',
                     style: AppTextStyles.h3.copyWith(
-                      color: AppColors.primary,
+                      color: cs.primary,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -48,7 +49,7 @@ void showAboutAppDialog(BuildContext context) {
                   Text(
                     'Version 1.0.0',
                     style: AppTextStyles.bodyMedium.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                   ),
                 ],
@@ -64,14 +65,14 @@ void showAboutAppDialog(BuildContext context) {
                   Text(
                     'About',
                     style: AppTextStyles.h5.copyWith(
-                      color: AppColors.primary,
+                      color: cs.primary,
                     ),
                   ),
                   const SizedBox(height: 12),
                   Text(
                     'LiquorPro is a comprehensive liquor store management solution designed to streamline your business operations. Manage inventory, track sales, handle customers, and analyze your business performance all in one place.',
                     style: AppTextStyles.bodyMedium.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                       height: 1.5,
                     ),
                   ),
@@ -81,24 +82,24 @@ void showAboutAppDialog(BuildContext context) {
                   Text(
                     'Key Features',
                     style: AppTextStyles.h5.copyWith(
-                      color: AppColors.primary,
+                      color: cs.primary,
                     ),
                   ),
                   const SizedBox(height: 12),
-                  _buildFeatureItem('📦 Complete Inventory Management'),
-                  _buildFeatureItem('💰 Point of Sale (POS) System'),
-                  _buildFeatureItem('📊 Sales & Analytics Reports'),
-                  _buildFeatureItem('👥 Customer Management'),
-                  _buildFeatureItem('🏪 Multi-Shop Support'),
-                  _buildFeatureItem('💵 Expense Tracking'),
-                  _buildFeatureItem('🔒 Secure & Reliable'),
+                  _buildFeatureItem('📦 Complete Inventory Management', cs),
+                  _buildFeatureItem('💰 Point of Sale (POS) System', cs),
+                  _buildFeatureItem('📊 Sales & Analytics Reports', cs),
+                  _buildFeatureItem('👥 Customer Management', cs),
+                  _buildFeatureItem('🏪 Multi-Shop Support', cs),
+                  _buildFeatureItem('💵 Expense Tracking', cs),
+                  _buildFeatureItem('🔒 Secure & Reliable', cs),
                   const SizedBox(height: 24),
 
                   // Credits
                   Text(
                     'Developed By',
                     style: AppTextStyles.h5.copyWith(
-                      color: AppColors.primary,
+                      color: cs.primary,
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -112,7 +113,7 @@ void showAboutAppDialog(BuildContext context) {
                   Text(
                     '© 2025 All rights reserved',
                     style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                   ),
                   const SizedBox(height: 24),
@@ -130,7 +131,7 @@ void showAboutAppDialog(BuildContext context) {
                       Container(
                         width: 1,
                         height: 20,
-                        color: AppColors.textSecondary,
+                        color: cs.outlineVariant,
                       ),
                       TextButton(
                         onPressed: () {
@@ -150,7 +151,7 @@ void showAboutAppDialog(BuildContext context) {
                       icon: const Icon(Icons.language, size: 18),
                       label: const Text('www.liquorpro.com'),
                       style: TextButton.styleFrom(
-                        foregroundColor: AppColors.primary,
+                        foregroundColor: cs.primary,
                       ),
                     ),
                   ),
@@ -170,7 +171,7 @@ void showAboutAppDialog(BuildContext context) {
   );
 }
 
-Widget _buildFeatureItem(String text) {
+Widget _buildFeatureItem(String text, ColorScheme cs) {
   return Padding(
     padding: const EdgeInsets.only(bottom: 8),
     child: Row(
@@ -185,7 +186,7 @@ Widget _buildFeatureItem(String text) {
           child: Text(
             text,
             style: AppTextStyles.bodyMedium.copyWith(
-              color: AppColors.textSecondary,
+              color: cs.onSurfaceVariant,
             ),
           ),
         ),

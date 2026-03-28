@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import '../utils/haptic_feedback_helper.dart';
+import '../utils/haptic_feedback.dart';
 
 /// Custom Text Field Widgets - Best Practice Input Fields
 /// Reusable text field components with consistent design
@@ -91,7 +91,8 @@ class _PrimaryTextFieldState extends State<PrimaryTextField> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final primaryColor = theme.primaryColor;
+    final cs = theme.colorScheme;
+    final primaryColor = cs.primary;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -102,7 +103,7 @@ class _PrimaryTextFieldState extends State<PrimaryTextField> {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w600,
-              color: Colors.grey[700],
+              color: cs.onSurface,
             ),
           ).animate().fadeIn().slideX(begin: -0.1, end: 0),
           const SizedBox(height: 8),
@@ -122,7 +123,7 @@ class _PrimaryTextFieldState extends State<PrimaryTextField> {
           onChanged: widget.onChanged,
           onFieldSubmitted: widget.onSubmitted,
           onTap: () {
-            HapticFeedbackHelper.light();
+            HapticFeedbackUtil.light();
             widget.onTap?.call();
           },
           style: const TextStyle(
@@ -132,23 +133,23 @@ class _PrimaryTextFieldState extends State<PrimaryTextField> {
           decoration: InputDecoration(
             hintText: widget.hint,
             hintStyle: TextStyle(
-              color: Colors.grey[400],
+              color: cs.onSurfaceVariant,
               fontSize: 16,
               fontWeight: FontWeight.w400,
             ),
             prefixText: widget.prefixText,
             suffixText: widget.suffixText,
             prefixIcon: widget.prefixIcon != null
-                ? Icon(widget.prefixIcon, color: _isFocused ? primaryColor : Colors.grey[500])
+                ? Icon(widget.prefixIcon, color: _isFocused ? primaryColor : cs.onSurfaceVariant)
                 : null,
             suffixIcon: widget.obscureText
                 ? IconButton(
                     icon: Icon(
                       _obscureText ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-                      color: Colors.grey[600],
+                      color: cs.onSurfaceVariant,
                     ),
                     onPressed: () {
-                      HapticFeedbackHelper.light();
+                      HapticFeedbackUtil.light();
                       setState(() {
                         _obscureText = !_obscureText;
                       });
@@ -156,24 +157,24 @@ class _PrimaryTextFieldState extends State<PrimaryTextField> {
                   )
                 : (widget.suffixIcon != null
                     ? IconButton(
-                        icon: Icon(widget.suffixIcon, color: Colors.grey[600]),
+                        icon: Icon(widget.suffixIcon, color: cs.onSurfaceVariant),
                         onPressed: () {
-                          HapticFeedbackHelper.light();
+                          HapticFeedbackUtil.light();
                           widget.onSuffixIconTap?.call();
                         },
                       )
                     : null),
             filled: true,
-            fillColor: widget.fillColor ?? Colors.grey[50],
+            fillColor: widget.fillColor ?? cs.surfaceContainerHighest,
             contentPadding: widget.contentPadding ??
                 const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(widget.borderRadius),
-              borderSide: BorderSide(color: Colors.grey[300]!, width: 1.5),
+              borderSide: BorderSide(color: cs.outlineVariant, width: 1.5),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(widget.borderRadius),
-              borderSide: BorderSide(color: Colors.grey[300]!, width: 1.5),
+              borderSide: BorderSide(color: cs.outlineVariant, width: 1.5),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(widget.borderRadius),
@@ -181,15 +182,15 @@ class _PrimaryTextFieldState extends State<PrimaryTextField> {
             ),
             errorBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(widget.borderRadius),
-              borderSide: const BorderSide(color: Colors.red, width: 1.5),
+              borderSide: BorderSide(color: cs.error, width: 1.5),
             ),
             focusedErrorBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(widget.borderRadius),
-              borderSide: const BorderSide(color: Colors.red, width: 2),
+              borderSide: BorderSide(color: cs.error, width: 2),
             ),
             disabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(widget.borderRadius),
-              borderSide: BorderSide(color: Colors.grey[200]!, width: 1.5),
+              borderSide: BorderSide(color: cs.outlineVariant, width: 1.5),
             ),
           ),
         ).animate().fadeIn().slideY(begin: 0.1, end: 0),
@@ -217,22 +218,23 @@ class SearchTextField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return TextField(
       controller: controller,
       onChanged: onChanged,
-      onTap: () => HapticFeedbackHelper.light(),
+      onTap: () => HapticFeedbackUtil.light(),
       decoration: InputDecoration(
         hintText: hint,
         hintStyle: TextStyle(
-          color: Colors.grey[400],
+          color: cs.onSurfaceVariant,
           fontSize: 16,
         ),
-        prefixIcon: Icon(Icons.search, color: Colors.grey[500]),
+        prefixIcon: Icon(Icons.search, color: cs.onSurfaceVariant),
         suffixIcon: showClearButton && controller?.text.isNotEmpty == true
             ? IconButton(
-                icon: Icon(Icons.clear, color: Colors.grey[600]),
+                icon: Icon(Icons.clear, color: cs.onSurfaceVariant),
                 onPressed: () {
-                  HapticFeedbackHelper.light();
+                  HapticFeedbackUtil.light();
                   controller?.clear();
                   onClear?.call();
                   onChanged?.call('');
@@ -240,7 +242,7 @@ class SearchTextField extends StatelessWidget {
               )
             : null,
         filled: true,
-        fillColor: Colors.grey[100],
+        fillColor: cs.surfaceContainerHighest,
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(30),
@@ -252,7 +254,7 @@ class SearchTextField extends StatelessWidget {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(30),
-          borderSide: BorderSide(color: Theme.of(context).primaryColor, width: 2),
+          borderSide: BorderSide(color: cs.primary, width: 2),
         ),
       ),
     ).animate().fadeIn().scale();
@@ -284,6 +286,7 @@ class DropdownTextField<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -293,13 +296,13 @@ class DropdownTextField<T> extends StatelessWidget {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w600,
-              color: Colors.grey[700],
+              color: cs.onSurface,
             ),
           ).animate().fadeIn().slideX(begin: -0.1, end: 0),
           const SizedBox(height: 8),
         ],
         DropdownButtonFormField<T>(
-          value: value,
+          initialValue: value,
           hint: Text(hint),
           items: items.map((item) {
             return DropdownMenuItem<T>(
@@ -308,26 +311,26 @@ class DropdownTextField<T> extends StatelessWidget {
             );
           }).toList(),
           onChanged: (newValue) {
-            HapticFeedbackHelper.light();
+            HapticFeedbackUtil.light();
             onChanged?.call(newValue);
           },
           validator: validator,
           decoration: InputDecoration(
             prefixIcon: prefixIcon != null ? Icon(prefixIcon) : null,
             filled: true,
-            fillColor: Colors.grey[50],
+            fillColor: cs.surfaceContainerHighest,
             contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
-              borderSide: BorderSide(color: Colors.grey[300]!, width: 1.5),
+              borderSide: BorderSide(color: cs.outlineVariant, width: 1.5),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
-              borderSide: BorderSide(color: Colors.grey[300]!, width: 1.5),
+              borderSide: BorderSide(color: cs.outlineVariant, width: 1.5),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
-              borderSide: BorderSide(color: Theme.of(context).primaryColor, width: 2),
+              borderSide: BorderSide(color: cs.primary, width: 2),
             ),
           ),
         ).animate().fadeIn().slideY(begin: 0.1, end: 0),
@@ -530,7 +533,7 @@ class DatePickerTextField extends StatelessWidget {
   });
 
   Future<void> _selectDate(BuildContext context) async {
-    HapticFeedbackHelper.light();
+    HapticFeedbackUtil.light();
     final DateTime? picked = await showDatePicker(
       context: context,
       initialDate: initialDate ?? DateTime.now(),

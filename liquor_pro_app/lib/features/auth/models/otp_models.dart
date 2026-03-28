@@ -1,4 +1,5 @@
 /// OTP-related models matching backend structure exactly
+library;
 
 // ==================== CHECK USER ====================
 
@@ -14,21 +15,38 @@ class CheckUserRequest {
 }
 
 /// Check User Response
+/// Backend sends OTP during check-user and returns session info.
+/// Security: `exists` is always false — the backend never reveals
+/// whether the phone number is registered. Login vs registration
+/// is determined only after OTP verification (verify-otp response).
 class CheckUserResponse {
-  final bool exists;
   final String message;
+  final String? sessionId;
+  final DateTime? otpSentAt;
+  final DateTime? expiresAt;
 
   CheckUserResponse({
-    required this.exists,
     required this.message,
+    this.sessionId,
+    this.otpSentAt,
+    this.expiresAt,
   });
 
   factory CheckUserResponse.fromJson(Map<String, dynamic> json) {
     return CheckUserResponse(
-      exists: json['exists'] as bool,
-      message: json['message'] as String,
+      message: json['message'] as String? ?? '',
+      sessionId: json['session_id'] as String?,
+      otpSentAt: json['otp_sent_at'] != null
+          ? DateTime.tryParse(json['otp_sent_at'] as String)
+          : null,
+      expiresAt: json['expires_at'] != null
+          ? DateTime.tryParse(json['expires_at'] as String)
+          : null,
     );
   }
+
+  /// Whether OTP session info is available (phone-based check)
+  bool get hasOtpSession => sessionId != null && sessionId!.isNotEmpty;
 }
 
 // ==================== SEND OTP ====================
@@ -71,14 +89,12 @@ class SendOtpResponse {
   final DateTime otpSentAt;
   final DateTime expiresAt;
   final String sessionId;
-  final String purpose; // "login" or "registration"
 
   SendOtpResponse({
     required this.message,
     required this.otpSentAt,
     required this.expiresAt,
     required this.sessionId,
-    required this.purpose,
   });
 
   factory SendOtpResponse.fromJson(Map<String, dynamic> json) {
@@ -87,7 +103,6 @@ class SendOtpResponse {
       otpSentAt: DateTime.parse(json['otp_sent_at'] as String),
       expiresAt: DateTime.parse(json['expires_at'] as String),
       sessionId: json['session_id'] as String,
-      purpose: json['purpose'] as String,
     );
   }
 }
@@ -124,6 +139,8 @@ class VerifyOtpResponse {
   final Map<String, dynamic>? tenant;
   final String? message;
   final String? purpose; // "login" or "registration"
+  final String? sessionId; // Device session ID for device management
+  final String? registrationToken; // Single-use token for completing registration
 
   VerifyOtpResponse({
     this.token,
@@ -133,6 +150,8 @@ class VerifyOtpResponse {
     this.tenant,
     this.message,
     this.purpose,
+    this.sessionId,
+    this.registrationToken,
   });
 
   factory VerifyOtpResponse.fromJson(Map<String, dynamic> json) {
@@ -146,6 +165,8 @@ class VerifyOtpResponse {
       tenant: json['tenant'] as Map<String, dynamic>?,
       message: json['message'] as String?,
       purpose: json['purpose'] as String?,
+      sessionId: json['session_id'] as String?,
+      registrationToken: json['registration_token'] as String?,
     );
   }
 
@@ -164,6 +185,7 @@ class RegistrationRequest {
   final String phone;
   final String tenantName; // Subdomain/slug
   final String companyName;
+  final String registrationToken; // Single-use token from OTP verification
 
   RegistrationRequest({
     required this.email,
@@ -173,6 +195,7 @@ class RegistrationRequest {
     required this.phone,
     required this.tenantName,
     required this.companyName,
+    required this.registrationToken,
   });
 
   Map<String, dynamic> toJson() {
@@ -184,6 +207,7 @@ class RegistrationRequest {
       'phone': phone,
       'tenant_name': tenantName,
       'company_name': companyName,
+      'registration_token': registrationToken,
     };
   }
 }

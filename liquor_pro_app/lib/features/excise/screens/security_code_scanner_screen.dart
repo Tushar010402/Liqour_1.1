@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/excise_models.dart';
 import '../providers/excise_provider.dart';
 
 class SecurityCodeScannerScreen extends StatefulWidget {
-  const SecurityCodeScannerScreen({Key? key}) : super(key: key);
+  const SecurityCodeScannerScreen({super.key});
 
   @override
   State<SecurityCodeScannerScreen> createState() => _SecurityCodeScannerScreenState();
@@ -36,10 +37,8 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Security Codes'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: CustomAppBar(
+        title: 'Security Codes',
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
@@ -61,6 +60,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
   }
 
   Widget _buildScannerTab() {
+    final cs = Theme.of(context).colorScheme;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -68,9 +68,10 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
         children: [
           // Scanner Card
           Card(
-            elevation: 4,
+            elevation: 0,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
             ),
             child: Padding(
               padding: const EdgeInsets.all(24),
@@ -100,7 +101,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
                     'Scan QR code or manually enter bottle security code',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: Colors.grey[600],
+                      color: cs.onSurfaceVariant,
                     ),
                   ),
                   const SizedBox(height: 24),
@@ -132,7 +133,8 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
 
           // Manual Entry
           Card(
-            elevation: 2,
+            elevation: 0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -203,6 +205,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
   Widget _buildCodesListTab() {
     return Consumer<ExciseProvider>(
       builder: (context, provider, child) {
+        final cs = Theme.of(context).colorScheme;
         if (provider.isCodesLoading && provider.securityCodes.isEmpty) {
           return const Center(child: CircularProgressIndicator());
         }
@@ -212,12 +215,12 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.qr_code, size: 64, color: Colors.grey[300]),
+                Icon(Icons.qr_code, size: 64, color: cs.outlineVariant),
                 const SizedBox(height: 16),
                 Text(
                   'No security codes found',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: Colors.grey[600],
+                        color: cs.onSurfaceVariant,
                       ),
                 ),
               ],
@@ -258,8 +261,9 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
               children: [
                 // Total Codes Card
                 Card(
-                  elevation: 4,
+                  elevation: 0,
                   color: Colors.purple[700],
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   child: Padding(
                     padding: const EdgeInsets.all(24),
                     child: Column(
@@ -333,7 +337,8 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
 
                 // Consideration Fees
                 Card(
-                  elevation: 2,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2))),
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: Column(
@@ -400,8 +405,10 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
   }
 
   Widget _buildStatCard(String label, int value, IconData icon, Color color) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -422,7 +429,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
               label,
               style: TextStyle(
                 fontSize: 12,
-                color: Colors.grey[600],
+                color: cs.onSurfaceVariant,
               ),
             ),
           ],
@@ -432,6 +439,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
   }
 
   Widget _buildInfoRow(String label, String value, {Color? valueColor, bool isTotal = false}) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
@@ -442,7 +450,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
             style: TextStyle(
               fontSize: 14,
               fontWeight: isTotal ? FontWeight.bold : FontWeight.normal,
-              color: isTotal ? null : Colors.grey[600],
+              color: isTotal ? null : cs.onSurfaceVariant,
             ),
           ),
           Text(
@@ -539,6 +547,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
   }
 
   Widget _buildDialogRow(String label, String value) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -546,7 +555,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
         children: [
           Text(
             label,
-            style: TextStyle(color: Colors.grey[600]),
+            style: TextStyle(color: cs.onSurfaceVariant),
           ),
           Text(
             value,
@@ -562,7 +571,9 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (context) {
+        final cs = Theme.of(context).colorScheme;
+        return AlertDialog(
         title: const Text('Bulk Add Security Codes'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -579,7 +590,7 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
             const SizedBox(height: 8),
             Text(
               'Enter one code per line',
-              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
           ],
         ),
@@ -620,7 +631,8 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
             child: const Text('Add'),
           ),
         ],
-      ),
+      );
+      },
     );
   }
 
@@ -698,13 +710,15 @@ class _SecurityCodeScannerScreenState extends State<SecurityCodeScannerScreen>
 class _SecurityCodeCard extends StatelessWidget {
   final SecurityCode code;
 
-  const _SecurityCodeCard({Key? key, required this.code}) : super(key: key);
+  const _SecurityCodeCard({required this.code});
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
@@ -712,7 +726,7 @@ class _SecurityCodeCard extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: code.statusColor.withOpacity(0.1),
+                color: code.statusColor.withValues(alpha:0.1),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(
@@ -744,7 +758,7 @@ class _SecurityCodeCard extends StatelessWidget {
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: Colors.grey[400]),
+            Icon(Icons.chevron_right, color: cs.onSurfaceVariant),
           ],
         ),
       ),

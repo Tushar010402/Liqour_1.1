@@ -6,13 +6,14 @@ class SecurityCodeStatsCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   const SecurityCodeStatsCard({
-    Key? key,
+    super.key,
     required this.stats,
     this.onTap,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       elevation: 2,
       child: InkWell(
@@ -42,7 +43,7 @@ class SecurityCodeStatsCard extends StatelessWidget {
                   Icon(
                     Icons.arrow_forward_ios,
                     size: 16,
-                    color: Colors.grey[400],
+                    color: cs.onSurfaceVariant,
                   ),
                 ],
               ),
@@ -59,7 +60,7 @@ class SecurityCodeStatsCard extends StatelessWidget {
                 'Security Codes',
                 style: TextStyle(
                   fontSize: 12,
-                  color: Colors.grey[600],
+                  color: cs.onSurfaceVariant,
                 ),
               ),
               Padding(

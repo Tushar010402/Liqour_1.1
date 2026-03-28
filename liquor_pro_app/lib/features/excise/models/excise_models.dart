@@ -2,6 +2,7 @@
 // Complete data models for UP Excise Compliance module
 
 import 'package:flutter/material.dart';
+import 'package:liquor_pro_app/core/constants/app_colors.dart';
 
 /// Excise License Model
 class ExciseLicense {
@@ -318,7 +319,7 @@ class ExciseDailyReport {
   Color get uploadStatusColor {
     if (uploadedToPortal) return Colors.green;
     if (uploadAttempts > 0) return Colors.orange;
-    return Colors.grey;
+    return AppColors.info;
   }
 
   IconData get uploadStatusIcon {

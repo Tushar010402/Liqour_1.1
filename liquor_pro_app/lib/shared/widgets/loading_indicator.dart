@@ -15,9 +15,10 @@ class LoadingIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Center(
       child: SpinKitFadingCircle(
-        color: color ?? AppColors.primary,
+        color: color ?? cs.primary,
         size: size,
       ),
     );
@@ -39,12 +40,13 @@ class LoadingOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Stack(
       children: [
         child,
         if (isLoading)
           Container(
-            color: Colors.black54,
+            color: cs.scrim.withValues(alpha: 0.54),
             child: Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/excise_models.dart';
 import '../providers/excise_provider.dart';
 
@@ -7,17 +8,16 @@ class DailyReportDetailScreen extends StatelessWidget {
   final ExciseDailyReport report;
 
   const DailyReportDetailScreen({
-    Key? key,
+    super.key,
     required this.report,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Daily Report'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: CustomAppBar(
+        title: 'Daily Report',
       ),
       body: SingleChildScrollView(
         child: Column(
@@ -60,7 +60,7 @@ class DailyReportDetailScreen extends StatelessWidget {
                       vertical: 8,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
+                      color: Colors.white.withValues(alpha:0.2),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
@@ -82,7 +82,11 @@ class DailyReportDetailScreen extends StatelessWidget {
                 children: [
                   // Stock Summary
                   Card(
-                    elevation: 2,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+                    ),
                     child: Padding(
                       padding: const EdgeInsets.all(16),
                       child: Column(
@@ -99,6 +103,7 @@ class DailyReportDetailScreen extends StatelessWidget {
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
                               _buildStockColumn(
+                                context,
                                 'Opening',
                                 report.openingStock.totalBottles,
                                 Colors.blue,
@@ -106,9 +111,10 @@ class DailyReportDetailScreen extends StatelessWidget {
                               Container(
                                 width: 1,
                                 height: 50,
-                                color: Colors.grey[300],
+                                color: cs.outlineVariant,
                               ),
                               _buildStockColumn(
+                                context,
                                 'Lifted',
                                 report.liftedQuantity.totalBottles,
                                 Colors.purple,
@@ -116,9 +122,10 @@ class DailyReportDetailScreen extends StatelessWidget {
                               Container(
                                 width: 1,
                                 height: 50,
-                                color: Colors.grey[300],
+                                color: cs.outlineVariant,
                               ),
                               _buildStockColumn(
+                                context,
                                 'Sales',
                                 report.salesQuantity.totalBottles,
                                 Colors.orange,
@@ -126,9 +133,10 @@ class DailyReportDetailScreen extends StatelessWidget {
                               Container(
                                 width: 1,
                                 height: 50,
-                                color: Colors.grey[300],
+                                color: cs.outlineVariant,
                               ),
                               _buildStockColumn(
+                                context,
                                 'Closing',
                                 report.closingStock.totalBottles,
                                 Colors.green,
@@ -163,7 +171,11 @@ class DailyReportDetailScreen extends StatelessWidget {
 
                   // Upload Status
                   Card(
-                    elevation: 2,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+                    ),
                     child: Padding(
                       padding: const EdgeInsets.all(16),
                       child: Column(
@@ -177,17 +189,20 @@ class DailyReportDetailScreen extends StatelessWidget {
                           ),
                           const Divider(height: 24),
                           _buildInfoRow(
+                            context,
                             'Status',
                             report.uploadedToPortal ? 'Uploaded' : 'Not Uploaded',
                             valueColor: report.uploadedToPortal ? Colors.green : Colors.orange,
                           ),
                           if (report.portalUploadedAt != null)
                             _buildInfoRow(
+                              context,
                               'Uploaded At',
                               _formatDateTime(report.portalUploadedAt!),
                             ),
                           if (report.smsConfirmation != null)
                             _buildInfoRow(
+                              context,
                               'SMS Confirmation',
                               report.smsConfirmation!,
                             ),
@@ -243,7 +258,7 @@ class DailyReportDetailScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildStockColumn(String label, int value, Color color) {
+  Widget _buildStockColumn(BuildContext context, String label, int value, Color color) {
     return Column(
       children: [
         Text(
@@ -259,7 +274,7 @@ class DailyReportDetailScreen extends StatelessWidget {
           label,
           style: TextStyle(
             fontSize: 12,
-            color: Colors.grey[600],
+            color: Theme.of(context).colorScheme.onSurface,
           ),
         ),
       ],
@@ -271,8 +286,13 @@ class DailyReportDetailScreen extends StatelessWidget {
     String title,
     StockBreakdown breakdown,
   ) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -285,12 +305,13 @@ class DailyReportDetailScreen extends StatelessWidget {
                   ),
             ),
             const Divider(height: 24),
-            _buildCategoryRow('Country Liquor', breakdown.countryLiquor.fold(0, (sum, e) => sum + e.quantity)),
-            _buildCategoryRow('IMFL', breakdown.imfl.fold(0, (sum, e) => sum + e.quantity)),
-            _buildCategoryRow('Beer', breakdown.beer.fold(0, (sum, e) => sum + e.quantity)),
-            _buildCategoryRow('Wine', breakdown.wine.fold(0, (sum, e) => sum + e.quantity)),
+            _buildCategoryRow(context, 'Country Liquor', breakdown.countryLiquor.fold(0, (sum, e) => sum + e.quantity)),
+            _buildCategoryRow(context, 'IMFL', breakdown.imfl.fold(0, (sum, e) => sum + e.quantity)),
+            _buildCategoryRow(context, 'Beer', breakdown.beer.fold(0, (sum, e) => sum + e.quantity)),
+            _buildCategoryRow(context, 'Wine', breakdown.wine.fold(0, (sum, e) => sum + e.quantity)),
             const Divider(height: 16),
             _buildCategoryRow(
+              context,
               'Total',
               breakdown.totalBottles,
               isTotal: true,
@@ -301,7 +322,7 @@ class DailyReportDetailScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildCategoryRow(String label, int value, {bool isTotal = false}) {
+  Widget _buildCategoryRow(BuildContext context, String label, int value, {bool isTotal = false}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
@@ -312,7 +333,7 @@ class DailyReportDetailScreen extends StatelessWidget {
             style: TextStyle(
               fontSize: 14,
               fontWeight: isTotal ? FontWeight.bold : FontWeight.normal,
-              color: isTotal ? null : Colors.grey[600],
+              color: isTotal ? null : Theme.of(context).colorScheme.onSurface,
             ),
           ),
           Text(
@@ -328,7 +349,7 @@ class DailyReportDetailScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildInfoRow(String label, String value, {Color? valueColor}) {
+  Widget _buildInfoRow(BuildContext context, String label, String value, {Color? valueColor}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
@@ -337,7 +358,7 @@ class DailyReportDetailScreen extends StatelessWidget {
           Text(
             label,
             style: TextStyle(
-              color: Colors.grey[600],
+              color: Theme.of(context).colorScheme.onSurface,
               fontSize: 14,
             ),
           ),

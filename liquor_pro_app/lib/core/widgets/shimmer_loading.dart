@@ -7,9 +7,11 @@ import 'package:shimmer/shimmer.dart';
 class ShimmerLoading {
   ShimmerLoading._();
 
-  // Default colors
-  static final Color _baseColor = Colors.grey[300]!;
-  static final Color _highlightColor = Colors.grey[100]!;
+  // Theme-aware default colors (require context)
+  static Color _defaultBaseColor(BuildContext context) =>
+      Theme.of(context).colorScheme.outline;
+  static Color _defaultHighlightColor(BuildContext context) =>
+      Theme.of(context).colorScheme.surfaceContainerHighest;
 
   /// Generic shimmer container
   static Widget container({
@@ -19,9 +21,9 @@ class ShimmerLoading {
     Color? baseColor,
     Color? highlightColor,
   }) {
-    return Shimmer.fromColors(
-      baseColor: baseColor ?? _baseColor,
-      highlightColor: highlightColor ?? _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: baseColor ?? _defaultBaseColor(context),
+      highlightColor: highlightColor ?? _defaultHighlightColor(context),
       child: Container(
         width: width,
         height: height,
@@ -30,7 +32,7 @@ class ShimmerLoading {
           borderRadius: borderRadius ?? BorderRadius.circular(8),
         ),
       ),
-    );
+    ));
   }
 
   /// Shimmer for card
@@ -39,9 +41,9 @@ class ShimmerLoading {
     double height = 200,
     BorderRadius? borderRadius,
   }) {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Container(
         width: width,
         height: height,
@@ -50,14 +52,14 @@ class ShimmerLoading {
           borderRadius: borderRadius ?? BorderRadius.circular(16),
         ),
       ),
-    );
+    ));
   }
 
   /// Shimmer for list tile
   static Widget listTile() {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
         child: Row(
@@ -100,7 +102,7 @@ class ShimmerLoading {
           ],
         ),
       ),
-    );
+    ));
   }
 
   /// Shimmer for text line
@@ -109,9 +111,9 @@ class ShimmerLoading {
     double height = 16,
     BorderRadius? borderRadius,
   }) {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Container(
         width: width,
         height: height,
@@ -120,16 +122,16 @@ class ShimmerLoading {
           borderRadius: borderRadius ?? BorderRadius.circular(4),
         ),
       ),
-    );
+    ));
   }
 
   /// Shimmer for circular avatar
   static Widget circle({
     double size = 60,
   }) {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Container(
         width: size,
         height: size,
@@ -138,7 +140,7 @@ class ShimmerLoading {
           shape: BoxShape.circle,
         ),
       ),
-    );
+    ));
   }
 
   /// Shimmer for grid item
@@ -146,9 +148,9 @@ class ShimmerLoading {
     double? width,
     double height = 200,
   }) {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -180,7 +182,7 @@ class ShimmerLoading {
           ),
         ],
       ),
-    );
+    ));
   }
 
   /// Shimmer for stat card
@@ -188,9 +190,9 @@ class ShimmerLoading {
     double width = 140,
     double height = 100,
   }) {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Container(
         width: width,
         height: height,
@@ -200,14 +202,14 @@ class ShimmerLoading {
           borderRadius: BorderRadius.circular(16),
         ),
       ),
-    );
+    ));
   }
 
   /// Shimmer for product card (inventory)
   static Widget productCard() {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         decoration: BoxDecoration(
@@ -262,21 +264,21 @@ class ShimmerLoading {
           ],
         ),
       ),
-    );
+    ));
   }
 
   /// Shimmer for app bar
   static Widget appBar({
     double height = 56,
   }) {
-    return Shimmer.fromColors(
-      baseColor: _baseColor,
-      highlightColor: _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: _defaultBaseColor(context),
+      highlightColor: _defaultHighlightColor(context),
       child: Container(
         height: height,
         color: Colors.white,
       ),
-    );
+    ));
   }
 
   /// Custom shimmer widget
@@ -285,10 +287,10 @@ class ShimmerLoading {
     Color? baseColor,
     Color? highlightColor,
   }) {
-    return Shimmer.fromColors(
-      baseColor: baseColor ?? _baseColor,
-      highlightColor: highlightColor ?? _highlightColor,
+    return Builder(builder: (context) => Shimmer.fromColors(
+      baseColor: baseColor ?? _defaultBaseColor(context),
+      highlightColor: highlightColor ?? _defaultHighlightColor(context),
       child: child,
-    );
+    ));
   }
 }

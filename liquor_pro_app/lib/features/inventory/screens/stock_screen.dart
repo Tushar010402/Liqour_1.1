@@ -3,9 +3,12 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/providers/shop_selection_provider.dart';
+import '../../../core/widgets/shop_selector_widget.dart';
 import '../../../shared/widgets/empty_state_widget.dart';
 import '../providers/product_provider.dart';
 import '../models/product.dart' as models;
+import 'ai_stock_setup_screen.dart';
 
 /// Stock Management Screen - View and manage stock levels
 class StockScreen extends StatefulWidget {
@@ -17,25 +20,62 @@ class StockScreen extends StatefulWidget {
 
 class _StockScreenState extends State<StockScreen> {
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   String _filterType = 'all'; // all, low, out
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadStock();
     });
   }
 
+  void _onScroll() {
+    // Dismiss keyboard when scrolling (best practice for data entry screens)
+    _dismissKeyboard();
+  }
+
+  /// Dismiss keyboard when tapping outside input fields or scrolling
+  void _dismissKeyboard() {
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _openAiStockSetup() async {
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => const AiStockSetupScreen()),
+    );
+    if (result == true && mounted) {
+      // AiStockSetupScreen already refreshed provider before popping,
+      // but do a safety refresh of both products + stock
+      final shopId = context.read<ShopSelectionProvider>().selectedShopId;
+      if (shopId != null) {
+        await context.read<ProductProvider>().loadProducts(shopId: shopId);
+      }
+      _loadStock();
+    }
   }
 
   Future<void> _loadStock() async {
     if (!mounted) return;
-    await context.read<ProductProvider>().loadStock();
+
+    // Get shop ID from ShopSelectionProvider
+    final shopProvider = context.read<ShopSelectionProvider>();
+    final shopId = shopProvider.selectedShopId;
+
+    if (shopId != null) {
+      // Pass shop ID to loadStock to get shop-specific stock data
+      await context.read<ProductProvider>().loadStock(shopId: shopId);
+    }
   }
 
   List<models.Stock> _getFilteredStock(ProductProvider provider) {
@@ -73,7 +113,6 @@ class _StockScreenState extends State<StockScreen> {
             dutyFee: 0,
             totalCost: 0,
             sellingPrice: 0,
-            mrp: 0,
             createdAt: DateTime.now(),
             updatedAt: DateTime.now(),
           ),
@@ -108,25 +147,40 @@ class _StockScreenState extends State<StockScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      body: Consumer<ProductProvider>(
-        builder: (context, provider, child) {
-          final filteredStock = _getFilteredStock(provider);
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _openAiStockSetup,
+        backgroundColor: const Color(0xFF3855B3),
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.auto_awesome, size: 20),
+        label: const Text('AI Stock Setup', style: TextStyle(fontWeight: FontWeight.w600)),
+      ),
+      body: GestureDetector(
+        onTap: _dismissKeyboard,
+        behavior: HitTestBehavior.translucent,
+        child: Consumer<ProductProvider>(
+          builder: (context, provider, child) {
+            final filteredStock = _getFilteredStock(provider);
 
-          return Column(
+            return Column(
             children: [
+              // Shop Selector
+              ShopSelectorWidget(
+                onShopChanged: (shopId) {
+                  // Reload stock when shop changes
+                  if (shopId != null) {
+                    _loadStock();
+                  }
+                },
+              ),
+
               // Search and Filter Bar
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
+                  color: cs.surface,
+                  border: Border(bottom: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
                 ),
                 child: Column(
                   children: [
@@ -150,7 +204,7 @@ class _StockScreenState extends State<StockScreen> {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         filled: true,
-                        fillColor: Colors.white,
+                        fillColor: cs.surfaceContainerHighest,
                       ),
                       onChanged: (value) {
                         setState(() {});
@@ -186,7 +240,7 @@ class _StockScreenState extends State<StockScreen> {
                           'Total Items',
                           provider.stockByProductId.length.toString(),
                           Icons.inventory_2,
-                          AppColors.primary,
+                          cs.primary,
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -228,6 +282,7 @@ class _StockScreenState extends State<StockScreen> {
                     : RefreshIndicator(
                         onRefresh: _loadStock,
                         child: ListView.builder(
+                          controller: _scrollController,
                           padding: const EdgeInsets.all(16),
                           itemCount: filteredStock.length,
                           itemBuilder: (context, index) {
@@ -259,8 +314,7 @@ class _StockScreenState extends State<StockScreen> {
                                 dutyFee: 0,
                                 totalCost: 0,
                                 sellingPrice: 0,
-                                mrp: 0,
-                                createdAt: DateTime.now(),
+                                                    createdAt: DateTime.now(),
                                 updatedAt: DateTime.now(),
                               ),
                             );
@@ -270,13 +324,15 @@ class _StockScreenState extends State<StockScreen> {
                       ),
               ),
             ],
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
 
   Widget _buildFilterChip(String label, String value) {
+    final cs = Theme.of(context).colorScheme;
     final isSelected = _filterType == value;
     return ChoiceChip(
       label: Text(label),
@@ -286,9 +342,9 @@ class _StockScreenState extends State<StockScreen> {
           _filterType = value;
         });
       },
-      selectedColor: AppColors.primary.withOpacity(0.2),
+      selectedColor: cs.primary.withValues(alpha: 0.2),
       labelStyle: TextStyle(
-        color: isSelected ? AppColors.primary : AppColors.textSecondary,
+        color: isSelected ? cs.primary : cs.onSurfaceVariant,
         fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
       ),
     );
@@ -303,10 +359,10 @@ class _StockScreenState extends State<StockScreen> {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
+        color: color.withValues(alpha:0.1),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: color.withOpacity(0.3),
+          color: color.withValues(alpha:0.3),
           width: 1,
         ),
       ),
@@ -335,6 +391,7 @@ class _StockScreenState extends State<StockScreen> {
   }
 
   Widget _buildStockCard(models.Stock stock, models.Product product) {
+    final cs = Theme.of(context).colorScheme;
     final statusColor = stock.isOutOfStock
         ? AppColors.error
         : stock.isLowStock
@@ -357,33 +414,44 @@ class _StockScreenState extends State<StockScreen> {
             // Product Header
             Row(
               children: [
-                // Product Image
+                // Product Image (use stock's imageUrl if available)
                 Container(
                   width: 60,
                   height: 60,
                   decoration: BoxDecoration(
-                    color: AppColors.surface,
+                    color: cs.surface,
                     borderRadius: BorderRadius.circular(8),
-                    image: product.imageUrl.isNotEmpty
+                    image: (stock.imageUrl?.isNotEmpty ?? false)
                         ? DecorationImage(
-                            image: NetworkImage(product.imageUrl),
+                            image: NetworkImage(stock.imageUrl!),
                             fit: BoxFit.cover,
+                            onError: (exception, stackTrace) {
+                              // Silently handle image load errors - fallback will show
+                            },
                           )
-                        : null,
+                        : (product.imageUrl.isNotEmpty
+                            ? DecorationImage(
+                                image: NetworkImage(product.imageUrl),
+                                fit: BoxFit.cover,
+                                onError: (exception, stackTrace) {
+                                  // Silently handle image load errors - fallback will show
+                                },
+                              )
+                            : null),
                   ),
-                  child: product.imageUrl.isEmpty
-                      ? const Icon(Icons.liquor, color: AppColors.textSecondary)
+                  child: (stock.imageUrl?.isEmpty ?? true) && product.imageUrl.isEmpty
+                      ? Icon(Icons.liquor, color: cs.onSurfaceVariant)
                       : null,
                 ),
                 const SizedBox(width: 12),
 
-                // Product Info
+                // Product Info (use stock's productName if available)
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        product.name,
+                        stock.productName ?? product.name,
                         style: AppTextStyles.bodyLarge.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
@@ -395,14 +463,14 @@ class _StockScreenState extends State<StockScreen> {
                         Text(
                           product.brand!.name,
                           style: AppTextStyles.bodySmall.copyWith(
-                            color: AppColors.textSecondary,
+                            color: cs.onSurfaceVariant,
                           ),
                         ),
                       const SizedBox(height: 4),
                       Text(
                         product.size,
                         style: AppTextStyles.bodySmall.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                     ],
@@ -413,9 +481,9 @@ class _StockScreenState extends State<StockScreen> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: statusColor.withOpacity(0.1),
+                    color: statusColor.withValues(alpha:0.1),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: statusColor.withOpacity(0.3)),
+                    border: Border.all(color: statusColor.withValues(alpha:0.3)),
                   ),
                   child: Text(
                     statusText,
@@ -448,7 +516,7 @@ class _StockScreenState extends State<StockScreen> {
                     'Reserved',
                     stock.reservedQuantity.toString(),
                     Icons.lock,
-                    AppColors.textSecondary,
+                    cs.onSurfaceVariant,
                   ),
                 ),
                 Expanded(
@@ -479,7 +547,7 @@ class _StockScreenState extends State<StockScreen> {
                     'Max Level',
                     stock.maximumLevel.toString(),
                     Icons.arrow_upward,
-                    AppColors.primary,
+                    cs.primary,
                   ),
                 ),
                 Expanded(
@@ -487,7 +555,7 @@ class _StockScreenState extends State<StockScreen> {
                     'Avg Cost',
                     _formatCurrency(stock.averageCost),
                     Icons.attach_money,
-                    AppColors.textSecondary,
+                    cs.onSurfaceVariant,
                   ),
                 ),
               ],
@@ -503,16 +571,16 @@ class _StockScreenState extends State<StockScreen> {
                 children: [
                   Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.calendar_today,
                         size: 14,
-                        color: AppColors.textSecondary,
+                        color: cs.onSurfaceVariant,
                       ),
                       const SizedBox(width: 6),
                       Text(
                         'Last Purchase: ${DateFormat('MMM dd, yyyy').format(stock.lastPurchaseDate!)}',
                         style: AppTextStyles.bodySmall.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                     ],
@@ -520,7 +588,7 @@ class _StockScreenState extends State<StockScreen> {
                   Text(
                     _formatCurrency(stock.lastPurchasePrice),
                     style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.primary,
+                      color: cs.primary,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -539,6 +607,7 @@ class _StockScreenState extends State<StockScreen> {
     IconData icon,
     Color color,
   ) {
+    final cs = Theme.of(context).colorScheme;
     return Column(
       children: [
         Icon(icon, size: 18, color: color),
@@ -554,7 +623,7 @@ class _StockScreenState extends State<StockScreen> {
         Text(
           label,
           style: AppTextStyles.bodySmall.copyWith(
-            color: AppColors.textSecondary,
+            color: cs.onSurfaceVariant,
             fontSize: 10,
           ),
         ),

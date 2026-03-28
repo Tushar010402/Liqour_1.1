@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/theme/ios_design_tokens.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 import '../../../shared/widgets/empty_state_widget.dart';
@@ -17,7 +18,6 @@ class AssistantManagersScreen extends StatefulWidget {
 class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
   bool _isLoading = false;
   final List<Map<String, dynamic>> _managers = [];
-  String _searchQuery = '';
 
   @override
   void initState() {
@@ -38,6 +38,7 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
     final emailController = TextEditingController();
     final salaryController = TextEditingController();
     final shopController = TextEditingController();
+    final cs = Theme.of(context).colorScheme;
 
     showDialog(
       context: context,
@@ -99,7 +100,7 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
               );
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
+              backgroundColor: cs.primary,
               foregroundColor: Colors.white,
             ),
             child: const Text('Add'),
@@ -111,6 +112,8 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
     return Scaffold(
       appBar: const CustomAppBar(
         title: 'Assistant Managers',
@@ -121,9 +124,6 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
           Padding(
             padding: const EdgeInsets.all(16),
             child: TextField(
-              onChanged: (value) {
-                setState(() => _searchQuery = value);
-              },
               decoration: InputDecoration(
                 hintText: 'Search managers...',
                 prefixIcon: const Icon(Icons.search),
@@ -131,7 +131,7 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 filled: true,
-                fillColor: AppColors.background,
+                fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
               ),
             ),
           ),
@@ -139,53 +139,55 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
           // Summary Card
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Card(
-              color: AppColors.primary.withOpacity(0.1),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Total Staff',
-                          style: AppTextStyles.bodyMedium.copyWith(
-                            color: AppColors.textSecondary,
-                          ),
+            child: Container(
+              padding: const EdgeInsets.all(iOSDesignTokens.space16),
+              decoration: BoxDecoration(
+                color: cs.surface,
+                borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+                border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Total Staff',
+                        style: AppTextStyles.bodyMedium.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${_managers.length}',
-                          style: AppTextStyles.h3.copyWith(
-                            color: AppColors.primary,
-                            fontWeight: FontWeight.bold,
-                          ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${_managers.length}',
+                        style: AppTextStyles.h3.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.bold,
                         ),
-                      ],
-                    ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          'Monthly Payroll',
-                          style: AppTextStyles.bodyMedium.copyWith(
-                            color: AppColors.textSecondary,
-                          ),
+                      ),
+                    ],
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        'Monthly Payroll',
+                        style: AppTextStyles.bodyMedium.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          Formatters.currency(_calculateTotalSalary()),
-                          style: AppTextStyles.h3.copyWith(
-                            color: AppColors.primary,
-                            fontWeight: FontWeight.bold,
-                          ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        Formatters.currency(_calculateTotalSalary()),
+                        style: AppTextStyles.h3.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.bold,
                         ),
-                      ],
-                    ),
-                  ],
-                ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
@@ -217,7 +219,7 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _showAddManagerDialog,
-        backgroundColor: AppColors.primary,
+        backgroundColor: cs.primary,
         icon: const Icon(Icons.person_add, color: Colors.white),
         label: const Text('Add Staff', style: TextStyle(color: Colors.white)),
       ),
@@ -225,87 +227,124 @@ class _AssistantManagersScreenState extends State<AssistantManagersScreen> {
   }
 
   Widget _buildManagerCard(Map<String, dynamic> manager) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ListTile(
-        contentPadding: const EdgeInsets.all(16),
-        leading: CircleAvatar(
-          backgroundColor: AppColors.primary.withOpacity(0.1),
-          child: Text(
-            (manager['name'] ?? 'M').substring(0, 1).toUpperCase(),
-            style: AppTextStyles.h5.copyWith(
-              color: AppColors.primary,
-            ),
-          ),
-        ),
-        title: Text(
-          manager['name'] ?? '',
-          style: AppTextStyles.bodyLarge.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 4),
-            Row(
+    final cs = Theme.of(context).colorScheme;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: iOSDesignTokens.space12),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+          onTap: () {
+            // TODO: View manager details
+          },
+          child: Padding(
+            padding: const EdgeInsets.all(iOSDesignTokens.space16),
+            child: Row(
               children: [
-                const Icon(
-                  Icons.store_outlined,
-                  size: 16,
-                  color: AppColors.textSecondary,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  manager['shop'] ?? 'N/A',
-                  style: AppTextStyles.bodySmall.copyWith(
-                    color: AppColors.textSecondary,
+                // 38x38 gradient container
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        cs.primary,
+                        cs.primary.withValues(alpha: 0.7),
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(iOSDesignTokens.radiusSmall),
                   ),
+                  child: Center(
+                    child: Text(
+                      (manager['name'] ?? 'M').substring(0, 1).toUpperCase(),
+                      style: AppTextStyles.h5.copyWith(
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: iOSDesignTokens.space12),
+                // Content
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        manager['name'] ?? '',
+                        style: AppTextStyles.bodyLarge.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.store_outlined,
+                            size: 16,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            manager['shop'] ?? 'N/A',
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.phone_outlined,
+                            size: 16,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            manager['phone'] ?? '',
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                // Trailing salary
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      'Salary',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      Formatters.currency(manager['salary'] ?? 0),
+                      style: AppTextStyles.bodyMedium.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: cs.primary,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                const Icon(
-                  Icons.phone_outlined,
-                  size: 16,
-                  color: AppColors.textSecondary,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  manager['phone'] ?? '',
-                  style: AppTextStyles.bodySmall.copyWith(
-                    color: AppColors.textSecondary,
-                  ),
-                ),
-              ],
-            ),
-          ],
+          ),
         ),
-        trailing: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Text(
-              'Salary',
-              style: AppTextStyles.bodySmall.copyWith(
-                color: AppColors.textSecondary,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              Formatters.currency(manager['salary'] ?? 0),
-              style: AppTextStyles.bodyMedium.copyWith(
-                fontWeight: FontWeight.bold,
-                color: AppColors.primary,
-              ),
-            ),
-          ],
-        ),
-        onTap: () {
-          // TODO: View manager details
-        },
       ),
     );
   }

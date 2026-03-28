@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/excise_models.dart';
 import '../providers/excise_provider.dart';
 import 'daily_report_detail_screen.dart';
 
 class DailyReportListScreen extends StatefulWidget {
-  const DailyReportListScreen({Key? key}) : super(key: key);
+  const DailyReportListScreen({super.key});
 
   @override
   State<DailyReportListScreen> createState() => _DailyReportListScreenState();
@@ -33,10 +34,8 @@ class _DailyReportListScreenState extends State<DailyReportListScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Daily Reports'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: CustomAppBar(
+        title: 'Daily Reports',
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
@@ -105,6 +104,7 @@ class _DailyReportListScreenState extends State<DailyReportListScreen>
 
   Widget _buildReportList(List<ExciseDailyReport> reports) {
     if (reports.isEmpty) {
+      final cs = Theme.of(context).colorScheme;
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -112,20 +112,20 @@ class _DailyReportListScreenState extends State<DailyReportListScreen>
             Icon(
               Icons.description_outlined,
               size: 64,
-              color: Colors.grey[300],
+              color: cs.outlineVariant,
             ),
             const SizedBox(height: 16),
             Text(
               'No reports found',
               style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.grey[600],
+                    color: cs.onSurface,
                   ),
             ),
             const SizedBox(height: 8),
             Text(
               'Tap "Auto-Generate" to create a report',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.grey[500],
+                    color: cs.onSurfaceVariant,
                   ),
             ),
           ],
@@ -176,7 +176,7 @@ class _DailyReportListScreenState extends State<DailyReportListScreen>
             children: [
               Text(
                 'Generate daily report from sales data',
-                style: TextStyle(color: Colors.grey[600]),
+                style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
               ),
               const SizedBox(height: 16),
               InkWell(
@@ -305,18 +305,19 @@ class _DailyReportCard extends StatelessWidget {
   final VoidCallback onTap;
 
   const _DailyReportCard({
-    Key? key,
     required this.report,
     required this.onTap,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
-      elevation: 2,
+      elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
       ),
       child: InkWell(
         onTap: onTap,
@@ -374,7 +375,7 @@ class _DailyReportCard extends StatelessWidget {
                   ),
                   Icon(
                     Icons.chevron_right,
-                    color: Colors.grey[400],
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ],
               ),
@@ -385,6 +386,7 @@ class _DailyReportCard extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _buildStockInfo(
+                      context,
                       'Opening',
                       report.openingStock.totalBottles,
                       Colors.blue,
@@ -392,6 +394,7 @@ class _DailyReportCard extends StatelessWidget {
                   ),
                   Expanded(
                     child: _buildStockInfo(
+                      context,
                       'Sales',
                       report.salesQuantity.totalBottles,
                       Colors.orange,
@@ -399,6 +402,7 @@ class _DailyReportCard extends StatelessWidget {
                   ),
                   Expanded(
                     child: _buildStockInfo(
+                      context,
                       'Closing',
                       report.closingStock.totalBottles,
                       Colors.green,
@@ -438,7 +442,7 @@ class _DailyReportCard extends StatelessWidget {
     );
   }
 
-  Widget _buildStockInfo(String label, int value, Color color) {
+  Widget _buildStockInfo(BuildContext context, String label, int value, Color color) {
     return Column(
       children: [
         Text(
@@ -454,7 +458,7 @@ class _DailyReportCard extends StatelessWidget {
           label,
           style: TextStyle(
             fontSize: 11,
-            color: Colors.grey[600],
+            color: Theme.of(context).colorScheme.onSurface,
           ),
         ),
       ],

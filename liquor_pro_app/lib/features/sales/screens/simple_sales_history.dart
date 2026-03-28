@@ -1,22 +1,157 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import '../../../core/constants/app_colors.dart';
+import '../../../core/config/api_config.dart';
+import '../../../core/theme/ios_design_tokens.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../core/services/auth_service.dart';
-import '../../../core/services/dio_api_service.dart';
 import '../../../core/widgets/sale_details_modal.dart';
 import '../providers/daily_sales_provider.dart';
 import '../models/daily_sales_models.dart';
 import '../models/sale.dart' hide DailySalesRecord;
 import '../services/daily_sales_service.dart';
-import '../services/sales_service.dart';
 import '../widgets/ai_validation_badge.dart';
 import '../widgets/ai_validation_modal.dart';
 import '../widgets/receipt_image_viewer.dart';
+import '../widgets/sales_calendar_modal.dart';
+
+/// Normalize image URL to ensure it has a host
+/// Handles legacy data with relative paths like "/uploads/..."
+String _normalizeImageUrl(String url) {
+  if (url.isEmpty) return url;
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  if (url.startsWith('/')) {
+    return '${ApiConfig.baseUrl}$url';
+  }
+  return url;
+}
+
+/// Normalize all URLs in a list
+List<String> _normalizeImageUrls(List<String> urls) {
+  return urls.map(_normalizeImageUrl).toList();
+}
+
+/// Consolidated sales group - represents multiple sales on the same date for a shop
+class ConsolidatedSaleGroup {
+  final String dateKey;
+  final String shopId;
+  final String shopName;
+  final List<DailySalesRecord> records;
+  final DateTime recordDate;
+
+  ConsolidatedSaleGroup({
+    required this.dateKey,
+    required this.shopId,
+    required this.shopName,
+    required this.records,
+    required this.recordDate,
+  });
+
+  /// Total sales amount across all records
+  double get totalAmount => records.fold(0.0, (sum, r) => sum + r.totalSalesAmount);
+
+  /// Total items count across all records
+  int get totalItems => records.fold(0, (sum, r) => sum + r.items.length);
+
+  /// Total expenses across all records
+  double get totalExpenses => records.fold(0.0, (sum, r) => sum + r.totalExpenseAmount);
+
+  /// Unique categories across all records
+  Set<String> get categories {
+    final cats = <String>{};
+    for (final record in records) {
+      for (final item in record.items) {
+        final catName = item.categoryName;
+        if (catName != null && catName.isNotEmpty) {
+          cats.add(catName);
+        }
+      }
+    }
+    return cats;
+  }
+
+  /// Category breakdown with counts
+  Map<String, int> get categoryBreakdown {
+    final breakdown = <String, int>{};
+    for (final record in records) {
+      for (final item in record.items) {
+        final catName = item.categoryName;
+        final cat = (catName != null && catName.isNotEmpty) ? catName : 'Other';
+        breakdown[cat] = (breakdown[cat] ?? 0) + item.quantity;
+      }
+    }
+    return breakdown;
+  }
+
+  /// Size breakdown with counts
+  Map<String, int> get sizeBreakdown {
+    final breakdown = <String, int>{};
+    for (final record in records) {
+      for (final item in record.items) {
+        final sizeName = item.size;
+        final size = (sizeName != null && sizeName.isNotEmpty) ? sizeName : 'Standard';
+        breakdown[size] = (breakdown[size] ?? 0) + item.quantity;
+      }
+    }
+    return breakdown;
+  }
+
+  /// Whether this group has multiple records
+  bool get hasMultipleRecords => records.length > 1;
+
+  /// Get the single record if only one exists
+  DailySalesRecord? get singleRecord => records.length == 1 ? records.first : null;
+
+  /// Get the most recent record's created at time
+  DateTime? get latestCreatedAt {
+    if (records.isEmpty) return null;
+    return records.map((r) => r.createdAt ?? DateTime.now()).reduce((a, b) => a.isAfter(b) ? a : b);
+  }
+
+  /// Get dominant status (priority: pending > approved > rejected)
+  String get dominantStatus {
+    if (records.any((r) => r.status.toLowerCase() == 'pending')) return 'pending';
+    if (records.any((r) => r.status.toLowerCase() == 'approved')) return 'approved';
+    if (records.any((r) => r.status.toLowerCase() == 'rejected')) return 'rejected';
+    return records.first.status;
+  }
+
+  /// Get the salesman names (unique)
+  Set<String> get salesmanNames {
+    return records
+        .map((r) => r.createdByName ?? r.salesmanName ?? '')
+        .where((n) => n.isNotEmpty)
+        .toSet();
+  }
+
+  /// Check if any record has images
+  bool get hasImages => records.any((r) => r.hasImages);
+
+  /// Get the primary category type (for styling)
+  String get primaryCategoryType {
+    final breakdown = categoryBreakdown;
+    if (breakdown.isEmpty) return 'mixed';
+
+    final sorted = breakdown.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    final topCategory = sorted.first.key.toLowerCase();
+    if (topCategory.contains('beer')) return 'beer';
+    if (topCategory.contains('wine')) return 'wine';
+    if (topCategory.contains('whisky') || topCategory.contains('whiskey') ||
+        topCategory.contains('rum') || topCategory.contains('vodka') ||
+        topCategory.contains('gin') || topCategory.contains('brandy')) {
+      return 'spirits';
+    }
+    return 'mixed';
+  }
+}
 
 /// Simple Sales History Screen with clean design
 class SimpleSalesHistory extends StatefulWidget {
@@ -42,6 +177,14 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
   // Track previous scroll position to detect scroll direction
   double _previousScrollPosition = 0;
 
+  // Status counts from backend API - for accurate display
+  DailySalesStatusCounts? _statusCounts;
+  bool _isLoadingCounts = false;
+
+  // CRITICAL: Cache all available shops separately from filtered records
+  // This ensures shop chips show all shops even when filtering by status
+  Map<String, String> _allAvailableShops = {};
+
   @override
   void initState() {
     super.initState();
@@ -49,8 +192,54 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     _scrollController.addListener(_onScroll);
     // Use addPostFrameCallback to avoid calling setState during build
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadAllShops(); // Load all shops first (for filter chips)
       _loadSales();
+      _loadStatusCounts(); // Fetch accurate counts from backend
     });
+  }
+
+  /// Load all shops (without status filter) for the shop filter chips
+  /// Uses pagination to ensure ALL shops are captured
+  Future<void> _loadAllShops() async {
+    final authService = context.read<AuthService>();
+    final service = DailySalesService(authService);
+
+    final shops = <String, String>{};
+    int currentPage = 1;
+    bool hasMorePages = true;
+    const int pageSize = 100;
+
+    // Paginate through records to get ALL unique shops
+    while (hasMorePages && currentPage <= 10) { // Safety limit
+      final result = await service.getDailySalesRecords(
+        page: currentPage,
+        pageSize: pageSize,
+      );
+
+      if (result.isSuccess && result.data != null) {
+        for (final record in result.data!) {
+          if (record.shopId.isNotEmpty && !shops.containsKey(record.shopId)) {
+            shops[record.shopId] = record.shopName ?? record.shopId;
+          }
+        }
+
+        // Check if there are more pages
+        if (result.data!.length < pageSize) {
+          hasMorePages = false;
+        } else {
+          currentPage++;
+        }
+      } else {
+        hasMorePages = false;
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _allAvailableShops = shops;
+      });
+    }
+    print('📜 [SalesHistory] Loaded ${shops.length} shops for filter chips (fetched $currentPage pages)');
   }
 
   @override
@@ -95,25 +284,31 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     }
     _lastLoadMoreTime = now;
 
-    print('📜 [SalesHistory] Loading more records...');
+    print('📜 [SalesHistory] Loading more records (filter: $_filterStatus)...');
+    final statusFilter = _filterStatus == 'All' ? null : _filterStatus.toLowerCase();
     await provider.loadMoreRecords(
       startDate: _dateRange?.start,
       endDate: _dateRange?.end,
+      status: statusFilter, // Pass status filter for consistency
     );
   }
 
   Future<void> _loadSales() async {
-    print('📜 [SalesHistory] Loading daily sales records...');
+    print('📜 [SalesHistory] Loading daily sales records with filter: $_filterStatus');
     _initialLoadComplete = false; // Reset on new load
     final provider = context.read<DailySalesProvider>();
-    // Always load ALL records - filter by status client-side only
-    // This ensures shop chips always show all available shops
+    // CRITICAL FIX: Pass status filter to API to fetch old pending records
+    // Without this, backend returns newest records first and old pending records are missed
+    final statusFilter = _filterStatus == 'All' ? null : _filterStatus.toLowerCase();
     await provider.fetchRecords(
       startDate: _dateRange?.start,
       endDate: _dateRange?.end,
-      // Don't pass status to API - filter client-side instead
+      status: statusFilter, // Pass status to backend API
     );
-    print('📜 [SalesHistory] Loaded ${provider.records.length} daily sales records');
+    print('📜 [SalesHistory] Loaded ${provider.records.length} daily sales records (status: ${statusFilter ?? "all"})');
+
+    // Refresh status counts from backend for accurate display
+    _loadStatusCounts();
 
     // Best practice: Mark initial load complete after a short delay
     // This prevents auto-loading when the filtered list is short
@@ -126,127 +321,160 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     });
   }
 
-  /// Extract unique shops from records
-  Map<String, String> _getUniqueShops(List<DailySalesRecord> records) {
-    final shopMap = <String, String>{};
-    for (final record in records) {
-      if (record.shopId.isNotEmpty && !shopMap.containsKey(record.shopId)) {
-        shopMap[record.shopId] = record.shopName ?? record.shopId;
+  /// Load accurate status counts from backend API
+  /// This ensures pending/approved counts are accurate regardless of pagination
+  Future<void> _loadStatusCounts() async {
+    if (_isLoadingCounts) return;
+
+    setState(() => _isLoadingCounts = true);
+
+    try {
+      final authService = context.read<AuthService>();
+      final service = DailySalesService(authService);
+      final result = await service.getStatusCounts(shopId: _selectedShopId);
+
+      if (mounted && result.isSuccess && result.data != null) {
+        setState(() {
+          _statusCounts = result.data;
+          _isLoadingCounts = false;
+        });
+      } else {
+        setState(() => _isLoadingCounts = false);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoadingCounts = false);
       }
     }
-    return shopMap;
   }
+
+  /// Open Sales Calendar visualization modal (iOS 2026 style)
+  void _openCalendarView() {
+    HapticFeedback.lightImpact();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      enableDrag: true, // iOS-style drag to dismiss
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.95, // 95% height
+        minChildSize: 0.5,      // Minimum 50% before dismiss
+        maxChildSize: 0.95,     // Max 95%
+        expand: false,
+        builder: (context, scrollController) => SalesCalendarModal(
+          initialShopId: _selectedShopId,
+          scrollController: scrollController,
+          onRecordUpdated: () {
+            // Refresh data when record is approved/rejected in calendar
+            _loadSales();
+          },
+        ),
+      ),
+    );
+  }
+
+  // _getUniqueShops removed — unused, shop list comes from _allAvailableShops
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     // Don't use Scaffold since we're embedded in AdaptiveSalesScreen
     return Container(
-      color: Colors.grey[50],
+      color: cs.surfaceContainerHighest,
       child: Column(
         children: [
-          // Filters Bar
+          // Filters Bar - Clean, Settings-style
           Container(
-            padding: const EdgeInsets.all(16),
-            color: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: iOSDesignTokens.space12, vertical: iOSDesignTokens.space8),
+            color: cs.surface,
             child: Column(
               children: [
-                // Shop Quick Filter Chips
-                Consumer<DailySalesProvider>(
-                  builder: (context, provider, _) {
-                    final shops = _getUniqueShops(provider.records);
-                    return SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          // "All" chip
-                          Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: FilterChip(
-                              label: const Text('All'),
-                              selected: _selectedShopId == null,
-                              onSelected: (_) => setState(() => _selectedShopId = null),
-                              selectedColor: AppColors.primary.withOpacity(0.2),
-                              checkmarkColor: AppColors.primary,
-                              labelStyle: TextStyle(
-                                color: _selectedShopId == null ? AppColors.primary : Colors.black87,
-                                fontWeight: _selectedShopId == null ? FontWeight.w600 : FontWeight.normal,
-                              ),
-                            ),
-                          ),
-                          // Shop chips
-                          ...shops.entries.map((entry) => Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: FilterChip(
-                              label: Text(entry.value),
-                              selected: _selectedShopId == entry.key,
-                              onSelected: (_) => setState(() => _selectedShopId = entry.key),
-                              selectedColor: AppColors.primary.withOpacity(0.2),
-                              checkmarkColor: AppColors.primary,
-                              labelStyle: TextStyle(
-                                color: _selectedShopId == entry.key ? AppColors.primary : Colors.black87,
-                                fontWeight: _selectedShopId == entry.key ? FontWeight.w600 : FontWeight.normal,
-                              ),
-                            ),
-                          )),
-                        ],
+                // Shop Quick Filter Chips - Settings-style bordered chips
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _buildShopChip('All', null),
+                      ..._allAvailableShops.entries.map(
+                        (entry) => _buildShopChip(entry.value, entry.key),
                       ),
-                    );
-                  },
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 12),
-                // Filter Row - Date Range and Status
+                const SizedBox(height: iOSDesignTokens.space8),
+                // Status Segmented Row + Date + Calendar
                 Row(
                   children: [
-                    // Date Range - Flexible
+                    // Status segmented chips
                     Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: _selectDateRange,
-                        icon: const Icon(CupertinoIcons.calendar, size: 16),
-                        label: Text(
-                          _dateRange == null
-                              ? 'Select Date'
-                              : '${Formatters.dateShort(_dateRange!.start)} - ${Formatters.dateShort(_dateRange!.end)}',
-                          style: const TextStyle(fontSize: 12),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: ['All', 'Pending', 'Approved', 'Rejected'].map((status) {
+                            final isSelected = _filterStatus == status;
+                            return Padding(
+                              padding: const EdgeInsets.only(right: iOSDesignTokens.space6),
+                              child: GestureDetector(
+                                onTap: () {
+                                  HapticFeedback.selectionClick();
+                                  setState(() => _filterStatus = status);
+                                  _loadSales();
+                                },
+                                child: AnimatedContainer(
+                                  duration: iOSDesignTokens.durationFast,
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? cs.primary : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(iOSDesignTokens.radiusSmall),
+                                    border: Border.all(
+                                      color: isSelected ? cs.primary : cs.outline.withValues(alpha: 0.3),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    status,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                                      color: isSelected ? cs.onPrimary : cs.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          }).toList(),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    // Status Filter - Compact
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey[300]!),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: DropdownButton<String>(
-                        value: _filterStatus,
-                        underline: const SizedBox(),
-                        isDense: true,
-                        style: const TextStyle(fontSize: 14, color: Colors.black87),
-                        items: ['All', 'Pending', 'Approved', 'Rejected']
-                            .map((status) => DropdownMenuItem(
-                                  value: status,
-                                  child: Text(status),
-                                ))
-                            .toList(),
-                        onChanged: (value) {
-                          setState(() {
-                            _filterStatus = value!;
-                          });
-                        },
+                    const SizedBox(width: iOSDesignTokens.space8),
+                    // Date Range Button
+                    GestureDetector(
+                      onTap: _selectDateRange,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: cs.outline.withValues(alpha: 0.3)),
+                          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusSmall),
+                          color: _dateRange != null ? cs.primary.withValues(alpha: 0.08) : null,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(CupertinoIcons.calendar, size: 16, color: cs.primary),
+                            const SizedBox(width: 4),
+                            Text(
+                              _dateRange == null
+                                  ? 'Date'
+                                  : '${Formatters.dateShort(_dateRange!.start)} - ${Formatters.dateShort(_dateRange!.end)}',
+                              style: TextStyle(fontSize: 13, color: cs.onSurface),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                // Quick Stats
+                const SizedBox(height: iOSDesignTokens.space8),
+                // Quick Stats - Uniform primary tint
                 _buildQuickStats(),
               ],
             ),
@@ -258,39 +486,23 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
                 final records = _getFilteredRecords(provider.records);
 
                 if (provider.isLoading) {
-                  return const Center(
-                    child: CircularProgressIndicator(
-                      color: AppColors.primary,
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CupertinoActivityIndicator(radius: 14, color: cs.primary),
+                        const SizedBox(height: iOSDesignTokens.space12),
+                        Text(
+                          'Loading records...',
+                          style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant),
+                        ),
+                      ],
                     ),
                   );
                 }
 
                 if (records.isEmpty) {
-                  return Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          CupertinoIcons.doc_text,
-                          size: 64,
-                          color: Colors.grey[400],
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'No daily sales records found',
-                          style: TextStyle(
-                            fontSize: 18,
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        ElevatedButton(
-                          onPressed: _loadSales,
-                          child: const Text('Refresh'),
-                        ),
-                      ],
-                    ),
-                  );
+                  return _buildEmptyState();
                 }
 
                 print('📜 [SalesHistory] Displaying ${records.length} daily sales records');
@@ -305,7 +517,115 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     );
   }
 
+  /// Settings-style shop filter chip
+  Widget _buildShopChip(String label, String? shopId) {
+    final cs = Theme.of(context).colorScheme;
+    final isSelected = _selectedShopId == shopId;
+    return Padding(
+      padding: const EdgeInsets.only(right: iOSDesignTokens.space6),
+      child: GestureDetector(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          setState(() => _selectedShopId = shopId);
+          _loadStatusCounts();
+        },
+        child: AnimatedContainer(
+          duration: iOSDesignTokens.durationFast,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: isSelected ? cs.primary.withValues(alpha: 0.12) : Colors.transparent,
+            borderRadius: BorderRadius.circular(iOSDesignTokens.radiusSmall),
+            border: Border.all(
+              color: isSelected ? cs.primary : cs.outline.withValues(alpha: 0.2),
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+              color: isSelected ? cs.primary : cs.onSurface,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Settings-style empty state
+  Widget _buildEmptyState() {
+    final cs = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(iOSDesignTokens.space32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: cs.primary.withValues(alpha: 0.08),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                CupertinoIcons.doc_text,
+                size: 36,
+                color: cs.primary.withValues(alpha: 0.5),
+              ),
+            ),
+            const SizedBox(height: iOSDesignTokens.space20),
+            Text(
+              'No sales records found',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: cs.onSurface,
+              ),
+            ),
+            const SizedBox(height: iOSDesignTokens.space8),
+            Text(
+              'Try adjusting your filters or pull down to refresh.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 14,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: iOSDesignTokens.space20),
+            GestureDetector(
+              onTap: _loadSales,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                decoration: BoxDecoration(
+                  color: cs.primary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(iOSDesignTokens.radiusButton),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(CupertinoIcons.arrow_clockwise, size: 16, color: cs.primary),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Refresh',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: cs.primary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildQuickStats() {
+    final cs = Theme.of(context).colorScheme;
     return Consumer<DailySalesProvider>(
       builder: (context, provider, child) {
         final todayRecords = provider.records.where((r) {
@@ -326,25 +646,43 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
                 icon: CupertinoIcons.doc_text_fill,
                 label: 'Today',
                 value: '${todayRecords.length}',
-                color: Colors.blue,
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: iOSDesignTokens.space6),
             Expanded(
               child: _buildStatChip(
                 icon: CupertinoIcons.money_dollar_circle_fill,
                 label: 'Revenue',
                 value: Formatters.currencyCompact(todayTotal),
-                color: Colors.green,
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: iOSDesignTokens.space6),
             Expanded(
               child: _buildStatChip(
                 icon: CupertinoIcons.clock_fill,
                 label: 'Pending',
-                value: '${provider.records.where((r) => r.status == 'pending').length}',
-                color: Colors.orange,
+                value: _statusCounts != null
+                    ? '${_statusCounts!.pendingCount}'
+                    : '${provider.records.where((r) => r.status == 'pending').length}',
+                isLoading: _isLoadingCounts && _statusCounts == null,
+              ),
+            ),
+            const SizedBox(width: iOSDesignTokens.space6),
+            // Calendar View Button
+            GestureDetector(
+              onTap: _openCalendarView,
+              child: Container(
+                padding: const EdgeInsets.all(9),
+                decoration: BoxDecoration(
+                  color: cs.primary.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(iOSDesignTokens.radiusSmall),
+                  border: Border.all(color: cs.primary.withValues(alpha: 0.2)),
+                ),
+                child: Icon(
+                  CupertinoIcons.calendar_badge_plus,
+                  color: cs.primary,
+                  size: 18,
+                ),
               ),
             ),
           ],
@@ -357,19 +695,20 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     required IconData icon,
     required String label,
     required String value,
-    required Color color,
+    bool isLoading = false,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
+        color: cs.primary.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusSmall),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.12)),
       ),
       child: Row(
         children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 8),
+          Icon(icon, color: cs.primary, size: 15),
+          const SizedBox(width: 4),
           Flexible(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -377,20 +716,29 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
                 Text(
                   label,
                   style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.grey[600],
+                    fontSize: 10,
+                    color: cs.onSurfaceVariant,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
-                Text(
-                  value,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: color,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
+                isLoading
+                    ? SizedBox(
+                        height: 12,
+                        width: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+                        ),
+                      )
+                    : Text(
+                        value,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: cs.primary,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
               ],
             ),
           ),
@@ -399,701 +747,300 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     );
   }
 
-  Widget _buildRecordCard(DailySalesRecord record) {
-    // Get creator info - prefer createdByName, fallback to salesmanName
+  // _buildRecordCard removed — dead code, replaced by unified _buildSaleCard
+
+  // _isItemBeer, _getSaleCategoryType, _getCategoryBackgroundColor, _getCategoryIndicator
+  // removed — category-colored backgrounds are no longer used
+
+  /// Unified compact sale card — replaces _buildRecordCard, _buildModernRecordCard
+  Widget _buildSaleCard(DailySalesRecord record) {
+    final cs = Theme.of(context).colorScheme;
     final createdBy = record.createdByName ?? record.salesmanName;
+    final shopName = record.shopName ?? 'Shop ${record.shopId}';
+    final status = record.status;
+    final isReverted = status.toLowerCase() == 'returned' || status.toLowerCase() == 'reverted';
+    final timeStr = DateFormat('h:mm a').format(record.createdAt ?? DateTime.now());
 
-    // Check if there are multiple payment methods
-    final hasMultiplePayments = [
-      record.totalCashAmount,
-      record.totalCardAmount,
-      record.totalUpiAmount,
-      record.totalCreditAmount,
-    ].where((amt) => amt > 0).length > 1;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: Colors.grey.shade200),
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.15)),
       ),
-      child: InkWell(
-        onTap: () => _viewRecordDetails(record),
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Main Row: Status Avatar + Info + Amount
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Status Avatar (like Inventory design)
-                  Container(
-                    width: 56,
-                    height: 56,
-                    decoration: BoxDecoration(
-                      color: _getStatusColor(record.status).withValues(alpha: 0.1),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      _getStatusIcon(record.status),
-                      color: _getStatusColor(record.status),
-                      size: 28,
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  // Info Section
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+      child: Stack(
+        children: [
+          Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+              onTap: () => _viewRecordDetails(record),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Row 1: Shop name + Amount
+                    Row(
                       children: [
-                        // Date + Status Badge Row
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                DateFormat('d MMM yyyy').format(record.recordDate),
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFF1A1A1A),
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
+                        Expanded(
+                          child: Text(
+                            shopName,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: cs.onSurface,
                             ),
-                            const SizedBox(width: 8),
-                            _buildStatusBadge(record.status),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        // Shop Row
-                        Row(
-                          children: [
-                            Icon(
-                              CupertinoIcons.building_2_fill,
-                              size: 13,
-                              color: Colors.grey[500],
-                            ),
-                            const SizedBox(width: 5),
-                            Flexible(
-                              child: Text(
-                                record.shopName ?? 'Shop ${record.shopId}',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.grey[600],
-                                  fontWeight: FontWeight.w500,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        // Created By Row (NEW - User Attribution)
-                        if (createdBy != null) ...[
-                          Row(
-                            children: [
-                              Icon(
-                                CupertinoIcons.person_fill,
-                                size: 13,
-                                color: AppColors.primary.withValues(alpha: 0.7),
-                              ),
-                              const SizedBox(width: 5),
-                              Flexible(
-                                child: Text(
-                                  'Created by: $createdBy',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: AppColors.primary.withValues(alpha: 0.8),
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ],
-                        // Time Ago Row
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Icon(
-                              CupertinoIcons.clock,
-                              size: 12,
-                              color: Colors.grey[400],
-                            ),
-                            const SizedBox(width: 5),
-                            Text(
-                              Formatters.relativeTime(record.recordDate),
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.grey[500],
-                              ),
-                            ),
-                          ],
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          Formatters.currency(record.totalSalesAmount),
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: cs.primary,
+                          ),
                         ),
                       ],
                     ),
-                  ),
-                  // Amount Column
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text(
-                        Formatters.currency(record.totalSalesAmount),
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.primary,
-                        ),
+                    const SizedBox(height: 4),
+                    // Row 2: Creator • item count • time
+                    Text(
+                      [
+                        if (createdBy != null) createdBy,
+                        '${record.items.length} items',
+                        timeStr,
+                      ].join(' · '),
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: cs.onSurfaceVariant,
                       ),
-                      const SizedBox(height: 4),
-                      // Items count badge
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.grey[100],
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          '${record.items.length} items',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.grey[600],
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    // Row 3: Category + size chips (compact, uniform primary tint)
+                    if (record.items.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      _buildCompactChips(record),
                     ],
-                  ),
-                ],
-              ),
-
-              // Approval Info (for APPROVED status)
-              if (record.status.toLowerCase() == 'approved' && record.approvedByName != null) ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.green.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.green.withValues(alpha: 0.2)),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        CupertinoIcons.checkmark_seal_fill,
-                        size: 16,
-                        color: Colors.green,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text.rich(
-                          TextSpan(
-                            children: [
-                              const TextSpan(
-                                text: 'Approved by: ',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.green,
-                                ),
-                              ),
-                              TextSpan(
-                                text: record.approvedByName!,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.green,
-                                ),
-                              ),
-                              if (record.approvedAt != null) ...[
-                                TextSpan(
-                                  text: ' • ${Formatters.relativeTime(record.approvedAt!)}',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.green.withValues(alpha: 0.7),
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-
-              // Rejection Info (for REJECTED status)
-              if (record.status.toLowerCase() == 'rejected') ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.red.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.red.withValues(alpha: 0.2)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(
-                            CupertinoIcons.xmark_seal_fill,
-                            size: 16,
-                            color: Colors.red,
-                          ),
+                    const SizedBox(height: 8),
+                    // Row 4: Status + AI badge + receipt thumb + chevron
+                    Row(
+                      children: [
+                        _buildModernStatusBadge(status),
+                        // AI Validation Badge (compact for pending with images)
+                        if (record.hasImages && status.toLowerCase() == 'pending') ...[
                           const SizedBox(width: 8),
-                          Expanded(
-                            child: Text.rich(
-                              TextSpan(
-                                children: [
-                                  TextSpan(
-                                    text: record.rejectedByName != null
-                                        ? 'Rejected by: ${record.rejectedByName}'
-                                        : 'Rejected',
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: Colors.red,
-                                    ),
-                                  ),
-                                  if (record.rejectedAt != null) ...[
-                                    TextSpan(
-                                      text: ' • ${Formatters.relativeTime(record.rejectedAt!)}',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: Colors.red.withValues(alpha: 0.7),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                          AIValidationBadge(
+                            record: record,
+                            compact: true,
+                            onTap: () => _showValidationModal(record),
                           ),
                         ],
-                      ),
-                      // Show rejection reason if available
-                      if (record.rejectionReason != null && record.rejectionReason!.isNotEmpty) ...[
-                        const SizedBox(height: 6),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Icon(
-                              CupertinoIcons.text_quote,
-                              size: 14,
-                              color: Colors.red.withValues(alpha: 0.6),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                '"${record.rejectionReason}"',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontStyle: FontStyle.italic,
-                                  color: Colors.red.withValues(alpha: 0.8),
-                                ),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
+                        const Spacer(),
+                        if (record.hasImages) ...[
+                          _buildReceiptThumbnail(record),
+                          const SizedBox(width: 6),
+                        ],
+                        Icon(CupertinoIcons.chevron_right, size: 16, color: cs.onSurfaceVariant),
                       ],
-                    ],
-                  ),
+                    ),
+                    // Row 5 (conditional): Approval/rejection/resubmission — single subtle line
+                    _buildStatusInfoLine(record),
+                  ],
                 ),
-              ],
-
-              // Resubmission Info (if record was resubmitted)
-              if (record.resubmitCount > 0) ...[
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.orange.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        CupertinoIcons.arrow_2_circlepath,
-                        size: 14,
-                        color: Colors.orange,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        record.resubmittedByName != null
-                            ? 'Resubmitted by: ${record.resubmittedByName}'
-                            : 'Resubmitted (${record.resubmitCount}x)',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.orange,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-
-              // Payment Breakdown (only show if multiple payment methods)
-              if (hasMultiplePayments) ...[
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.grey[50],
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      if (record.totalCashAmount > 0)
-                        Flexible(child: _buildPaymentChip('Cash', record.totalCashAmount, Colors.green, CupertinoIcons.money_dollar)),
-                      if (record.totalCardAmount > 0)
-                        Flexible(child: _buildPaymentChip('Card', record.totalCardAmount, Colors.blue, CupertinoIcons.creditcard)),
-                      if (record.totalUpiAmount > 0)
-                        Flexible(child: _buildPaymentChip('UPI', record.totalUpiAmount, Colors.purple, CupertinoIcons.qrcode)),
-                      if (record.totalCreditAmount > 0)
-                        Flexible(child: _buildPaymentChip('Credit', record.totalCreditAmount, Colors.orange, CupertinoIcons.doc_text)),
-                    ],
-                  ),
-                ),
-              ],
-            ],
+              ),
+            ),
           ),
-        ),
+          // Reverted overlay badge instead of Opacity wrapper
+          if (isReverted)
+            Positioned(
+              top: 8,
+              right: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  'REVERTED',
+                  style: TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.orange.shade700,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
 
-  Widget _buildPaymentChip(String label, double amount, Color color, IconData icon) {
-    if (amount == 0) return const SizedBox.shrink();
-    return Row(
-      mainAxisSize: MainAxisSize.min,
+  /// Compact category + size chips (uniform primary tint)
+  Widget _buildCompactChips(DailySalesRecord record) {
+    final cs = Theme.of(context).colorScheme;
+    final categoryCount = <String, int>{};
+    final sizeCount = <String, int>{};
+
+    for (final item in record.items) {
+      final category = _extractCategory(item);
+      categoryCount[category] = (categoryCount[category] ?? 0) + item.quantity;
+
+      String size = item.size ?? '';
+      if (size.isEmpty || size == 'N/A') {
+        size = _extractSizeFromName(item.productName);
+      }
+      if (size.isNotEmpty && size != 'N/A') {
+        sizeCount[size.toUpperCase()] = (sizeCount[size.toUpperCase()] ?? 0) + item.quantity;
+      }
+    }
+
+    final sortedCats = categoryCount.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final sortedSizes = sizeCount.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+
+    if (sortedCats.isEmpty && sortedSizes.isEmpty) return const SizedBox.shrink();
+
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
       children: [
-        Icon(icon, size: 14, color: color),
-        const SizedBox(width: 4),
-        Text(
-          Formatters.currency(amount),
-          style: TextStyle(
-            fontSize: 11,
-            color: color,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        ...sortedCats.take(3).map((e) => _chipWidget('${e.key} ${e.value}', cs.primary)),
+        ...sortedSizes.take(2).map((e) => _chipWidget('${e.key} ×${e.value}', cs.onSurfaceVariant)),
       ],
     );
   }
 
-  /// Modern Apple-style record card with shop-first hierarchy
-  Widget _buildModernRecordCard(DailySalesRecord record) {
-    final createdBy = record.createdByName ?? record.salesmanName;
-    final shopName = record.shopName ?? 'Shop ${record.shopId}';
-    final status = record.status;
-
+  Widget _chipWidget(String text, Color color) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
       ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(16),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(16),
-          onTap: () => _viewRecordDetails(record),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Row 1: Shop name with icon + Receipt thumbnail + chevron
-                Row(
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: color),
+      ),
+    );
+  }
+
+  /// Single-line status info (approval, rejection, resubmission)
+  Widget _buildStatusInfoLine(DailySalesRecord record) {
+    final status = record.status.toLowerCase();
+    final cs = Theme.of(context).colorScheme;
+
+    if (status == 'approved') {
+      return Column(
+        children: [
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: Row(
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: AppColors.primary.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        CupertinoIcons.building_2_fill,
-                        color: AppColors.primary,
-                        size: 22,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
+                    const Icon(CupertinoIcons.checkmark_seal_fill, size: 13, color: Colors.green),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        shopName,
-                        style: const TextStyle(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1A1A1A),
-                        ),
-                        maxLines: 1,
+                        [
+                          if (record.approvedByName != null) 'Approved by ${record.approvedByName}',
+                          if (record.approvedAt != null) Formatters.relativeTime(record.approvedAt!),
+                        ].join(' · '),
+                        style: TextStyle(fontSize: 12, color: Colors.green.shade600),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    // Receipt thumbnail (NEW - AI Validation Feature)
-                    if (record.hasImages) ...[
-                      _buildReceiptThumbnail(record),
-                      const SizedBox(width: 8),
-                    ],
-                    Icon(
-                      CupertinoIcons.chevron_right,
-                      color: Colors.grey[400],
-                      size: 20,
-                    ),
                   ],
                 ),
-                const SizedBox(height: 10),
-
-                // Row 2: Creator name • Items count
-                Padding(
-                  padding: const EdgeInsets.only(left: 54),
-                  child: Row(
-                    children: [
-                      Icon(
-                        CupertinoIcons.person_fill,
-                        size: 14,
-                        color: Colors.grey[500],
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          createdBy != null
-                              ? '$createdBy • ${record.items.length} items'
-                              : '${record.items.length} items',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: Colors.grey[600],
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // Row 2.5: Category breakdown chips (NEW)
-                if (record.items.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 54),
-                    child: _buildCategoryChips(record),
-                  ),
-                ],
-                const SizedBox(height: 14),
-
-                // Row 3: Amount and Status badge
-                Padding(
-                  padding: const EdgeInsets.only(left: 54),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        Formatters.currency(record.totalSalesAmount),
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.primary,
-                        ),
-                      ),
-                      _buildModernStatusBadge(status),
-                    ],
-                  ),
-                ),
-
-                // AI Validation Badge (NEW - for pending records with images)
-                if (record.hasImages && status.toLowerCase() == 'pending') ...[
-                  const SizedBox(height: 12),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 54),
-                    child: AIValidationBadge(
-                      record: record,
-                      compact: false,
-                      onTap: () => _showValidationModal(record),
-                    ),
-                  ),
-                ],
-
-                // Approval Info + Revert Button (Admin Only)
-                if (status.toLowerCase() == 'approved') ...[
-                  const SizedBox(height: 12),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 54),
-                    child: Row(
-                      children: [
-                        // Approved by info
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: Colors.green.withOpacity(0.08),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(CupertinoIcons.checkmark_seal_fill, size: 14, color: Colors.green),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    record.approvedByName != null
-                                        ? 'Approved by ${record.approvedByName}'
-                                        : 'Approved',
-                                    style: const TextStyle(fontSize: 12, color: Colors.green, fontWeight: FontWeight.w500),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        // Revert Button - Admin Only
-                        FutureBuilder<String?>(
-                          future: Provider.of<AuthService>(context, listen: false).getUserRole(),
-                          builder: (context, snapshot) {
-                            final userRole = snapshot.data ?? '';
-                            final isAdmin = userRole == 'admin' || userRole == 'saas_admin';
-
-                            if (!isAdmin) return const SizedBox.shrink();
-
-                            return Padding(
-                              padding: const EdgeInsets.only(left: 8),
-                              child: Material(
-                                color: Colors.red.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(8),
-                                child: InkWell(
-                                  onTap: () => _showRevertConfirmation(record),
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Icon(
-                                          CupertinoIcons.arrow_uturn_left,
-                                          size: 14,
-                                          color: Colors.red,
-                                        ),
-                                        const SizedBox(width: 6),
-                                        const Text(
-                                          'Revert',
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w600,
-                                            color: Colors.red,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-
-                // Rejection Info
-                if (status.toLowerCase() == 'rejected') ...[
-                  const SizedBox(height: 12),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 54),
+              ),
+              // Revert Button - Admin Only
+              FutureBuilder<String?>(
+                future: Provider.of<AuthService>(context, listen: false).getUserRole(),
+                builder: (context, snapshot) {
+                  final userRole = snapshot.data ?? '';
+                  final isAdmin = userRole == 'admin' || userRole == 'saas_admin';
+                  if (!isAdmin) return const SizedBox.shrink();
+                  return GestureDetector(
+                    onTap: () => _showRevertConfirmation(record),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      margin: const EdgeInsets.only(left: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                       decoration: BoxDecoration(
-                        color: Colors.red.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(10),
+                        color: Colors.red.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              const Icon(CupertinoIcons.xmark_seal_fill, size: 14, color: Colors.red),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  record.rejectedByName != null
-                                      ? 'Rejected by ${record.rejectedByName}'
-                                      : 'Rejected',
-                                  style: const TextStyle(fontSize: 12, color: Colors.red, fontWeight: FontWeight.w500),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
-                          ),
-                          if (record.rejectionReason != null && record.rejectionReason!.isNotEmpty) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              '"${record.rejectionReason}"',
-                              style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: Colors.red.withOpacity(0.8)),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-
-                // Resubmission Info
-                if (record.resubmitCount > 0) ...[
-                  const SizedBox(height: 8),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 54),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
+                      child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(CupertinoIcons.arrow_2_circlepath, size: 14, color: Colors.orange),
-                          const SizedBox(width: 6),
-                          Text(
-                            record.resubmittedByName != null
-                                ? 'Resubmitted by ${record.resubmittedByName}'
-                                : 'Resubmitted (${record.resubmitCount}x)',
-                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: Colors.orange),
-                          ),
+                          Icon(CupertinoIcons.arrow_uturn_left, size: 12, color: Colors.red),
+                          SizedBox(width: 4),
+                          Text('Revert', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.red)),
                         ],
                       ),
                     ),
-                  ),
-                ],
-              ],
-            ),
+                  );
+                },
+              ),
+            ],
           ),
-        ),
-      ),
-    );
+        ],
+      );
+    }
+
+    if (status == 'rejected') {
+      return Column(
+        children: [
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Icon(CupertinoIcons.xmark_seal_fill, size: 13, color: Colors.red),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  [
+                    record.rejectedByName != null ? 'Rejected by ${record.rejectedByName}' : 'Rejected',
+                    if (record.rejectionReason != null && record.rejectionReason!.isNotEmpty)
+                      '"${record.rejectionReason}"',
+                  ].join(' · '),
+                  style: TextStyle(fontSize: 12, color: Colors.red.shade600),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
+    if (record.resubmitCount > 0) {
+      return Column(
+        children: [
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Icon(CupertinoIcons.arrow_2_circlepath, size: 12, color: cs.onSurfaceVariant),
+              const SizedBox(width: 6),
+              Text(
+                record.resubmittedByName != null
+                    ? 'Resubmitted by ${record.resubmittedByName}'
+                    : 'Resubmitted (${record.resubmitCount}x)',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
+    return const SizedBox.shrink();
   }
 
   /// Modern status badge with icon
@@ -1104,7 +1051,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
+        color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
@@ -1126,89 +1073,87 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     );
   }
 
-  Widget _buildStatusBadge(String status) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: _getStatusColor(status),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: _getStatusColor(status).withValues(alpha: 0.3),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Text(
-        status.toUpperCase(),
-        style: const TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          color: Colors.white,
-          letterSpacing: 0.5,
-        ),
-      ),
+  // _buildStatusBadge removed — replaced by _buildModernStatusBadge
+
+  // _isBeerCategory, _getCategoryChipColor, _getCategoryChipBgColor removed — no longer used
+
+  /// Extract size from product name if not available directly
+  /// E.g., "Kingfisher Premium 650ML" → "650ML"
+  String _extractSizeFromName(String? productName) {
+    if (productName == null || productName.isEmpty) return 'N/A';
+
+    // Match patterns like "650ML", "750ml", "180 ML", "1L", "1LTR"
+    final sizePattern = RegExp(
+      r'(\d+(?:\.\d+)?)\s*(ml|ML|ltr|LTR|L)\b',
+      caseSensitive: false,
     );
+    final match = sizePattern.firstMatch(productName);
+    if (match != null) {
+      final number = match.group(1)!;
+      final unit = match.group(2)!.toUpperCase();
+      // Normalize unit
+      final normalizedUnit = unit == 'LTR' ? 'L' : unit;
+      return '$number$normalizedUnit';
+    }
+    return 'N/A';
   }
 
-  /// Build category breakdown chips (e.g., WHISKEY/IMFL 42, BEER 18)
-  Widget _buildCategoryChips(DailySalesRecord record) {
-    // Group items by category and count
-    final categoryCount = <String, int>{};
-    for (final item in record.items) {
-      final category = item.categoryName ?? 'Other';
-      categoryCount[category] = (categoryCount[category] ?? 0) + item.quantity.toInt();
+  /// Extract category from item - uses categoryName directly from backend
+  String _extractCategory(DailySalesItem item) {
+    // Use categoryName directly from backend (e.g., "Whisky", "Beer", "Rum", "Vodka")
+    if (item.categoryName != null && item.categoryName!.isNotEmpty) {
+      return item.categoryName!;
     }
 
-    // Sort by count descending and take top 3
-    final sortedCategories = categoryCount.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    final topCategories = sortedCategories.take(3).toList();
+    // Fallback: Try to extract from brand name or product name
+    final searchText = '${item.brandName ?? ''} ${item.productName ?? ''}'.toLowerCase();
 
-    if (topCategories.isEmpty) {
-      return const SizedBox.shrink();
+    if (searchText.contains('beer') || searchText.contains('lager') ||
+        searchText.contains('kingfisher') || searchText.contains('budweiser') ||
+        searchText.contains('heineken') || searchText.contains('carlsberg') ||
+        searchText.contains('tuborg') || searchText.contains('foster')) {
+      return 'Beer';
+    }
+    if (searchText.contains('whisky') || searchText.contains('whiskey') ||
+        searchText.contains('scotch') || searchText.contains('bourbon')) {
+      return 'Whisky';
+    }
+    if (searchText.contains('rum') || searchText.contains('bacardi') ||
+        searchText.contains('old monk')) {
+      return 'Rum';
+    }
+    if (searchText.contains('vodka') || searchText.contains('smirnoff') ||
+        searchText.contains('absolut')) {
+      return 'Vodka';
+    }
+    if (searchText.contains('wine') || searchText.contains('champagne')) {
+      return 'Wine';
+    }
+    if (searchText.contains('brandy') || searchText.contains('cognac')) {
+      return 'Brandy';
+    }
+    if (searchText.contains('gin')) {
+      return 'Gin';
     }
 
-    return Wrap(
-      spacing: 6,
-      runSpacing: 4,
-      children: topCategories.map((entry) {
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: AppColors.primary.withOpacity(0.08),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: AppColors.primary.withOpacity(0.2),
-              width: 1,
-            ),
-          ),
-          child: Text(
-            '${entry.key} ${entry.value}',
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: AppColors.primary.withOpacity(0.85),
-            ),
-          ),
-        );
-      }).toList(),
-    );
+    return 'Other';
   }
+
+  // _buildCategoryChips removed — replaced by _buildCompactChips in _buildSaleCard
 
   Color _getStatusColor(String status) {
+    final cs = Theme.of(context).colorScheme;
     switch (status.toLowerCase()) {
       case 'approved':
         return Colors.green;
       case 'pending':
-        return Colors.orange;
+        return const Color(0xFF1976D2); // Blue 700 - distinct from Beer amber
       case 'rejected':
         return Colors.red;
       case 'returned':
         return Colors.purple;
       default:
-        return Colors.grey;
+        return cs.onSurfaceVariant;
     }
   }
 
@@ -1274,12 +1219,16 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     return filtered;
   }
 
-  /// Group records by date for section headers (Apple-style)
-  Map<String, List<DailySalesRecord>> _groupRecordsByDate(List<DailySalesRecord> records) {
-    final grouped = <String, List<DailySalesRecord>>{};
+  // _groupRecordsByDate removed — replaced by _groupRecordsIntoConsolidated
+
+  /// Group records by date AND shop into consolidated groups
+  Map<String, List<ConsolidatedSaleGroup>> _groupRecordsIntoConsolidated(List<DailySalesRecord> records) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final yesterday = today.subtract(const Duration(days: 1));
+
+    // First group by date, then by shop
+    final Map<String, Map<String, List<DailySalesRecord>>> dateShopGroups = {};
 
     for (final record in records) {
       final recordDateOnly = DateTime(
@@ -1288,45 +1237,464 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
         record.recordDate.day,
       );
 
-      String groupKey;
+      String dateKey;
       if (recordDateOnly == today) {
-        groupKey = 'Today';
+        dateKey = 'Today';
       } else if (recordDateOnly == yesterday) {
-        groupKey = 'Yesterday';
+        dateKey = 'Yesterday';
       } else {
-        groupKey = DateFormat('d MMMM yyyy').format(record.recordDate);
+        dateKey = DateFormat('d MMMM yyyy').format(record.recordDate);
       }
 
-      grouped.putIfAbsent(groupKey, () => []).add(record);
+      dateShopGroups.putIfAbsent(dateKey, () => {});
+      final shopId = record.shopId;
+      dateShopGroups[dateKey]!.putIfAbsent(shopId, () => []).add(record);
     }
-    return grouped;
+
+    // Convert to consolidated groups
+    final Map<String, List<ConsolidatedSaleGroup>> result = {};
+
+    for (final dateEntry in dateShopGroups.entries) {
+      final dateKey = dateEntry.key;
+      final shopGroups = dateEntry.value;
+
+      result[dateKey] = [];
+
+      for (final shopEntry in shopGroups.entries) {
+        final shopRecords = shopEntry.value;
+        if (shopRecords.isEmpty) continue;
+
+        result[dateKey]!.add(ConsolidatedSaleGroup(
+          dateKey: dateKey,
+          shopId: shopEntry.key,
+          shopName: shopRecords.first.shopName ?? 'Shop ${shopEntry.key}',
+          records: shopRecords,
+          recordDate: shopRecords.first.recordDate,
+        ));
+      }
+
+      // Sort consolidated groups by latest activity (newest first)
+      result[dateKey]!.sort((a, b) {
+        final aTime = a.latestCreatedAt ?? DateTime.now();
+        final bTime = b.latestCreatedAt ?? DateTime.now();
+        return bTime.compareTo(aTime);
+      });
+    }
+
+    return result;
   }
 
-  /// Build date section header (Apple-style)
-  Widget _buildDateHeader(String dateGroup) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 20, 4, 8),
-      child: Text(
-        dateGroup.toUpperCase(),
-        style: TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-          color: Colors.grey[500],
-          letterSpacing: 0.8,
+  /// Show bottom sheet with list of individual sales for a consolidated group
+  void _showMultipleSalesSheet(ConsolidatedSaleGroup group) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        minChildSize: 0.4,
+        maxChildSize: 0.9,
+        builder: (context, scrollController) {
+          final cs = Theme.of(context).colorScheme;
+          return Container(
+            decoration: BoxDecoration(
+              color: cs.surface,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(iOSDesignTokens.radiusSheet)),
+            ),
+            child: Column(
+              children: [
+                // Handle bar
+                Container(
+                  margin: const EdgeInsets.only(top: 12),
+                  width: 36, height: 4,
+                  decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(2)),
+                ),
+                // Header
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              group.shopName,
+                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: cs.onSurface),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${group.records.length} sales on ${group.dateKey}',
+                              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: cs.primary.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Text(
+                          Formatters.currency(group.totalAmount),
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: cs.primary),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Divider(height: 1, color: cs.outline.withValues(alpha: 0.1)),
+                // Sales list
+                Expanded(
+                  child: ListView.separated(
+                    controller: scrollController,
+                    padding: const EdgeInsets.all(iOSDesignTokens.space16),
+                    itemCount: group.records.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final record = group.records[index];
+                      return _buildCompactSaleCard(record, index + 1);
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Build a compact sale card for the multi-sale list
+  Widget _buildCompactSaleCard(DailySalesRecord record, int index) {
+    final status = record.status;
+    final createdBy = record.createdByName ?? record.salesmanName ?? 'Unknown';
+    final categoryBreakdown = <String, int>{};
+
+    for (final item in record.items) {
+      final catName = item.categoryName;
+      final cat = (catName != null && catName.isNotEmpty) ? catName : 'Other';
+      categoryBreakdown[cat] = (categoryBreakdown[cat] ?? 0) + item.quantity;
+    }
+
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: cs.surface,
+      borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+        onTap: () {
+          Navigator.pop(context);
+          _viewRecordDetails(record);
+        },
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+            border: Border.all(color: cs.outline.withValues(alpha: 0.15)),
+          ),
+          child: Row(
+            children: [
+              // Index badge
+              Container(
+                width: 30, height: 30,
+                decoration: BoxDecoration(
+                  color: cs.primary.withValues(alpha: 0.08),
+                  shape: BoxShape.circle,
+                ),
+                child: Center(
+                  child: Text('$index', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: cs.primary)),
+                ),
+              ),
+              const SizedBox(width: 10),
+              // Sale info
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '$createdBy · ${DateFormat('h:mm a').format(record.createdAt ?? DateTime.now())}',
+                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: categoryBreakdown.entries.take(3).map((e) {
+                        return _chipWidget('${e.key} ${e.value}', cs.primary);
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Amount and status
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    Formatters.currency(record.totalSalesAmount),
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: cs.primary),
+                  ),
+                  const SizedBox(height: 4),
+                  _buildMiniStatusBadge(status),
+                ],
+              ),
+              const SizedBox(width: 4),
+              Icon(CupertinoIcons.chevron_right, size: 14, color: cs.onSurfaceVariant),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  /// Build grouped list with date headers and infinite scroll
+  /// Build a mini status badge for compact cards
+  Widget _buildMiniStatusBadge(String status) {
+    final color = _getStatusColor(status);
+    final icon = _getStatusIcon(status);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 10, color: color),
+          const SizedBox(width: 3),
+          Text(
+            status.toUpperCase(),
+            style: TextStyle(fontSize: 8, fontWeight: FontWeight.w700, letterSpacing: 0.3, color: color),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Build date section header — Settings-style with accent bar
+  Widget _buildDateHeader(String dateGroup) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 20, 0, 10),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 16,
+            decoration: BoxDecoration(
+              color: cs.primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            dateGroup.toUpperCase(),
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: cs.onSurfaceVariant,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Build consolidated sale card — compact, uniform design matching _buildSaleCard
+  Widget _buildConsolidatedCard(ConsolidatedSaleGroup group) {
+    final cs = Theme.of(context).colorScheme;
+    final allReverted = group.records.every((r) =>
+      r.status.toLowerCase() == 'returned' || r.status.toLowerCase() == 'reverted'
+    );
+
+    // For single-record groups, delegate to _buildSaleCard
+    if (!group.hasMultipleRecords && group.singleRecord != null) {
+      return _buildSaleCard(group.singleRecord!);
+    }
+
+    final timeStr = DateFormat('h:mm a').format(group.latestCreatedAt ?? DateTime.now());
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.15)),
+      ),
+      child: Stack(
+        children: [
+          Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+              onTap: () => _showMultipleSalesSheet(group),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Row 1: Shop name + "N sales" badge + Amount
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  group.shopName,
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: cs.onSurface,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: cs.primary.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Text(
+                                  '${group.records.length} sales',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: cs.primary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          Formatters.currency(group.totalAmount),
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: cs.primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    // Row 2: Salesmen • items • time
+                    Text(
+                      [
+                        if (group.salesmanNames.isNotEmpty) group.salesmanNames.join(', '),
+                        '${group.totalItems} items',
+                        timeStr,
+                      ].join(' · '),
+                      style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    // Row 3: Category + size chips
+                    if (group.categoryBreakdown.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          ...group.categoryBreakdown.entries.take(3).map(
+                            (e) => _chipWidget('${e.key} ${e.value}', cs.primary),
+                          ),
+                          ...group.sizeBreakdown.entries.take(2).map(
+                            (e) => _chipWidget('${e.key} ×${e.value}', cs.onSurfaceVariant),
+                          ),
+                        ],
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    // Row 4: Status + expenses + chevron
+                    Row(
+                      children: [
+                        _buildConsolidatedStatusBadge(group),
+                        if (group.totalExpenses > 0) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            '- ${Formatters.currency(group.totalExpenses)} exp',
+                            style: TextStyle(fontSize: 11, color: Colors.red.shade400, fontWeight: FontWeight.w500),
+                          ),
+                        ],
+                        const Spacer(),
+                        Icon(CupertinoIcons.chevron_down, size: 16, color: cs.onSurfaceVariant),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (allReverted)
+            Positioned(
+              top: 8,
+              right: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  'REVERTED',
+                  style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Colors.orange.shade700, letterSpacing: 0.5),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Build status badge for consolidated card (shows mixed status if applicable)
+  Widget _buildConsolidatedStatusBadge(ConsolidatedSaleGroup group) {
+    final status = group.dominantStatus;
+    final hasMixedStatus = group.records.map((r) => r.status.toLowerCase()).toSet().length > 1;
+
+    if (hasMixedStatus) {
+      final pendingCount = group.records.where((r) => r.status.toLowerCase() == 'pending').length;
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.orange.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(CupertinoIcons.circle_grid_hex_fill, size: 11, color: Colors.orange.shade700),
+            const SizedBox(width: 4),
+            Text(
+              pendingCount > 0 ? '$pendingCount pending' : 'Mixed',
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.orange.shade700),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return _buildModernStatusBadge(status);
+  }
+
+  /// Build grouped list with date headers and infinite scroll (CONSOLIDATED VIEW)
   Widget _buildGroupedList(List<DailySalesRecord> records) {
-    final groupedRecords = _groupRecordsByDate(records);
-    final sortedKeys = groupedRecords.keys.toList();
+    final consolidatedGroups = _groupRecordsIntoConsolidated(records);
+    final sortedKeys = consolidatedGroups.keys.toList();
 
     // Sort date groups: Always newest dates first for better UX
-    // The individual records within each group are already sorted by createdAt for Pending
     sortedKeys.sort((a, b) {
-      // Newest first: Today first, oldest dates last
       if (a == 'Today') return -1;
       if (b == 'Today') return 1;
       if (a == 'Yesterday') return -1;
@@ -1334,7 +1702,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
       try {
         final dateA = DateFormat('d MMMM yyyy').parse(a);
         final dateB = DateFormat('d MMMM yyyy').parse(b);
-        return dateB.compareTo(dateA); // Descending - newest first
+        return dateB.compareTo(dateA);
       } catch (_) {
         return b.compareTo(a);
       }
@@ -1343,14 +1711,13 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     // Calculate total item count including loading indicator
     final baseCount = sortedKeys.fold<int>(
       0,
-      (sum, key) => sum + 1 + groupedRecords[key]!.length,
+      (sum, key) => sum + 1 + consolidatedGroups[key]!.length,
     );
 
     return RefreshIndicator(
       onRefresh: _loadSales,
       child: Consumer<DailySalesProvider>(
         builder: (context, provider, _) {
-          // Add 1 for loading indicator if has more records
           final itemCount = baseCount + (provider.hasMoreRecords ? 1 : 0);
 
           return ListView.builder(
@@ -1358,7 +1725,6 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
             padding: const EdgeInsets.all(16),
             itemCount: itemCount,
             itemBuilder: (context, index) {
-              // If this is the last item and we have more records, show loading indicator
               if (index == baseCount && provider.hasMoreRecords) {
                 return _buildLoadingIndicator(provider.isLoadingMore);
               }
@@ -1370,10 +1736,10 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
                 }
                 currentIndex++;
 
-                final sectionRecords = groupedRecords[key]!;
-                for (int i = 0; i < sectionRecords.length; i++) {
+                final groups = consolidatedGroups[key]!;
+                for (int i = 0; i < groups.length; i++) {
                   if (currentIndex == index) {
-                    return _buildModernRecordCard(sectionRecords[i]);
+                    return _buildConsolidatedCard(groups[i]);
                   }
                   currentIndex++;
                 }
@@ -1386,31 +1752,19 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     );
   }
 
-  /// Build loading indicator for infinite scroll (Instagram-style)
+  /// Build loading indicator for infinite scroll
   Widget _buildLoadingIndicator(bool isLoading) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 24),
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: iOSDesignTokens.space24),
       child: Center(
         child: isLoading
             ? Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: AppColors.primary,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Loading more...',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[500],
-                    ),
-                  ),
+                  CupertinoActivityIndicator(radius: 12, color: cs.primary),
+                  const SizedBox(height: iOSDesignTokens.space8),
+                  Text('Loading more...', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
                 ],
               )
             : GestureDetector(
@@ -1418,26 +1772,15 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                   decoration: BoxDecoration(
-                    color: AppColors.primary.withOpacity(0.1),
+                    color: cs.primary.withValues(alpha: 0.08),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
-                        CupertinoIcons.arrow_down_circle,
-                        size: 16,
-                        color: AppColors.primary,
-                      ),
+                      Icon(CupertinoIcons.arrow_down_circle, size: 16, color: cs.primary),
                       const SizedBox(width: 8),
-                      Text(
-                        'Load more',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                          color: AppColors.primary,
-                        ),
-                      ),
+                      Text('Load more', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: cs.primary)),
                     ],
                   ),
                 ),
@@ -1452,10 +1795,13 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
       return const SizedBox.shrink();
     }
 
+    // Normalize URLs to handle legacy data with relative paths
+    final normalizedUrls = _normalizeImageUrls(record.imageUrls);
+
     return GestureDetector(
       onTap: () => ReceiptImageViewer.show(
         context,
-        imageUrls: record.imageUrls,
+        imageUrls: normalizedUrls,
         title: 'Receipt',
       ),
       child: Stack(
@@ -1463,23 +1809,23 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
             child: CachedNetworkImage(
-              imageUrl: record.imageUrls.first,
+              imageUrl: normalizedUrls.first,
               width: 44,
               height: 44,
               fit: BoxFit.cover,
               placeholder: (context, url) => Container(
                 width: 44,
                 height: 44,
-                color: Colors.grey[200],
+                color: Theme.of(context).colorScheme.outlineVariant,
                 child: const CupertinoActivityIndicator(radius: 8),
               ),
               errorWidget: (context, url, error) => Container(
                 width: 44,
                 height: 44,
-                color: Colors.grey[200],
+                color: Theme.of(context).colorScheme.outlineVariant,
                 child: Icon(
                   CupertinoIcons.photo,
-                  color: Colors.grey[400],
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
                   size: 18,
                 ),
               ),
@@ -1493,7 +1839,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.7),
+                  color: Colors.black.withValues(alpha: 0.7),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
@@ -1512,6 +1858,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
   }
 
   /// Show AI validation modal for a record
+  /// Fetches validation data from the backend before showing the modal
   void _showValidationModal(DailySalesRecord record) async {
     // Get current user role for approval permissions
     final authService = Provider.of<AuthService>(context, listen: false);
@@ -1522,10 +1869,50 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
 
     if (!mounted) return;
 
+    // Show loading indicator while fetching validation
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(
+        child: CupertinoActivityIndicator(radius: 16),
+      ),
+    );
+
+    // Fetch validation data from backend
+    AIValidationResult? validationResult = record.validationResult;
+
+    if (record.id != null) {
+      try {
+        // DailySalesService requires AuthService, not DioApiService
+        final dailySalesService = DailySalesService(authService);
+
+        print('🤖 [SalesHistory] Fetching AI validation for record ${record.id}');
+        final response = await dailySalesService.getValidation(record.id!);
+
+        if (response.success && response.data != null) {
+          validationResult = response.data;
+          print('✅ [SalesHistory] AI validation loaded: ${validationResult?.status}');
+          print('   - Accuracy: ${validationResult?.overallAccuracy}%');
+          print('   - Critical: ${validationResult?.criticalCount}, Warning: ${validationResult?.warningCount}');
+          print('   - Has AI Summary: ${validationResult?.hasAISummary}');
+        } else {
+          print('⚠️ [SalesHistory] No validation data: ${response.error}');
+        }
+      } catch (e) {
+        print('❌ [SalesHistory] Error fetching validation: $e');
+      }
+    }
+
+    // Dismiss loading indicator
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    if (!mounted) return;
+
     await AIValidationModal.show(
       context,
       record: record,
-      validationResult: record.validationResult,
+      validationResult: validationResult,
       onApprove: canApprove ? () => _approveRecord(record) : null,
       onReject: canApprove ? () => _rejectRecord(record) : null,
       showActions: canApprove && record.status == 'pending',
@@ -1565,64 +1952,111 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     );
   }
 
-  Widget _buildDetailRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Flexible(
-            flex: 2,
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey[600],
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Flexible(
-            flex: 3,
-            child: Text(
-              value,
-              textAlign: TextAlign.right,
-              overflow: TextOverflow.ellipsis,
-              maxLines: 2,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  // _buildDetailRow removed — unused dead code
 
   Future<void> _approveRecord(DailySalesRecord record) async {
-    // Show confirmation dialog
-    final confirmed = await showDialog<bool>(
+    final cs = Theme.of(context).colorScheme;
+    // Show modern bottom sheet confirmation
+    final confirmed = await showModalBottomSheet<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Approve Daily Sales'),
-        content: Text(
-          'Approve sales record for ${record.shopName ?? record.shopId}?\n\n'
-          'Amount: ${Formatters.currency(record.totalSalesAmount)}\n\n'
-          'Stock will be deducted upon approval.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(iOSDesignTokens.radiusSheet)),
           ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-            child: const Text('Approve'),
+          padding: EdgeInsets.fromLTRB(24, 12, 24, MediaQuery.of(ctx).viewInsets.bottom + 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                width: 36, height: 4,
+                decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(2)),
+              ),
+              const SizedBox(height: 20),
+              // Header
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+                    ),
+                    child: const Icon(CupertinoIcons.checkmark_circle_fill, color: Colors.green, size: 24),
+                  ),
+                  const SizedBox(width: 14),
+                  const Expanded(
+                    child: Text('Approve Sales Record', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              // Details
+              _buildSheetDetailRow('Shop', record.shopName ?? record.shopId),
+              _buildSheetDetailRow('Amount', Formatters.currency(record.totalSalesAmount)),
+              _buildSheetDetailRow('Items', '${record.items.length} products'),
+              const SizedBox(height: 16),
+              // Warning
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(iOSDesignTokens.radiusSmall),
+                ),
+                child: Row(
+                  children: [
+                    Icon(CupertinoIcons.exclamationmark_triangle_fill, size: 18, color: Colors.orange.shade700),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Stock will be deducted upon approval.',
+                        style: TextStyle(fontSize: 13, color: Colors.orange.shade800),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              // Action buttons
+              Row(
+                children: [
+                  Expanded(
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      color: cs.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(iOSDesignTokens.radiusButton),
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: Text('Cancel', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: cs.onSurface)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(iOSDesignTokens.radiusButton),
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(CupertinoIcons.checkmark_alt, size: 18, color: Colors.white),
+                          SizedBox(width: 6),
+                          Text('Approve', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
 
     if (confirmed != true || !mounted) return;
@@ -1631,7 +2065,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => const Center(child: CircularProgressIndicator()),
+      builder: (context) => const Center(child: CupertinoActivityIndicator(radius: 14)),
     );
 
     // Call approval API
@@ -1643,73 +2077,123 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     Navigator.pop(context); // Close loading dialog
 
     if (response.success) {
-      // Refresh the list
       await _loadSales();
-
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Daily sales record approved successfully'),
-          backgroundColor: Colors.green,
-        ),
+        const SnackBar(content: Text('Daily sales record approved successfully'), backgroundColor: Colors.green),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('❌ Failed to approve: ${response.message}'),
-          backgroundColor: Colors.red,
-        ),
+        SnackBar(content: Text('Failed to approve: ${response.message}'), backgroundColor: Colors.red),
       );
     }
   }
 
   Future<void> _rejectRecord(DailySalesRecord record) async {
-    // Show reason input dialog
+    final cs = Theme.of(context).colorScheme;
     final reasonController = TextEditingController();
-    final reason = await showDialog<String>(
+
+    // Show modern bottom sheet with reason input
+    final reason = await showModalBottomSheet<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Reject Daily Sales'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Reject sales record for ${record.shopName ?? record.shopId}?',
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: reasonController,
-              decoration: const InputDecoration(
-                labelText: 'Reason for rejection *',
-                hintText: 'Enter reason...',
-                border: OutlineInputBorder(),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(iOSDesignTokens.radiusSheet)),
+          ),
+          padding: EdgeInsets.fromLTRB(24, 12, 24, MediaQuery.of(ctx).viewInsets.bottom + 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                width: 36, height: 4,
+                decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(2)),
               ),
-              maxLines: 3,
-              autofocus: true,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+              const SizedBox(height: 20),
+              // Header
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.red.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+                    ),
+                    child: const Icon(CupertinoIcons.xmark_circle_fill, color: Colors.red, size: 24),
+                  ),
+                  const SizedBox(width: 14),
+                  const Expanded(
+                    child: Text('Reject Sales Record', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              // Details
+              _buildSheetDetailRow('Shop', record.shopName ?? record.shopId),
+              _buildSheetDetailRow('Amount', Formatters.currency(record.totalSalesAmount)),
+              const SizedBox(height: 16),
+              // Reason field
+              TextField(
+                controller: reasonController,
+                decoration: InputDecoration(
+                  labelText: 'Reason for rejection *',
+                  hintText: 'Enter reason...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium)),
+                  filled: true,
+                  fillColor: cs.surfaceContainerHighest,
+                ),
+                maxLines: 3,
+                autofocus: true,
+              ),
+              const SizedBox(height: 24),
+              // Action buttons
+              Row(
+                children: [
+                  Expanded(
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      color: cs.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(iOSDesignTokens.radiusButton),
+                      onPressed: () => Navigator.pop(ctx),
+                      child: Text('Cancel', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: cs.onSurface)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(iOSDesignTokens.radiusButton),
+                      onPressed: () {
+                        if (reasonController.text.trim().isEmpty) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            const SnackBar(content: Text('Please enter a reason')),
+                          );
+                          return;
+                        }
+                        Navigator.pop(ctx, reasonController.text.trim());
+                      },
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(CupertinoIcons.xmark, size: 18, color: Colors.white),
+                          SizedBox(width: 6),
+                          Text('Reject', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
-          ElevatedButton(
-            onPressed: () {
-              if (reasonController.text.trim().isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Please enter a reason')),
-                );
-                return;
-              }
-              Navigator.pop(context, reasonController.text.trim());
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('Reject'),
-          ),
-        ],
-      ),
+        );
+      },
     );
 
     if (reason == null || reason.isEmpty || !mounted) return;
@@ -1718,7 +2202,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => const Center(child: CircularProgressIndicator()),
+      builder: (context) => const Center(child: CupertinoActivityIndicator(radius: 14)),
     );
 
     // Call rejection API
@@ -1730,24 +2214,31 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     Navigator.pop(context); // Close loading dialog
 
     if (response.success) {
-      // Refresh the list
       await _loadSales();
-
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Daily sales record rejected'),
-          backgroundColor: Colors.orange,
-        ),
+        const SnackBar(content: Text('Daily sales record rejected'), backgroundColor: Colors.orange),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('❌ Failed to reject: ${response.message}'),
-          backgroundColor: Colors.red,
-        ),
+        SnackBar(content: Text('Failed to reject: ${response.message}'), backgroundColor: Colors.red),
       );
     }
+  }
+
+  /// Helper for bottom sheet detail rows
+  Widget _buildSheetDetailRow(String label, String value) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+          Text(value, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
   }
 
   // ============================================================================
@@ -1767,7 +2258,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.red.withOpacity(0.1),
+                color: Colors.red.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: const Icon(CupertinoIcons.arrow_uturn_left, color: Colors.red, size: 20),
@@ -1778,54 +2269,56 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
             ),
           ],
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.orange.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.orange.withOpacity(0.3)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(CupertinoIcons.exclamationmark_triangle_fill, color: Colors.orange, size: 20),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'This will restore stock to inventory and require OTP verification.',
-                      style: TextStyle(fontSize: 13, color: Colors.orange[800]),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(CupertinoIcons.exclamationmark_triangle_fill, color: Colors.orange, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'This will restore stock to inventory and require OTP verification.',
+                        style: TextStyle(fontSize: 13, color: Colors.orange[800]),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Record Details',
-              style: TextStyle(fontSize: 12, color: Colors.grey[600], fontWeight: FontWeight.w500),
-            ),
-            const SizedBox(height: 8),
-            _buildRevertDetailRow('Shop', record.shopName ?? 'Shop ${record.shopId}'),
-            _buildRevertDetailRow('Date', DateFormat('d MMM yyyy').format(record.recordDate)),
-            _buildRevertDetailRow('Amount', Formatters.currency(record.totalSalesAmount)),
-            _buildRevertDetailRow('Items', '${record.items.length} products'),
-            const SizedBox(height: 16),
-            TextField(
-              controller: reasonController,
-              decoration: InputDecoration(
-                labelText: 'Reason for revert *',
-                hintText: 'Enter reason...',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                filled: true,
-                fillColor: Colors.grey[50],
+              const SizedBox(height: 16),
+              Text(
+                'Record Details',
+                style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant, fontWeight: FontWeight.w500),
               ),
-              maxLines: 3,
-              autofocus: true,
-            ),
-          ],
+              const SizedBox(height: 8),
+              _buildRevertDetailRow('Shop', record.shopName ?? 'Shop ${record.shopId}'),
+              _buildRevertDetailRow('Date', DateFormat('d MMM yyyy').format(record.recordDate)),
+              _buildRevertDetailRow('Amount', Formatters.currency(record.totalSalesAmount)),
+              _buildRevertDetailRow('Items', '${record.items.length} products'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: reasonController,
+                decoration: InputDecoration(
+                  labelText: 'Reason for revert *',
+                  hintText: 'Enter reason...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  filled: true,
+                  fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                ),
+                maxLines: 2,
+                autofocus: true,
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -1864,7 +2357,7 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+          Text(label, style: TextStyle(fontSize: 13, color: Theme.of(context).colorScheme.onSurfaceVariant)),
           Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
         ],
       ),
@@ -1899,244 +2392,29 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
     }
   }
 
-  /// Show OTP verification dialog with dual OTP inputs
+  /// Show modern iOS 26 style OTP verification modal
+  /// Features: Individual digit inputs, auto-focus, resend cooldown, haptic feedback
   void _showOtpVerificationDialog(DailySalesRecord record, String reason, RevertOtpResponse otpResponse) {
-    final emailOtpController = TextEditingController();
-    final phoneOtpController = TextEditingController();
-    int remainingSeconds = otpResponse.remainingSeconds;
-    int attemptCount = 0;
-    const maxAttempts = 3;
-    Timer? countdownTimer;
+    HapticFeedback.mediumImpact();
 
-    showDialog(
+    showModalBottomSheet(
       context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            // Start countdown timer
-            countdownTimer ??= Timer.periodic(const Duration(seconds: 1), (timer) {
-              if (remainingSeconds > 0) {
-                setDialogState(() {
-                  remainingSeconds--;
-                });
-              } else {
-                timer.cancel();
-              }
-            });
-
-            final minutes = remainingSeconds ~/ 60;
-            final seconds = remainingSeconds % 60;
-            final isExpired = remainingSeconds <= 0;
-
-            return AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              title: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppColors.primary.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Icon(CupertinoIcons.lock_shield_fill, color: AppColors.primary, size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Text('OTP Verification', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-                  ),
-                ],
-              ),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Info box
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Enter OTPs sent to:',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                          ),
-                          const SizedBox(height: 6),
-                          Row(
-                            children: [
-                              const Icon(CupertinoIcons.mail_solid, size: 14, color: Colors.blue),
-                              const SizedBox(width: 6),
-                              Text(
-                                otpResponse.maskedEmail,
-                                style: const TextStyle(fontSize: 12, color: Colors.blue),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Row(
-                            children: [
-                              const Icon(CupertinoIcons.phone_fill, size: 14, color: Colors.green),
-                              const SizedBox(width: 6),
-                              Text(
-                                otpResponse.maskedPhone,
-                                style: const TextStyle(fontSize: 12, color: Colors.green),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Timer or Resend button
-                    Center(
-                      child: isExpired
-                          ? ElevatedButton.icon(
-                              onPressed: () async {
-                                countdownTimer?.cancel();
-                                Navigator.pop(dialogContext);
-                                _requestRevertOtp(record, reason);
-                              },
-                              icon: const Icon(CupertinoIcons.arrow_clockwise, size: 16),
-                              label: const Text('Resend OTPs'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.orange,
-                                foregroundColor: Colors.white,
-                              ),
-                            )
-                          : Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: remainingSeconds <= 60 ? Colors.red.withOpacity(0.1) : Colors.grey[100],
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    CupertinoIcons.clock,
-                                    size: 16,
-                                    color: remainingSeconds <= 60 ? Colors.red : Colors.grey[600],
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    'Expires in ${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                      color: remainingSeconds <= 60 ? Colors.red : Colors.grey[700],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Email OTP input
-                    TextField(
-                      controller: emailOtpController,
-                      decoration: InputDecoration(
-                        labelText: 'Email OTP',
-                        hintText: '6-digit code',
-                        prefixIcon: const Icon(CupertinoIcons.mail, size: 20),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                        filled: true,
-                        fillColor: Colors.grey[50],
-                      ),
-                      keyboardType: TextInputType.number,
-                      maxLength: 6,
-                      enabled: !isExpired,
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Phone OTP input
-                    TextField(
-                      controller: phoneOtpController,
-                      decoration: InputDecoration(
-                        labelText: 'Phone OTP',
-                        hintText: '6-digit code',
-                        prefixIcon: const Icon(CupertinoIcons.phone, size: 20),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                        filled: true,
-                        fillColor: Colors.grey[50],
-                      ),
-                      keyboardType: TextInputType.number,
-                      maxLength: 6,
-                      enabled: !isExpired,
-                    ),
-
-                    // Attempts remaining
-                    if (attemptCount > 0)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(
-                          'Attempts remaining: ${maxAttempts - attemptCount}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: attemptCount >= 2 ? Colors.red : Colors.grey[600],
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    countdownTimer?.cancel();
-                    Navigator.pop(dialogContext);
-                  },
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: isExpired
-                      ? null
-                      : () async {
-                          final emailOtp = emailOtpController.text.trim();
-                          final phoneOtp = phoneOtpController.text.trim();
-
-                          if (emailOtp.length != 6 || phoneOtp.length != 6) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Please enter both 6-digit OTPs')),
-                            );
-                            return;
-                          }
-
-                          attemptCount++;
-                          if (attemptCount >= maxAttempts) {
-                            countdownTimer?.cancel();
-                            Navigator.pop(dialogContext);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('❌ Maximum attempts exceeded. Please try again.'),
-                                backgroundColor: Colors.red,
-                              ),
-                            );
-                            return;
-                          }
-
-                          countdownTimer?.cancel();
-                          Navigator.pop(dialogContext);
-                          _verifyAndRevertRecord(record, emailOtp, phoneOtp, reason);
-                        },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  child: const Text('Verify & Revert'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _ModernOtpVerificationSheet(
+        record: record,
+        reason: reason,
+        otpResponse: otpResponse,
+        onVerify: (emailOtp, phoneOtp) {
+          _verifyAndRevertRecord(record, emailOtp, phoneOtp, reason);
+        },
+        onResendOtp: () {
+          Navigator.pop(context);
+          _requestRevertOtp(record, reason);
+        },
+      ),
     );
   }
 
@@ -2186,5 +2464,683 @@ class _SimpleSalesHistoryState extends State<SimpleSalesHistory> {
         ),
       );
     }
+  }
+}
+
+// ============================================================================
+// MODERN iOS 26 STYLE OTP VERIFICATION SHEET
+// ============================================================================
+
+/// Modern OTP Verification Bottom Sheet
+/// Features:
+/// - Individual digit inputs with auto-focus navigation
+/// - Dual OTP support (Email + Phone)
+/// - Resend cooldown timer with visual feedback
+/// - Haptic feedback on interactions
+/// - Attempt tracking with lockout protection
+/// - iOS 26 inspired design language
+class _ModernOtpVerificationSheet extends StatefulWidget {
+  final DailySalesRecord record;
+  final String reason;
+  final RevertOtpResponse otpResponse;
+  final void Function(String emailOtp, String phoneOtp) onVerify;
+  final VoidCallback onResendOtp;
+
+  const _ModernOtpVerificationSheet({
+    required this.record,
+    required this.reason,
+    required this.otpResponse,
+    required this.onVerify,
+    required this.onResendOtp,
+  });
+
+  @override
+  State<_ModernOtpVerificationSheet> createState() => _ModernOtpVerificationSheetState();
+}
+
+class _ModernOtpVerificationSheetState extends State<_ModernOtpVerificationSheet>
+    with SingleTickerProviderStateMixin {
+  // Email OTP controllers (6 digits)
+  final List<TextEditingController> _emailControllers = List.generate(6, (_) => TextEditingController());
+  final List<FocusNode> _emailFocusNodes = List.generate(6, (_) => FocusNode());
+
+  // Phone OTP controllers (6 digits)
+  final List<TextEditingController> _phoneControllers = List.generate(6, (_) => TextEditingController());
+  final List<FocusNode> _phoneFocusNodes = List.generate(6, (_) => FocusNode());
+
+  // State
+  late int _remainingSeconds;
+  int _attemptCount = 0;
+  static const int _maxAttempts = 3;
+  static const int _resendCooldown = 30; // Seconds before resend is enabled
+  int _resendCooldownRemaining = 0;
+  bool _isVerifying = false;
+  Timer? _expiryTimer;
+  Timer? _resendTimer;
+
+  // Animation
+  late AnimationController _shakeController;
+  late Animation<double> _shakeAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _remainingSeconds = widget.otpResponse.remainingSeconds;
+    _startExpiryTimer();
+
+    // Shake animation for errors
+    _shakeController = AnimationController(
+      duration: const Duration(milliseconds: 500),
+      vsync: this,
+    );
+    _shakeAnimation = Tween<double>(begin: 0, end: 10).chain(
+      CurveTween(curve: Curves.elasticIn),
+    ).animate(_shakeController);
+
+    // Auto-focus first email input
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _emailFocusNodes[0].requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _expiryTimer?.cancel();
+    _resendTimer?.cancel();
+    _shakeController.dispose();
+    for (var c in _emailControllers) {
+      c.dispose();
+    }
+    for (var c in _phoneControllers) {
+      c.dispose();
+    }
+    for (var f in _emailFocusNodes) {
+      f.dispose();
+    }
+    for (var f in _phoneFocusNodes) {
+      f.dispose();
+    }
+    super.dispose();
+  }
+
+  void _startExpiryTimer() {
+    _expiryTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_remainingSeconds > 0) {
+        setState(() => _remainingSeconds--);
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
+  void _startResendCooldown() {
+    _resendCooldownRemaining = _resendCooldown;
+    _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_resendCooldownRemaining > 0) {
+        setState(() => _resendCooldownRemaining--);
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
+  String get _emailOtp => _emailControllers.map((c) => c.text).join();
+  String get _phoneOtp => _phoneControllers.map((c) => c.text).join();
+  bool get _isExpired => _remainingSeconds <= 0;
+  bool get _canResend => _resendCooldownRemaining <= 0;
+  bool get _isComplete => _emailOtp.length == 6 && _phoneOtp.length == 6;
+
+  void _onDigitChanged(
+    String value,
+    int index,
+    List<TextEditingController> controllers,
+    List<FocusNode> focusNodes,
+    List<FocusNode>? nextGroupFocusNodes,
+  ) {
+    if (value.length == 1) {
+      HapticFeedback.selectionClick();
+      // Move to next field
+      if (index < 5) {
+        focusNodes[index + 1].requestFocus();
+      } else if (nextGroupFocusNodes != null) {
+        // Move to first field of next group (phone OTP)
+        nextGroupFocusNodes[0].requestFocus();
+      } else {
+        // Last digit entered - unfocus
+        focusNodes[index].unfocus();
+      }
+    }
+  }
+
+  void _onKeyPressed(
+    KeyEvent event,
+    int index,
+    List<TextEditingController> controllers,
+    List<FocusNode> focusNodes,
+    List<FocusNode>? prevGroupFocusNodes,
+  ) {
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.backspace) {
+      if (controllers[index].text.isEmpty && index > 0) {
+        // Move to previous field on backspace when empty
+        focusNodes[index - 1].requestFocus();
+        controllers[index - 1].clear();
+        HapticFeedback.selectionClick();
+      } else if (controllers[index].text.isEmpty && index == 0 && prevGroupFocusNodes != null) {
+        // Move to last field of previous group (email OTP)
+        prevGroupFocusNodes[5].requestFocus();
+        HapticFeedback.selectionClick();
+      }
+    }
+  }
+
+  Future<void> _handleVerify() async {
+    if (!_isComplete) {
+      HapticFeedback.heavyImpact();
+      _shakeController.forward().then((_) => _shakeController.reset());
+      return;
+    }
+
+    if (_isExpired) {
+      HapticFeedback.heavyImpact();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('OTP has expired. Please request a new one.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _attemptCount++);
+
+    if (_attemptCount >= _maxAttempts) {
+      HapticFeedback.heavyImpact();
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Maximum attempts exceeded. Please try again later.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isVerifying = true);
+    HapticFeedback.mediumImpact();
+
+    // Close sheet and verify
+    Navigator.pop(context);
+    widget.onVerify(_emailOtp, _phoneOtp);
+  }
+
+  void _handleResend() {
+    if (!_canResend) return;
+
+    HapticFeedback.mediumImpact();
+    _startResendCooldown();
+    widget.onResendOtp();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomPadding = MediaQuery.of(context).viewInsets.bottom;
+
+    return AnimatedBuilder(
+      animation: _shakeAnimation,
+      builder: (context, child) {
+        return Transform.translate(
+          offset: Offset(_shakeAnimation.value, 0),
+          child: child,
+        );
+      },
+      child: Container(
+        margin: EdgeInsets.only(bottom: bottomPadding),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Handle bar
+                  Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.outlineVariant,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Header
+                  _buildHeader(),
+                  const SizedBox(height: 24),
+
+                  // Timer
+                  _buildTimer(),
+                  const SizedBox(height: 28),
+
+                  // Email OTP Section
+                  _buildOtpSection(
+                    icon: CupertinoIcons.mail_solid,
+                    iconColor: Colors.blue,
+                    label: 'Email OTP',
+                    maskedValue: widget.otpResponse.maskedEmail,
+                    controllers: _emailControllers,
+                    focusNodes: _emailFocusNodes,
+                    nextGroupFocusNodes: _phoneFocusNodes,
+                    prevGroupFocusNodes: null,
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Phone OTP Section
+                  _buildOtpSection(
+                    icon: CupertinoIcons.phone_fill,
+                    iconColor: Colors.green,
+                    label: 'Phone OTP',
+                    maskedValue: widget.otpResponse.maskedPhone,
+                    controllers: _phoneControllers,
+                    focusNodes: _phoneFocusNodes,
+                    nextGroupFocusNodes: null,
+                    prevGroupFocusNodes: _emailFocusNodes,
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Attempts remaining
+                  if (_attemptCount > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            CupertinoIcons.exclamationmark_circle,
+                            size: 14,
+                            color: _attemptCount >= 2 ? Colors.red : Colors.orange,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            '${_maxAttempts - _attemptCount} attempt${_maxAttempts - _attemptCount != 1 ? 's' : ''} remaining',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: _attemptCount >= 2 ? Colors.red : Colors.orange,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  // Resend OTP
+                  _buildResendButton(),
+                  const SizedBox(height: 24),
+
+                  // Action buttons
+                  _buildActionButtons(),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        // Shield icon with gradient background
+        Container(
+          width: 72,
+          height: 72,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                cs.primary.withValues(alpha: 0.15),
+                cs.primary.withValues(alpha: 0.05),
+              ],
+            ),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            CupertinoIcons.lock_shield_fill,
+            size: 36,
+            color: cs.primary,
+          ),
+        ),
+        const SizedBox(height: 16),
+        const Text(
+          'Verify Your Identity',
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.5,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Enter the 6-digit codes sent to your email and phone to confirm this revert action.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 14,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+            height: 1.4,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTimer() {
+    final minutes = _remainingSeconds ~/ 60;
+    final seconds = _remainingSeconds % 60;
+    final isUrgent = _remainingSeconds <= 60;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+      decoration: BoxDecoration(
+        color: _isExpired
+            ? Colors.red.withValues(alpha: 0.1)
+            : isUrgent
+                ? Colors.orange.withValues(alpha: 0.1)
+                : Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: _isExpired
+              ? Colors.red.withValues(alpha: 0.3)
+              : isUrgent
+                  ? Colors.orange.withValues(alpha: 0.3)
+                  : Colors.transparent,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _isExpired ? CupertinoIcons.xmark_circle_fill : CupertinoIcons.clock_fill,
+            size: 18,
+            color: _isExpired
+                ? Colors.red
+                : isUrgent
+                    ? Colors.orange
+                    : Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            _isExpired
+                ? 'Code expired'
+                : 'Expires in ${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: _isExpired
+                  ? Colors.red
+                  : isUrgent
+                      ? Colors.orange
+                      : Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOtpSection({
+    required IconData icon,
+    required Color iconColor,
+    required String label,
+    required String maskedValue,
+    required List<TextEditingController> controllers,
+    required List<FocusNode> focusNodes,
+    required List<FocusNode>? nextGroupFocusNodes,
+    required List<FocusNode>? prevGroupFocusNodes,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Label with icon
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: iconColor.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(icon, size: 16, color: iconColor),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    maskedValue,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        // OTP digit inputs
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: List.generate(6, (index) {
+            return SizedBox(
+              width: 48,
+              height: 56,
+              child: KeyboardListener(
+                focusNode: FocusNode(),
+                onKeyEvent: (event) => _onKeyPressed(
+                  event,
+                  index,
+                  controllers,
+                  focusNodes,
+                  prevGroupFocusNodes,
+                ),
+                child: TextField(
+                  controller: controllers[index],
+                  focusNode: focusNodes[index],
+                  textAlign: TextAlign.center,
+                  keyboardType: TextInputType.number,
+                  maxLength: 1,
+                  enabled: !_isExpired && !_isVerifying,
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0,
+                  ),
+                  decoration: InputDecoration(
+                    counterText: '',
+                    filled: true,
+                    fillColor: _isExpired ? Theme.of(context).colorScheme.surfaceContainerHighest : Theme.of(context).colorScheme.surfaceContainerHighest,
+                    contentPadding: EdgeInsets.zero,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: iconColor, width: 2),
+                    ),
+                    disabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+                    ),
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                  ],
+                  onChanged: (value) => _onDigitChanged(
+                    value,
+                    index,
+                    controllers,
+                    focusNodes,
+                    nextGroupFocusNodes,
+                  ),
+                ),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildResendButton() {
+    final cs = Theme.of(context).colorScheme;
+    if (_isExpired) {
+      return GestureDetector(
+        onTap: _handleResend,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.orange.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(CupertinoIcons.arrow_clockwise, size: 18, color: Colors.orange[700]),
+              const SizedBox(width: 8),
+              Text(
+                'Resend OTP Codes',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.orange[700],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(
+          "Didn't receive the code? ",
+          style: TextStyle(
+            fontSize: 13,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        GestureDetector(
+          onTap: _canResend ? _handleResend : null,
+          child: Text(
+            _canResend ? 'Resend' : 'Resend in ${_resendCooldownRemaining}s',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: _canResend ? cs.primary : cs.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildActionButtons() {
+    final cs = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        // Cancel button
+        Expanded(
+          child: CupertinoButton(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(14),
+            onPressed: () {
+              HapticFeedback.lightImpact();
+              Navigator.pop(context);
+            },
+            child: Text(
+              'Cancel',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+
+        // Verify button
+        Expanded(
+          flex: 2,
+          child: CupertinoButton(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            color: _isComplete && !_isExpired
+                ? cs.primary
+                : cs.outlineVariant,
+            borderRadius: BorderRadius.circular(14),
+            onPressed: _isVerifying ? null : _handleVerify,
+            child: _isVerifying
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        CupertinoIcons.checkmark_shield_fill,
+                        size: 20,
+                        color: _isComplete && !_isExpired
+                            ? Colors.white
+                            : Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Verify & Revert',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: _isComplete && !_isExpired
+                              ? Colors.white
+                              : Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
+        ),
+      ],
+    );
   }
 }

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_text_styles.dart';
 import 'custom_button.dart';
 
@@ -22,6 +21,7 @@ class EmptyStateWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -31,13 +31,13 @@ class EmptyStateWidget extends StatelessWidget {
             Icon(
               icon ?? Icons.inventory_2_outlined,
               size: 80,
-              color: AppColors.textHint,
+              color: cs.onSurfaceVariant,
             ),
             const SizedBox(height: 24),
             Text(
               title,
               style: AppTextStyles.h5.copyWith(
-                color: AppColors.textSecondary,
+                color: cs.onSurfaceVariant,
               ),
               textAlign: TextAlign.center,
             ),
@@ -46,7 +46,7 @@ class EmptyStateWidget extends StatelessWidget {
               Text(
                 message!,
                 style: AppTextStyles.bodyMedium.copyWith(
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
                 textAlign: TextAlign.center,
               ),

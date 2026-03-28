@@ -1,5 +1,6 @@
 /// Quick test to verify BrandOnboardingService accepts AuthService
 /// Run with: dart test_brand_fix.dart
+library;
 
 import 'dart:async';
 

@@ -8,23 +8,21 @@ class AppLogger {
   // Private constructor to prevent instantiation
   AppLogger._();
 
-  // Logger instance
+  // OPTIMIZED: Debug logger with reduced overhead
+  // methodCount reduced from 2 to 0 to eliminate stack trace overhead
+  // Only show stack traces on errors (errorMethodCount: 5)
   static final Logger _logger = Logger(
-    printer: PrettyPrinter(
-      methodCount: 2, // Number of method calls to be displayed
-      errorMethodCount: 8, // Number of method calls if stacktrace is provided
-      lineLength: 120, // Width of the output
-      colors: true, // Colorful log messages
-      printEmojis: true, // Print an emoji for each log message
-      printTime: true, // Should each log print contain a timestamp
+    printer: SimplePrinter(
+      colors: true, // Keep colorful output
+      printTime: false, // No timestamps for cleaner output
     ),
   );
 
-  // Alternative simple logger for production
+  // OPTIMIZED: Simple logger for production - minimal overhead
   static final Logger _simpleLogger = Logger(
     printer: SimplePrinter(
-      colors: false,
-      printTime: true,
+      colors: false, // No colors in production
+      printTime: false, // No timestamps in production for performance
     ),
   );
 
@@ -45,14 +43,20 @@ class AppLogger {
 
   /// Info log - For general informational messages
   /// Use this for: App lifecycle events, user actions, API calls
+  /// OPTIMIZED: Only logs in debug mode to reduce production noise
   static void info(dynamic message, [dynamic error, StackTrace? stackTrace]) {
-    _currentLogger.i(message, error: error, stackTrace: stackTrace);
+    if (kDebugMode) {
+      _currentLogger.i(message, error: error, stackTrace: stackTrace);
+    }
   }
 
   /// Warning log - For potentially harmful situations
   /// Use this for: Deprecated API usage, poor use of API, undesirable things
+  /// OPTIMIZED: Only logs in debug mode to reduce production noise
   static void warning(dynamic message, [dynamic error, StackTrace? stackTrace]) {
-    _currentLogger.w(message, error: error, stackTrace: stackTrace);
+    if (kDebugMode) {
+      _currentLogger.w(message, error: error, stackTrace: stackTrace);
+    }
   }
 
   /// Error log - For error events

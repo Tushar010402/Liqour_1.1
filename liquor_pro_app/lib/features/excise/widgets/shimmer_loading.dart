@@ -7,12 +7,12 @@ class ShimmerLoading extends StatefulWidget {
   final Color highlightColor;
 
   const ShimmerLoading({
-    Key? key,
+    super.key,
     required this.child,
     required this.isLoading,
     this.baseColor = const Color(0xFFE0E0E0),
     this.highlightColor = const Color(0xFFF5F5F5),
-  }) : super(key: key);
+  });
 
   @override
   State<ShimmerLoading> createState() => _ShimmerLoadingState();
@@ -43,6 +43,14 @@ class _ShimmerLoadingState extends State<ShimmerLoading>
       return widget.child;
     }
 
+    final cs = Theme.of(context).colorScheme;
+    final effectiveBaseColor = widget.baseColor == const Color(0xFFE0E0E0)
+        ? cs.surfaceContainerHighest
+        : widget.baseColor;
+    final effectiveHighlightColor = widget.highlightColor == const Color(0xFFF5F5F5)
+        ? cs.surface
+        : widget.highlightColor;
+
     return AnimatedBuilder(
       animation: _controller,
       child: widget.child,
@@ -52,9 +60,9 @@ class _ShimmerLoadingState extends State<ShimmerLoading>
           shaderCallback: (bounds) {
             return LinearGradient(
               colors: [
-                widget.baseColor,
-                widget.highlightColor,
-                widget.baseColor,
+                effectiveBaseColor,
+                effectiveHighlightColor,
+                effectiveBaseColor,
               ],
               stops: const [0.0, 0.5, 1.0],
               begin: Alignment(-1.0 - _controller.value * 2, 0),
@@ -75,19 +83,20 @@ class ShimmerBox extends StatelessWidget {
   final BorderRadius? borderRadius;
 
   const ShimmerBox({
-    Key? key,
+    super.key,
     required this.width,
     required this.height,
     this.borderRadius,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Container(
       width: width,
       height: height,
       decoration: BoxDecoration(
-        color: Colors.grey[300],
+        color: cs.outlineVariant,
         borderRadius: borderRadius ?? BorderRadius.circular(4),
       ),
     );
@@ -95,7 +104,7 @@ class ShimmerBox extends StatelessWidget {
 }
 
 class ShimmerCard extends StatelessWidget {
-  const ShimmerCard({Key? key}) : super(key: key);
+  const ShimmerCard({super.key});
 
   @override
   Widget build(BuildContext context) {

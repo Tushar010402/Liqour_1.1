@@ -11,6 +11,7 @@ class SaasBrand {
   final List<SaasBrandVariant> variants;
   final String? categoryName;
   final String? subcategoryName;
+  final bool? _isOnboardedFromApi; // Raw value from API (brand-level)
 
   SaasBrand({
     required this.id,
@@ -24,7 +25,19 @@ class SaasBrand {
     required this.variants,
     this.categoryName,
     this.subcategoryName,
-  });
+    bool? isOnboarded,
+  }) : _isOnboardedFromApi = isOnboarded;
+
+  /// Check if brand is onboarded - ALWAYS compute from variants
+  /// because backend sends incorrect brand-level is_onboarded (always true for all brands)
+  /// A brand is considered "onboarded" if ALL its variants are onboarded
+  bool? get isOnboarded {
+    // IMPORTANT: Backend bug - brand-level is_onboarded is always true
+    // So we MUST compute from variants to get accurate status
+    if (variants.isEmpty) return false;
+    // Brand is "onboarded" only if ALL variants are onboarded
+    return variants.every((v) => v.isOnboarded == true);
+  }
 
   factory SaasBrand.fromJson(Map<String, dynamic> json) {
     // Backend sends either 'brand_variants' or 'variants'
@@ -50,7 +63,113 @@ class SaasBrand {
           [],
       categoryName: json['category_name'],
       subcategoryName: json['subcategory_name'],
+      isOnboarded: json['is_onboarded'],
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'description': description,
+      'picture': picture,
+      'is_active': isActive,
+      'sort_order': sortOrder,
+      'created_at': createdAt.toIso8601String(),
+      'updated_at': updatedAt.toIso8601String(),
+      'variants': variants.map((v) => v.toJson()).toList(),
+      'category_name': categoryName,
+      'subcategory_name': subcategoryName,
+      'is_onboarded': _isOnboardedFromApi ?? isOnboarded,
+    };
+  }
+
+  /// Helper to check if all variants are onboarded
+  bool get hasAllVariantsOnboarded {
+    return variants.every((v) => v.isOnboarded == true);
+  }
+
+  /// Helper to get count of onboarded variants
+  int get onboardedVariantsCount {
+    return variants.where((v) => v.isOnboarded == true).length;
+  }
+
+  /// Get category name from first variant (backend sends category in variants, not at brand level)
+  String? get categoryNameFromVariant {
+    if (variants.isEmpty) return categoryName;
+    return variants.first.category?.name ?? categoryName;
+  }
+
+  /// Get subcategory name from first variant (backend sends subcategory in variants, not at brand level)
+  String? get subcategoryNameFromVariant {
+    if (variants.isEmpty) return subcategoryName;
+    return variants.first.subcategory?.name ?? subcategoryName;
+  }
+
+  /// Get category ID from first variant
+  String? get categoryIdFromVariant {
+    if (variants.isEmpty) return null;
+    return variants.first.categoryId;
+  }
+
+  /// Get subcategory ID from first variant
+  String? get subcategoryIdFromVariant {
+    if (variants.isEmpty) return null;
+    return variants.first.subcategoryId;
+  }
+}
+
+/// Lightweight Category Info for nested objects
+class CategoryInfo {
+  final String id;
+  final String name;
+  final String? icon;
+
+  CategoryInfo({
+    required this.id,
+    required this.name,
+    this.icon,
+  });
+
+  factory CategoryInfo.fromJson(Map<String, dynamic> json) {
+    return CategoryInfo(
+      id: json['id'] ?? '',
+      name: json['name'] ?? '',
+      icon: json['icon'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      if (icon != null) 'icon': icon,
+    };
+  }
+}
+
+/// Lightweight Subcategory Info for nested objects
+class SubcategoryInfo {
+  final String id;
+  final String name;
+
+  SubcategoryInfo({
+    required this.id,
+    required this.name,
+  });
+
+  factory SubcategoryInfo.fromJson(Map<String, dynamic> json) {
+    return SubcategoryInfo(
+      id: json['id'] ?? '',
+      name: json['name'] ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+    };
   }
 }
 
@@ -73,6 +192,11 @@ class SaasBrandVariant {
   final int sortOrder;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final bool? isOnboarded; // Track if this variant is already onboarded
+
+  // Nested objects from backend
+  final CategoryInfo? category;
+  final SubcategoryInfo? subcategory;
 
   SaasBrandVariant({
     required this.id,
@@ -92,6 +216,9 @@ class SaasBrandVariant {
     required this.sortOrder,
     required this.createdAt,
     required this.updatedAt,
+    this.isOnboarded,
+    this.category,
+    this.subcategory,
   });
 
   factory SaasBrandVariant.fromJson(Map<String, dynamic> json) {
@@ -117,7 +244,39 @@ class SaasBrandVariant {
       updatedAt: json['updated_at'] != null && json['updated_at'] != '0001-01-01T00:00:00Z'
           ? DateTime.tryParse(json['updated_at']) ?? DateTime.now()
           : DateTime.now(),
+      isOnboarded: json['is_onboarded'],
+      category: json['category'] != null && json['category'] is Map<String, dynamic>
+          ? CategoryInfo.fromJson(json['category'] as Map<String, dynamic>)
+          : null,
+      subcategory: json['subcategory'] != null && json['subcategory'] is Map<String, dynamic>
+          ? SubcategoryInfo.fromJson(json['subcategory'] as Map<String, dynamic>)
+          : null,
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'brand_id': brandId,
+      'category_id': categoryId,
+      'subcategory_id': subcategoryId,
+      'size': size,
+      'alcohol_content': alcoholContent,
+      'picture': picture,
+      'barcode': barcode,
+      'hsn_code': hsnCode,
+      'government_duty': governmentDuty,
+      'buying_price': buyingPrice,
+      'selling_price': sellingPrice,
+      'mrp': mrp,
+      'is_active': isActive,
+      'sort_order': sortOrder,
+      'created_at': createdAt.toIso8601String(),
+      'updated_at': updatedAt.toIso8601String(),
+      'is_onboarded': isOnboarded,
+      if (category != null) 'category': category!.toJson(),
+      if (subcategory != null) 'subcategory': subcategory!.toJson(),
+    };
   }
 
   /// Display name for variant (Brand - Size)

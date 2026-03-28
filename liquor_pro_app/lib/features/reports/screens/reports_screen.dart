@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
-import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
+import 'purcha_report_screen.dart';
 
 /// Reports and Analytics Screen
 class ReportsScreen extends StatefulWidget {
@@ -31,14 +31,15 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: CustomAppBar(
         title: 'Reports & Analytics',
         bottom: TabBar(
           controller: _tabController,
-          labelColor: AppColors.primary,
-          unselectedLabelColor: AppColors.textSecondary,
-          indicatorColor: AppColors.primary,
+          labelColor: cs.primary,
+          unselectedLabelColor: cs.onSurfaceVariant,
+          indicatorColor: cs.primary,
           tabs: const [
             Tab(text: 'Sales'),
             Tab(text: 'Inventory'),
@@ -58,6 +59,7 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
   }
 
   Widget _buildSalesTab() {
+    final cs = Theme.of(context).colorScheme;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -170,12 +172,12 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
                           FlSpot(6, 5.5),
                         ],
                         isCurved: true,
-                        color: AppColors.primary,
+                        color: cs.primary,
                         barWidth: 3,
                         dotData: const FlDotData(show: false),
                         belowBarData: BarAreaData(
                           show: true,
-                          color: AppColors.primary.withOpacity(0.1),
+                          color: cs.primary.withValues(alpha: 0.1),
                         ),
                       ),
                     ],
@@ -210,11 +212,34 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
   }
 
   Widget _buildInventoryTab() {
+    final cs = Theme.of(context).colorScheme;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Quick Actions - Purcha Report
+          Text(
+            'Quick Actions',
+            style: AppTextStyles.h5,
+          ),
+          const SizedBox(height: 12),
+          _buildReportActionCard(
+            title: 'Purcha Report',
+            subtitle: 'Daily stock report with opening, receipt, sale & closing',
+            icon: Icons.assessment_rounded,
+            color: cs.primary,
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const PurchaReportScreen(),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 24),
+
           // Inventory Summary
           Row(
             children: [
@@ -223,7 +248,7 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
                   'Total Products',
                   '0',
                   Icons.inventory_2,
-                  AppColors.primary,
+                  cs.primary,
                 ),
               ),
               const SizedBox(width: 12),
@@ -261,7 +286,7 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
                       Text(
                         '₹0',
                         style: AppTextStyles.h4.copyWith(
-                          color: AppColors.primary,
+                          color: cs.primary,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
@@ -274,7 +299,7 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
                       Text(
                         'Potential Profit',
                         style: AppTextStyles.bodyMedium.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                       Text(
@@ -295,7 +320,76 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
     );
   }
 
+  Widget _buildReportActionCard({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  icon,
+                  color: color,
+                  size: 28,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: AppTextStyles.bodyLarge.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: cs.onSurfaceVariant,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildFinanceTab() {
+    final cs = Theme.of(context).colorScheme;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -356,14 +450,14 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
                   const SizedBox(height: 12),
                   LinearProgressIndicator(
                     value: 0.0,
-                    backgroundColor: AppColors.background,
+                    backgroundColor: cs.surfaceContainerHighest,
                     valueColor: const AlwaysStoppedAnimation<Color>(AppColors.success),
                   ),
                   const SizedBox(height: 8),
                   Text(
                     '0% profit margin',
                     style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                   ),
                 ],
@@ -376,6 +470,7 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
   }
 
   Widget _buildSummaryCard(String title, String value, IconData icon, Color color) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -387,7 +482,7 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
             Text(
               title,
               style: AppTextStyles.bodySmall.copyWith(
-                color: AppColors.textSecondary,
+                color: cs.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 4),
@@ -404,17 +499,18 @@ class _ReportsScreenState extends State<ReportsScreen> with SingleTickerProvider
   }
 
   Widget _buildTopProductTile(String name, String revenue, String quantity) {
+    final cs = Theme.of(context).colorScheme;
     return ListTile(
       leading: Container(
         width: 40,
         height: 40,
         decoration: BoxDecoration(
-          color: AppColors.primary.withOpacity(0.1),
+          color: cs.primary.withValues(alpha: 0.1),
           borderRadius: BorderRadius.circular(8),
         ),
-        child: const Icon(
+        child: Icon(
           Icons.liquor,
-          color: AppColors.primary,
+          color: cs.primary,
           size: 20,
         ),
       ),

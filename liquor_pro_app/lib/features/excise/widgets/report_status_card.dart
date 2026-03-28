@@ -7,15 +7,16 @@ class ReportStatusCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   const ReportStatusCard({
-    Key? key,
+    super.key,
     required this.totalReports,
     required this.pendingReports,
     required this.uploadedReports,
     this.onTap,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       elevation: 2,
       child: InkWell(
@@ -76,7 +77,7 @@ class ReportStatusCard extends StatelessWidget {
                 'Uploaded Reports',
                 style: TextStyle(
                   fontSize: 12,
-                  color: Colors.grey[600],
+                  color: cs.onSurfaceVariant,
                 ),
               ),
               if (pendingReports > 0)

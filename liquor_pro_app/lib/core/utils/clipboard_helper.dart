@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'app_logger.dart';
 import 'snackbar_helper.dart';
-import 'haptic_feedback_helper.dart';
+import 'haptic_feedback.dart';
 
 /// Clipboard Helper - Best Practice Clipboard Operations
 /// Centralized clipboard management with user feedback
@@ -26,13 +26,10 @@ class ClipboardHelper {
       AppLogger.info('Copied to clipboard: ${text.length} characters');
 
       if (showFeedback) {
-        await HapticFeedbackHelper.light();
+        await HapticFeedbackUtil.light();
 
         if (context != null) {
-          SnackbarHelper.copied(
-            context: context,
-            message: successMessage ?? 'Copied to clipboard',
-          );
+          SnackbarHelper.copied(context, successMessage ?? 'Copied to clipboard');
         }
       }
 
@@ -46,10 +43,7 @@ class ClipboardHelper {
       );
 
       if (context != null) {
-        SnackbarHelper.error(
-          context: context,
-          message: 'Failed to copy',
-        );
+        SnackbarHelper.error(context, 'Failed to copy');
       }
 
       return false;
@@ -85,10 +79,7 @@ class ClipboardHelper {
         AppLogger.warning('Clipboard is empty');
 
         if (context != null) {
-          SnackbarHelper.info(
-            context: context,
-            message: 'Clipboard is empty',
-          );
+          SnackbarHelper.info(context, 'Clipboard is empty');
         }
 
         return null;
@@ -101,10 +92,7 @@ class ClipboardHelper {
       );
 
       if (context != null) {
-        SnackbarHelper.error(
-          context: context,
-          message: 'Failed to paste',
-        );
+        SnackbarHelper.error(context, 'Failed to paste');
       }
 
       return null;
@@ -243,10 +231,7 @@ class ClipboardHelper {
         context: 'Copy as JSON',
       );
 
-      SnackbarHelper.error(
-        context: context,
-        message: 'Failed to copy JSON',
-      );
+      SnackbarHelper.error(context, 'Failed to copy JSON');
 
       return false;
     }
@@ -404,7 +389,7 @@ class CopyableText extends StatelessWidget {
               Icon(
                 copyIcon,
                 size: 16,
-                color: copyIconColor ?? Colors.grey[600],
+                color: copyIconColor ?? Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ],
           ],
@@ -458,9 +443,9 @@ class CopyableCard extends StatelessWidget {
                     if (title != null)
                       Text(
                         title!,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 12,
-                          color: Colors.grey,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
                     Text(
@@ -473,18 +458,18 @@ class CopyableCard extends StatelessWidget {
                     if (subtitle != null)
                       Text(
                         subtitle!,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 12,
-                          color: Colors.grey,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
                   ],
                 ),
               ),
-              const Icon(
+              Icon(
                 Icons.content_copy,
                 size: 20,
-                color: Colors.grey,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ],
           ),

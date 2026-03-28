@@ -10,7 +10,7 @@ class AnimatedStatCard extends StatefulWidget {
   final Widget? trailing;
 
   const AnimatedStatCard({
-    Key? key,
+    super.key,
     required this.label,
     required this.value,
     required this.icon,
@@ -18,7 +18,7 @@ class AnimatedStatCard extends StatefulWidget {
     this.subtitle,
     this.onTap,
     this.trailing,
-  }) : super(key: key);
+  });
 
   @override
   State<AnimatedStatCard> createState() => _AnimatedStatCardState();
@@ -57,6 +57,7 @@ class _AnimatedStatCardState extends State<AnimatedStatCard>
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return ScaleTransition(
       scale: _scaleAnimation,
       child: FadeTransition(
@@ -79,7 +80,7 @@ class _AnimatedStatCardState extends State<AnimatedStatCard>
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: widget.color.withOpacity(0.1),
+                          color: widget.color.withValues(alpha:0.1),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
@@ -106,7 +107,7 @@ class _AnimatedStatCardState extends State<AnimatedStatCard>
                     widget.label,
                     style: TextStyle(
                       fontSize: 14,
-                      color: Colors.grey[600],
+                      color: cs.onSurface,
                     ),
                   ),
                   if (widget.subtitle != null) ...[
@@ -115,7 +116,7 @@ class _AnimatedStatCardState extends State<AnimatedStatCard>
                       widget.subtitle!,
                       style: TextStyle(
                         fontSize: 12,
-                        color: Colors.grey[500],
+                        color: cs.onSurfaceVariant,
                       ),
                     ),
                   ],

@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/excise_models.dart';
 import '../providers/excise_provider.dart';
 import 'license_detail_screen.dart';
 import 'add_license_screen.dart';
 
 class LicenseListScreen extends StatefulWidget {
-  const LicenseListScreen({Key? key}) : super(key: key);
+  const LicenseListScreen({super.key});
 
   @override
   State<LicenseListScreen> createState() => _LicenseListScreenState();
@@ -34,10 +35,8 @@ class _LicenseListScreenState extends State<LicenseListScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Excise Licenses'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: CustomAppBar(
+        title: 'Excise Licenses',
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
@@ -112,6 +111,7 @@ class _LicenseListScreenState extends State<LicenseListScreen>
 
   Widget _buildLicenseList(List<ExciseLicense> licenses) {
     if (licenses.isEmpty) {
+      final cs = Theme.of(context).colorScheme;
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -119,13 +119,13 @@ class _LicenseListScreenState extends State<LicenseListScreen>
             Icon(
               Icons.verified_user_outlined,
               size: 64,
-              color: Colors.grey[300],
+              color: cs.outlineVariant,
             ),
             const SizedBox(height: 16),
             Text(
               'No licenses found',
               style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.grey[600],
+                    color: cs.onSurface,
                   ),
             ),
           ],
@@ -162,16 +162,16 @@ class _LicenseCard extends StatelessWidget {
   final VoidCallback onTap;
 
   const _LicenseCard({
-    Key? key,
     required this.license,
     required this.onTap,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
-      elevation: 2,
+      elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
         side: BorderSide(
@@ -179,8 +179,8 @@ class _LicenseCard extends StatelessWidget {
               ? Colors.red
               : license.isExpiringSoon
                   ? Colors.orange
-                  : Colors.transparent,
-          width: license.isExpired || license.isExpiringSoon ? 2 : 0,
+                  : cs.outline.withValues(alpha: 0.2),
+          width: license.isExpired || license.isExpiringSoon ? 2 : 1,
         ),
       ),
       child: InkWell(
@@ -196,7 +196,7 @@ class _LicenseCard extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: license.licenseType.color.withOpacity(0.1),
+                      color: license.licenseType.color.withValues(alpha:0.1),
                       borderRadius: BorderRadius.circular(10),
                     ),
                     child: Icon(
@@ -222,7 +222,7 @@ class _LicenseCard extends StatelessWidget {
                           license.licenseNumber,
                           style: TextStyle(
                             fontSize: 13,
-                            color: Colors.grey[600],
+                            color: cs.onSurface,
                           ),
                         ),
                       ],
@@ -234,7 +234,7 @@ class _LicenseCard extends StatelessWidget {
                       vertical: 6,
                     ),
                     decoration: BoxDecoration(
-                      color: license.statusColor.withOpacity(0.1),
+                      color: license.statusColor.withValues(alpha:0.1),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
@@ -255,6 +255,7 @@ class _LicenseCard extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _buildInfoItem(
+                      context,
                       icon: Icons.calendar_today,
                       label: 'Issued',
                       value: _formatDate(license.issuedDate),
@@ -262,6 +263,7 @@ class _LicenseCard extends StatelessWidget {
                   ),
                   Expanded(
                     child: _buildInfoItem(
+                      context,
                       icon: Icons.event,
                       label: 'Expires',
                       value: _formatDate(license.expiryDate),
@@ -275,6 +277,7 @@ class _LicenseCard extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _buildInfoItem(
+                      context,
                       icon: Icons.business,
                       label: 'Authority',
                       value: license.issuingAuthority ?? 'Unknown',
@@ -282,6 +285,7 @@ class _LicenseCard extends StatelessWidget {
                   ),
                   Expanded(
                     child: _buildInfoItem(
+                      context,
                       icon: Icons.currency_rupee,
                       label: 'Monthly Fee',
                       value: '₹${license.monthlyFee.toStringAsFixed(0)}',
@@ -294,7 +298,7 @@ class _LicenseCard extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: license.statusColor.withOpacity(0.1),
+                    color: license.statusColor.withValues(alpha:0.1),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Row(
@@ -330,7 +334,8 @@ class _LicenseCard extends StatelessWidget {
     );
   }
 
-  Widget _buildInfoItem({
+  Widget _buildInfoItem(
+    BuildContext context, {
     required IconData icon,
     required String label,
     required String value,
@@ -338,7 +343,7 @@ class _LicenseCard extends StatelessWidget {
   }) {
     return Row(
       children: [
-        Icon(icon, size: 16, color: Colors.grey[400]),
+        Icon(icon, size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
         const SizedBox(width: 6),
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -347,7 +352,7 @@ class _LicenseCard extends StatelessWidget {
               label,
               style: TextStyle(
                 fontSize: 10,
-                color: Colors.grey[600],
+                color: Theme.of(context).colorScheme.onSurface,
               ),
             ),
             Text(

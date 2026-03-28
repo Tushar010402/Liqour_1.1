@@ -2,7 +2,7 @@ name: liquor_pro_app
 description: "LiquorPro - Professional Multi-Tenant Liquor Management System"
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 1.0.1+10
 
 environment:
   sdk: ^3.9.2
@@ -18,6 +18,7 @@ dependencies:
 
   # State Management
   provider: ^6.1.1
+  flutter_riverpod: ^2.4.10
 
   # Navigation
   go_router: ^13.0.0
@@ -25,18 +26,78 @@ dependencies:
   # HTTP & API
   http: ^1.2.0
   dio: ^5.4.0
+  dio_cache_interceptor: ^3.5.0
+  dio_cache_interceptor_hive_store: ^3.2.2
+  web_socket_channel: ^3.0.1
 
   # Local Storage
   shared_preferences: ^2.2.2
   flutter_secure_storage: ^9.0.0
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  sqflite: ^2.3.3+1  # SQLite for persistent logging
+
+  # Industrial Logging System
+  path: ^1.9.0  # Path utilities for database location
 
   # Utils
   intl: ^0.19.0
   uuid: ^4.3.3
   logger: ^2.0.2+1
+  json_annotation: ^4.8.1
+  freezed_annotation: ^2.4.1
+  crypto: ^3.0.3  # SHA256 hashing for image deduplication
+
+  # Device Management (Swiggy/Zomato-style multi-device login)
+  device_info_plus: ^10.1.0
+  package_info_plus: ^8.0.2
+
+  # Biometric Authentication
+  local_auth: ^2.2.0
+  local_auth_android: ^1.0.53
+  local_auth_darwin: ^1.6.1
+
+  # Connectivity
+  connectivity_plus: ^6.0.3
+
+  # Location Services (for sales location tracking)
+  geolocator: ^12.0.0
+  geocoding: ^2.1.1  # Reverse geocoding - convert coordinates to address names (Swiggy/Zomato style)
+
+  # Permissions
+  permission_handler: ^12.0.1
+
+  # ATT removed - app does NOT track users for advertising
+  # app_tracking_transparency: ^2.0.6
 
   # Image Handling
   cached_network_image: ^3.3.1
+  image_picker: ^1.1.2
+  image_cropper: ^8.0.2
+  camera: ^0.10.5
+  image: ^4.1.7  # For image compression and manipulation
+  flutter_image_compress: ^2.3.0  # Native JPEG compression (fast, async, background isolate)
+
+  # Professional Document Scanning (CamScanner-like)
+  # Industrial-grade: Uses VisionKit on iOS, ML Kit on Android
+  # Automatic edge detection, perspective correction, image enhancement
+  flutter_doc_scanner: ^0.0.16       # Native VisionKit/ML Kit scanner - works on iOS & Android
+  cunning_document_scanner: ^1.2.3   # Better iOS VisionKit integration - returns cropped documents
+  photo_view: ^0.15.0                # Image preview, zoom, and pan
+
+  # ML-based Image Enhancement & Form Detection
+  google_mlkit_text_recognition: ^0.15.0  # Text recognition & form field detection (updated for Firebase compatibility)
+  google_mlkit_document_scanner: ^0.3.0   # Android-only: Edge detection for gallery images with native ML Kit
+
+  # File Handling
+  file_picker: ^8.1.4
+  path_provider: ^2.1.1
+
+  # URL Launcher
+  url_launcher: ^6.3.1
+
+  # Share
+  share_plus: ^10.1.2
 
   # Charts & Analytics
   fl_chart: ^0.66.0
@@ -44,8 +105,12 @@ dependencies:
   # Form Validation
   form_field_validator: ^1.1.0
 
-  # OTP Input
-  pin_code_fields: ^8.0.1
+  # OTP Input (Modern with native autofill support)
+  pinput: ^5.0.0                  # iOS keyboard suggestion + Android autofill
+
+  # Phone & OTP Automation (Modern Authentication)
+  smart_auth: ^2.0.0              # Android SMS Retriever API for auto-read OTP
+  # mobile_number: ^2.1.1        # Auto-detect phone from SIM (disabled - Gradle issues)
 
   # Loading & Progress
   shimmer: ^3.0.0
@@ -70,17 +135,38 @@ dependencies:
   card_swiper: ^3.0.1
   flutter_card_swiper: ^7.0.0
 
+  # PDF & Printing
+  pdf: ^3.11.1
+  printing: ^5.13.4
+  qr_flutter: ^4.1.0
+
+  # CSV Export
+  csv: ^6.0.0
+
+  # Firebase & Push Notifications
+  firebase_core: ^3.8.0
+  firebase_messaging: ^15.1.5
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.10.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+  build_runner: ^2.4.8
+  json_serializable: ^6.7.1
+  freezed: ^2.4.7
+  hive_generator: ^2.0.1
+  flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.3.9
 
 flutter:
   uses-material-design: true
 
-  # assets:
-  #   - assets/images/
-  #   - assets/icons/
+  assets:
+    - assets/images/
+    - assets/images/sales/
+    - assets/icons/
 
   # fonts:
   #   - family: Poppins
@@ -92,3 +178,50 @@ flutter:
   #         weight: 600
   #       - asset: assets/fonts/Poppins-Bold.ttf
   #         weight: 700
+
+# App Icon Configuration
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/app_icon.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/images/app_icon.png"
+  min_sdk_android: 21
+  web:
+    generate: true
+    image_path: "assets/images/app_icon.png"
+    background_color: "#FFFFFF"
+    theme_color: "#0175C2"
+  windows:
+    generate: true
+    image_path: "assets/images/app_icon.png"
+    icon_size: 48
+
+# Native Splash Screen Configuration (Zero-delay app launch)
+# Run: flutter pub run flutter_native_splash:create
+flutter_native_splash:
+  # Brand gradient background for professional look
+  color: "#3366CC"
+  color_dark: "#1A3366"
+
+  # App icon on splash (optional - shows centered icon)
+  image: assets/images/app_icon.png
+
+  # Platform-specific settings
+  android: true
+  ios: true
+  web: false
+
+  # Android 12+ splash settings
+  android_12:
+    color: "#3366CC"
+    color_dark: "#1A3366"
+    icon_background_color: "#FFFFFF"
+    image: assets/images/app_icon.png
+
+  # Fullscreen splash (no status bar)
+  fullscreen: true
+
+  # Keep native splash until Flutter draws first frame
+  # This removes the white flash between native and Flutter splash
+  android_disable_fullscreen: false

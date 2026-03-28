@@ -45,6 +45,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
     await Future.delayed(const Duration(milliseconds: 500));
 
     if (mounted) {
+      final cs = Theme.of(context).colorScheme;
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
@@ -77,7 +78,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                 Navigator.pop(context, barcode); // Return barcode to caller
               },
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primary,
+                backgroundColor: cs.primary,
                 foregroundColor: Colors.white,
               ),
               child: const Text('View Details'),
@@ -99,6 +100,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: const CustomAppBar(
         title: 'Barcode Scanner',
@@ -111,10 +113,10 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
             child: Container(
               margin: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: AppColors.background,
+                color: cs.surface,
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
-                  color: _isScanning ? AppColors.primary : AppColors.textSecondary.withOpacity(0.3),
+                  color: _isScanning ? cs.primary : cs.onSurfaceVariant.withValues(alpha:0.3),
                   width: 2,
                 ),
               ),
@@ -134,10 +136,10 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                                 child: Container(
                                   width: 40,
                                   height: 40,
-                                  decoration: const BoxDecoration(
+                                  decoration: BoxDecoration(
                                     border: Border(
-                                      top: BorderSide(color: AppColors.primary, width: 4),
-                                      left: BorderSide(color: AppColors.primary, width: 4),
+                                      top: BorderSide(color: cs.primary, width: 4),
+                                      left: BorderSide(color: cs.primary, width: 4),
                                     ),
                                   ),
                                 ),
@@ -148,10 +150,10 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                                 child: Container(
                                   width: 40,
                                   height: 40,
-                                  decoration: const BoxDecoration(
+                                  decoration: BoxDecoration(
                                     border: Border(
-                                      top: BorderSide(color: AppColors.primary, width: 4),
-                                      right: BorderSide(color: AppColors.primary, width: 4),
+                                      top: BorderSide(color: cs.primary, width: 4),
+                                      right: BorderSide(color: cs.primary, width: 4),
                                     ),
                                   ),
                                 ),
@@ -162,10 +164,10 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                                 child: Container(
                                   width: 40,
                                   height: 40,
-                                  decoration: const BoxDecoration(
+                                  decoration: BoxDecoration(
                                     border: Border(
-                                      bottom: BorderSide(color: AppColors.primary, width: 4),
-                                      left: BorderSide(color: AppColors.primary, width: 4),
+                                      bottom: BorderSide(color: cs.primary, width: 4),
+                                      left: BorderSide(color: cs.primary, width: 4),
                                     ),
                                   ),
                                 ),
@@ -176,10 +178,10 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                                 child: Container(
                                   width: 40,
                                   height: 40,
-                                  decoration: const BoxDecoration(
+                                  decoration: BoxDecoration(
                                     border: Border(
-                                      bottom: BorderSide(color: AppColors.primary, width: 4),
-                                      right: BorderSide(color: AppColors.primary, width: 4),
+                                      bottom: BorderSide(color: cs.primary, width: 4),
+                                      right: BorderSide(color: cs.primary, width: 4),
                                     ),
                                   ),
                                 ),
@@ -189,7 +191,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                                 child: Container(
                                   width: 180,
                                   height: 2,
-                                  color: AppColors.primary,
+                                  color: cs.primary,
                                 ),
                               ),
                             ],
@@ -201,14 +203,14 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                         Text(
                           'Scanning...',
                           style: AppTextStyles.h5.copyWith(
-                            color: AppColors.primary,
+                            color: cs.primary,
                           ),
                         ),
                         const SizedBox(height: 8),
                         Text(
                           'Point camera at barcode',
                           style: AppTextStyles.bodyMedium.copyWith(
-                            color: AppColors.textSecondary,
+                            color: cs.onSurfaceVariant,
                           ),
                         ),
                       ],
@@ -219,7 +221,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                         Icon(
                           Icons.qr_code_scanner,
                           size: 100,
-                          color: AppColors.primary.withOpacity(0.3),
+                          color: cs.primary.withValues(alpha:0.3),
                         ),
                         const SizedBox(height: 24),
                         Text(
@@ -230,7 +232,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                         Text(
                           'Tap the button below to start scanning',
                           style: AppTextStyles.bodyMedium.copyWith(
-                            color: AppColors.textSecondary,
+                            color: cs.onSurfaceVariant,
                           ),
                           textAlign: TextAlign.center,
                         ),
@@ -242,7 +244,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                               vertical: 8,
                             ),
                             decoration: BoxDecoration(
-                              color: AppColors.success.withOpacity(0.1),
+                              color: AppColors.success.withValues(alpha:0.1),
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
@@ -274,7 +276,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                   Text(
                     'Enter barcode number manually',
                     style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -298,7 +300,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                       ElevatedButton(
                         onPressed: _handleManualEntry,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.primary,
+                          backgroundColor: cs.primary,
                           foregroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(
                             horizontal: 24,
@@ -317,10 +319,10 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                     child: ElevatedButton.icon(
                       onPressed: _isScanning ? null : _startScanning,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
+                        backgroundColor: cs.primary,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 16),
-                        disabledBackgroundColor: AppColors.textSecondary,
+                        disabledBackgroundColor: cs.onSurfaceVariant,
                       ),
                       icon: Icon(_isScanning ? Icons.stop : Icons.qr_code_scanner),
                       label: Text(
@@ -339,10 +341,10 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
             width: double.infinity,
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: AppColors.info.withOpacity(0.1),
+              color: AppColors.info.withValues(alpha:0.1),
               border: Border(
                 top: BorderSide(
-                  color: AppColors.info.withOpacity(0.3),
+                  color: AppColors.info.withValues(alpha:0.3),
                 ),
               ),
             ),
@@ -373,7 +375,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                   '• Clean camera lens for better accuracy\n'
                   '• Use manual entry if barcode is damaged',
                   style: AppTextStyles.bodySmall.copyWith(
-                    color: AppColors.textSecondary,
+                    color: cs.onSurfaceVariant,
                     height: 1.5,
                   ),
                 ),

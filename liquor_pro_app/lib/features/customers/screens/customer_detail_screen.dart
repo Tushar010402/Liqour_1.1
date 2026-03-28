@@ -45,6 +45,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: CustomAppBar(
         title: 'Customer Details',
@@ -64,19 +65,19 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
             width: double.infinity,
             padding: const EdgeInsets.all(24),
             decoration: BoxDecoration(
-              color: AppColors.primary.withOpacity(0.1),
+              color: cs.primary.withValues(alpha:0.1),
             ),
             child: Column(
               children: [
                 CircleAvatar(
                   radius: 40,
-                  backgroundColor: AppColors.primary.withOpacity(0.2),
+                  backgroundColor: cs.primary.withValues(alpha:0.2),
                   child: Text(
                     (widget.customer['name'] ?? 'C')
                         .substring(0, 1)
                         .toUpperCase(),
                     style: AppTextStyles.h2.copyWith(
-                      color: AppColors.primary,
+                      color: cs.primary,
                     ),
                   ),
                 ),
@@ -91,16 +92,16 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.phone_outlined,
                       size: 16,
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                     const SizedBox(width: 4),
                     Text(
                       widget.customer['phone'] ?? '',
                       style: AppTextStyles.bodyMedium.copyWith(
-                        color: AppColors.textSecondary,
+                        color: cs.onSurfaceVariant,
                       ),
                     ),
                   ],
@@ -110,16 +111,16 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.email_outlined,
                         size: 16,
-                        color: AppColors.textSecondary,
+                        color: cs.onSurfaceVariant,
                       ),
                       const SizedBox(width: 4),
                       Text(
                         widget.customer['email'],
                         style: AppTextStyles.bodyMedium.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                     ],
@@ -150,7 +151,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                     title: 'Orders',
                     value: '${widget.customer['total_purchases'] ?? 0}',
                     icon: Icons.shopping_bag,
-                    color: AppColors.primary,
+                    color: cs.primary,
                   ),
                 ),
               ],
@@ -159,12 +160,12 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
 
           // Tabs
           Container(
-            color: AppColors.background,
+            color: cs.surface,
             child: TabBar(
               controller: _tabController,
-              labelColor: AppColors.primary,
-              unselectedLabelColor: AppColors.textSecondary,
-              indicatorColor: AppColors.primary,
+              labelColor: cs.primary,
+              unselectedLabelColor: cs.onSurfaceVariant,
+              indicatorColor: cs.primary,
               tabs: const [
                 Tab(text: 'Purchase History'),
                 Tab(text: 'Information'),
@@ -193,6 +194,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
     required IconData icon,
     required Color color,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -211,7 +213,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
             Text(
               title,
               style: AppTextStyles.bodySmall.copyWith(
-                color: AppColors.textSecondary,
+                color: cs.onSurfaceVariant,
               ),
             ),
           ],
@@ -221,6 +223,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
   }
 
   Widget _buildPurchaseHistoryTab() {
+    final cs = Theme.of(context).colorScheme;
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -233,7 +236,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
             Icon(
               Icons.shopping_bag_outlined,
               size: 80,
-              color: AppColors.primary.withOpacity(0.3),
+              color: cs.primary.withValues(alpha:0.3),
             ),
             const SizedBox(height: 16),
             Text(
@@ -244,7 +247,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
             Text(
               'This customer hasn\'t made any purchases yet',
               style: AppTextStyles.bodyMedium.copyWith(
-                color: AppColors.textSecondary,
+                color: cs.onSurfaceVariant,
               ),
             ),
           ],
@@ -265,7 +268,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
               width: 50,
               height: 50,
               decoration: BoxDecoration(
-                color: AppColors.success.withOpacity(0.1),
+                color: AppColors.success.withValues(alpha:0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: const Icon(
@@ -286,14 +289,14 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                 Text(
                   purchase['date'] ?? '',
                   style: AppTextStyles.bodySmall.copyWith(
-                    color: AppColors.textSecondary,
+                    color: cs.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 4),
                 Text(
                   '${purchase['items_count'] ?? 0} items',
                   style: AppTextStyles.bodySmall.copyWith(
-                    color: AppColors.textSecondary,
+                    color: cs.onSurfaceVariant,
                   ),
                 ),
               ],
@@ -427,6 +430,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
   }
 
   Widget _buildInfoRow(String label, String value) {
+    final cs = Theme.of(context).colorScheme;
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -434,7 +438,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
         Text(
           label,
           style: AppTextStyles.bodyMedium.copyWith(
-            color: AppColors.textSecondary,
+            color: cs.onSurfaceVariant,
           ),
         ),
         const SizedBox(width: 16),

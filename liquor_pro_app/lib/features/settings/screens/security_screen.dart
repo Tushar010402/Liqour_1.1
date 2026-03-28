@@ -4,6 +4,7 @@ import '../../../core/constants/app_text_styles.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 import '../../../shared/widgets/custom_text_field.dart';
 import '../../../shared/widgets/custom_button.dart';
+import 'my_devices_screen.dart';
 
 /// Security Settings Screen
 class SecurityScreen extends StatefulWidget {
@@ -55,6 +56,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: const CustomAppBar(
         title: 'Security',
@@ -164,6 +166,58 @@ class _SecurityScreenState extends State<SecurityScreen> {
           const Divider(),
           const SizedBox(height: 24),
 
+          // My Devices Section
+          Text(
+            'Device Management',
+            style: AppTextStyles.h5,
+          ),
+          const SizedBox(height: 16),
+
+          Card(
+            child: ListTile(
+              leading: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: cs.primary.withValues(alpha:0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  Icons.devices_outlined,
+                  color: cs.primary,
+                ),
+              ),
+              title: Text(
+                'My Devices',
+                style: AppTextStyles.bodyMedium.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              subtitle: Text(
+                'Manage logged-in devices',
+                style: AppTextStyles.bodySmall.copyWith(
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+              trailing: Icon(
+                Icons.chevron_right,
+                color: cs.onSurfaceVariant,
+              ),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const MyDevicesScreen(),
+                  ),
+                );
+              },
+            ),
+          ),
+
+          const SizedBox(height: 32),
+          const Divider(),
+          const SizedBox(height: 24),
+
           // Security Options
           Text(
             'Security Options',
@@ -182,19 +236,19 @@ class _SecurityScreenState extends State<SecurityScreen> {
               subtitle: Text(
                 'Use fingerprint or face ID to login',
                 style: AppTextStyles.bodySmall.copyWith(
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
               ),
-              secondary: const Icon(
+              secondary: Icon(
                 Icons.fingerprint,
-                color: AppColors.primary,
+                color: cs.primary,
               ),
               value: _biometricEnabled,
               onChanged: (value) {
                 setState(() => _biometricEnabled = value);
                 // TODO: Enable/disable biometric authentication
               },
-              activeColor: AppColors.primary,
+              activeThumbColor: cs.primary,
             ),
           ),
           const SizedBox(height: 8),
@@ -210,19 +264,19 @@ class _SecurityScreenState extends State<SecurityScreen> {
               subtitle: Text(
                 'Add an extra layer of security',
                 style: AppTextStyles.bodySmall.copyWith(
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
               ),
-              secondary: const Icon(
+              secondary: Icon(
                 Icons.security,
-                color: AppColors.primary,
+                color: cs.primary,
               ),
               value: _twoFactorEnabled,
               onChanged: (value) {
                 setState(() => _twoFactorEnabled = value);
                 // TODO: Enable/disable 2FA
               },
-              activeColor: AppColors.primary,
+              activeThumbColor: cs.primary,
             ),
           ),
           const SizedBox(height: 8),
@@ -238,19 +292,19 @@ class _SecurityScreenState extends State<SecurityScreen> {
               subtitle: Text(
                 'Automatically logout after 30 minutes of inactivity',
                 style: AppTextStyles.bodySmall.copyWith(
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
               ),
-              secondary: const Icon(
+              secondary: Icon(
                 Icons.timer_outlined,
-                color: AppColors.primary,
+                color: cs.primary,
               ),
               value: _sessionTimeout,
               onChanged: (value) {
                 setState(() => _sessionTimeout = value);
                 // TODO: Enable/disable session timeout
               },
-              activeColor: AppColors.primary,
+              activeThumbColor: cs.primary,
             ),
           ),
 
@@ -258,7 +312,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
           // Password Requirements Info
           Card(
-            color: AppColors.primary.withOpacity(0.1),
+            color: cs.primary.withValues(alpha:0.1),
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -268,7 +322,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                     children: [
                       Icon(
                         Icons.info_outline,
-                        color: AppColors.primary,
+                        color: cs.primary,
                         size: 20,
                       ),
                       const SizedBox(width: 8),
@@ -276,7 +330,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         'Password Requirements',
                         style: AppTextStyles.bodyMedium.copyWith(
                           fontWeight: FontWeight.w600,
-                          color: AppColors.primary,
+                          color: cs.primary,
                         ),
                       ),
                     ],
@@ -296,6 +350,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
   }
 
   Widget _buildRequirement(String text) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Row(
@@ -303,13 +358,13 @@ class _SecurityScreenState extends State<SecurityScreen> {
           Icon(
             Icons.check_circle_outline,
             size: 16,
-            color: AppColors.primary,
+            color: cs.primary,
           ),
           const SizedBox(width: 8),
           Text(
             text,
             style: AppTextStyles.bodySmall.copyWith(
-              color: AppColors.primary,
+              color: cs.primary,
             ),
           ),
         ],

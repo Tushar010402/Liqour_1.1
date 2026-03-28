@@ -6,6 +6,7 @@ import '../../../core/constants/app_text_styles.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 import '../../../shared/widgets/empty_state_widget.dart';
 import '../../../features/auth/providers/auth_provider.dart';
+import '../../../core/permissions/providers/permission_provider.dart';
 import '../models/shop_model.dart';
 import '../providers/shop_provider.dart';
 import 'shop_form_screen.dart';
@@ -37,8 +38,9 @@ class _ShopsScreenState extends State<ShopsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ShopProvider>(
-      builder: (context, shopProvider, _) {
+    final cs = Theme.of(context).colorScheme;
+    return Consumer2<ShopProvider, PermissionProvider>(
+      builder: (context, shopProvider, permissions, _) {
         // Check for authentication errors
         if (shopProvider.errorMessage != null &&
             (shopProvider.errorMessage!.contains('Session expired') ||
@@ -68,7 +70,7 @@ class _ShopsScreenState extends State<ShopsScreen> {
                       'Your session has expired. Please login again to continue.',
                       textAlign: TextAlign.center,
                       style: AppTextStyles.bodyMedium.copyWith(
-                        color: AppColors.textSecondary,
+                        color: cs.onSurfaceVariant,
                       ),
                     ),
                     const SizedBox(height: 24),
@@ -80,7 +82,7 @@ class _ShopsScreenState extends State<ShopsScreen> {
                         }
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
+                        backgroundColor: cs.primary,
                         padding: const EdgeInsets.symmetric(
                           horizontal: 32,
                           vertical: 12,
@@ -126,14 +128,14 @@ class _ShopsScreenState extends State<ShopsScreen> {
                               shopProvider.errorMessage!,
                               textAlign: TextAlign.center,
                               style: AppTextStyles.bodyMedium.copyWith(
-                                color: AppColors.textSecondary,
+                                color: cs.onSurfaceVariant,
                               ),
                             ),
                             const SizedBox(height: 24),
                             ElevatedButton(
                               onPressed: _loadShops,
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: AppColors.primary,
+                                backgroundColor: cs.primary,
                               ),
                               child: const Text(
                                 'Retry',
@@ -157,27 +159,28 @@ class _ShopsScreenState extends State<ShopsScreen> {
                             itemCount: shopProvider.shops.length,
                             itemBuilder: (context, index) {
                               final shop = shopProvider.shops[index];
-                              return _buildShopCard(shop);
+                              return _buildShopCard(shop, permissions);
                             },
                           ),
                         ),
-          floatingActionButton: shopProvider.errorMessage == null
+          // Permission-gated FAB - only show for admin/manager/saas_admin
+          floatingActionButton: shopProvider.errorMessage == null && permissions.canAccessShopManagement
               ? FloatingActionButton.extended(
                   heroTag: 'shops_fab',
                   onPressed: () async {
                     // Navigate to add shop screen
-                    final result = await Navigator.push(
+                    await Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (context) => const ShopFormScreen(),
                       ),
                     );
-                    // Reload shops if a shop was created
-                    if (result == true && context.mounted) {
+                    // Refresh local list to sync with global provider
+                    if (context.mounted) {
                       await context.read<ShopProvider>().loadShops();
                     }
                   },
-                  backgroundColor: AppColors.primary,
+                  backgroundColor: cs.primary,
                   icon: const Icon(Icons.add, color: Colors.white),
                   label: const Text('Add Shop', style: TextStyle(color: Colors.white)),
                 )
@@ -187,36 +190,41 @@ class _ShopsScreenState extends State<ShopsScreen> {
     );
   }
 
-  Widget _buildShopCard(Shop shop) {
+  Widget _buildShopCard(Shop shop, PermissionProvider permissions) {
+    final cs = Theme.of(context).colorScheme;
+    final canManage = permissions.canAccessShopManagement;
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: ListTile(
         contentPadding: const EdgeInsets.all(16),
-        onTap: () async {
-          // Navigate to edit shop screen
-          final result = await Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => ShopFormScreen(shop: shop),
-            ),
-          );
-          // Reload shops if a shop was updated
-          if (result == true && context.mounted) {
-            await context.read<ShopProvider>().loadShops();
-          }
-        },
+        onTap: canManage
+            ? () async {
+                // Navigate to edit shop screen
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => ShopFormScreen(shop: shop),
+                  ),
+                );
+                // Refresh local list to sync with global provider
+                if (context.mounted) {
+                  await context.read<ShopProvider>().loadShops();
+                }
+              }
+            : null, // Read-only for non-admins
         leading: Container(
           width: 50,
           height: 50,
           decoration: BoxDecoration(
             color: shop.isActive
-                ? AppColors.primary.withOpacity(0.1)
-                : AppColors.textSecondary.withOpacity(0.1),
+                ? cs.primary.withValues(alpha: 0.1)
+                : cs.onSurfaceVariant.withValues(alpha:0.1),
             borderRadius: BorderRadius.circular(10),
           ),
           child: Icon(
             Icons.store,
-            color: shop.isActive ? AppColors.primary : AppColors.textSecondary,
+            color: shop.isActive ? cs.primary : cs.onSurfaceVariant,
           ),
         ),
         title: Text(
@@ -231,17 +239,17 @@ class _ShopsScreenState extends State<ShopsScreen> {
             const SizedBox(height: 4),
             Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.location_on_outlined,
                   size: 16,
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
                 const SizedBox(width: 4),
                 Expanded(
                   child: Text(
                     shop.address,
                     style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -252,25 +260,26 @@ class _ShopsScreenState extends State<ShopsScreen> {
             const SizedBox(height: 4),
             Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.phone_outlined,
                   size: 16,
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
                 const SizedBox(width: 4),
                 Text(
                   shop.phone,
                   style: AppTextStyles.bodySmall.copyWith(
-                    color: AppColors.textSecondary,
+                    color: cs.onSurfaceVariant,
                   ),
                 ),
               ],
             ),
           ],
         ),
-        trailing: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
+            // Status badge
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: 8,
@@ -278,8 +287,8 @@ class _ShopsScreenState extends State<ShopsScreen> {
               ),
               decoration: BoxDecoration(
                 color: shop.isActive
-                    ? AppColors.success.withOpacity(0.1)
-                    : AppColors.error.withOpacity(0.1),
+                    ? AppColors.success.withValues(alpha:0.1)
+                    : AppColors.error.withValues(alpha:0.1),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
@@ -290,8 +299,156 @@ class _ShopsScreenState extends State<ShopsScreen> {
                 ),
               ),
             ),
+            // Actions menu (only for users with shop management access)
+            if (canManage)
+              PopupMenuButton<String>(
+                icon: Icon(Icons.more_vert, color: cs.onSurfaceVariant),
+                onSelected: (value) {
+                  switch (value) {
+                    case 'edit':
+                      _navigateToEdit(shop);
+                      break;
+                    case 'toggle':
+                      _toggleShopStatus(shop);
+                      break;
+                    case 'delete':
+                      _showDeleteConfirmation(shop);
+                      break;
+                  }
+                },
+                itemBuilder: (context) => [
+                  const PopupMenuItem(
+                    value: 'edit',
+                    child: Row(
+                      children: [
+                        Icon(Icons.edit, size: 20),
+                        SizedBox(width: 8),
+                        Text('Edit'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'toggle',
+                    child: Row(
+                      children: [
+                        Icon(
+                          shop.isActive ? Icons.block : Icons.check_circle,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(shop.isActive ? 'Deactivate' : 'Activate'),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: Row(
+                      children: [
+                        Icon(Icons.delete, size: 20, color: AppColors.error),
+                        SizedBox(width: 8),
+                        Text('Delete', style: TextStyle(color: AppColors.error)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Navigate to edit shop screen
+  Future<void> _navigateToEdit(Shop shop) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ShopFormScreen(shop: shop),
+      ),
+    );
+    if (context.mounted) {
+      await context.read<ShopProvider>().loadShops();
+    }
+  }
+
+  /// Toggle shop active status
+  Future<void> _toggleShopStatus(Shop shop) async {
+    final shopProvider = context.read<ShopProvider>();
+    final success = await shopProvider.updateShop(
+      shopId: shop.id,
+      name: shop.name,
+      address: shop.address,
+      phone: shop.phone,
+      email: shop.email,
+      licenseNumber: shop.licenseNumber,
+      licenseFile: shop.licenseFile,
+      latitude: shop.latitude,
+      longitude: shop.longitude,
+      isActive: !shop.isActive,
+    );
+
+    if (context.mounted) {
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Shop ${shop.isActive ? 'deactivated' : 'activated'} successfully'),
+            backgroundColor: AppColors.success,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(shopProvider.errorMessage ?? 'Failed to update shop'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Show delete confirmation dialog
+  void _showDeleteConfirmation(Shop shop) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete Shop'),
+        content: Text('Are you sure you want to delete "${shop.name}"?\n\nThis action cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              final shopProvider = context.read<ShopProvider>();
+              final success = await shopProvider.deleteShop(shop.id);
+
+              if (context.mounted) {
+                if (success) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Shop deleted successfully'),
+                      backgroundColor: AppColors.success,
+                    ),
+                  );
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(shopProvider.errorMessage ?? 'Failed to delete shop'),
+                      backgroundColor: AppColors.error,
+                    ),
+                  );
+                }
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Delete'),
+          ),
+        ],
       ),
     );
   }

@@ -222,17 +222,26 @@ class FPSMonitor {
 
     final dropRate = (droppedFrames / _frameTimes.length) * 100;
 
-    Logger.info('📺 FPS: ${fps.toStringAsFixed(1)} | Dropped: ${dropRate.toStringAsFixed(1)}%');
+    // OPTIMIZATION: Only log in debug mode and reduce verbosity
+    // Logging every 5 seconds was causing the very FPS issues we're trying to detect
+    if (kDebugMode) {
+      // Only log if FPS is critically low (< 30) to reduce noise
+      if (fps < 30) {
+        Logger.warning('⚠️ Critical FPS: ${fps.toStringAsFixed(1)} | Dropped: ${dropRate.toStringAsFixed(1)}%');
+      }
+      // Disabled regular logging to prevent performance degradation
+      // Logger.info('📺 FPS: ${fps.toStringAsFixed(1)} | Dropped: ${dropRate.toStringAsFixed(1)}%');
+    }
 
-    // Track in analytics
-    AnalyticsService.trackPerformance(
-      metricName: 'fps',
-      durationMs: fps.toInt(),
-      category: 'rendering',
-    );
-
-    if (fps < 50) {
-      Logger.warning('Low FPS detected: ${fps.toStringAsFixed(1)}');
+    // OPTIMIZATION: Disable analytics tracking in debug mode
+    // Analytics adds significant overhead for development
+    // Only track in production/profile mode where it matters
+    if (!kDebugMode) {
+      AnalyticsService.trackPerformance(
+        metricName: 'fps',
+        durationMs: fps.toInt(),
+        category: 'rendering',
+      );
     }
   }
 

@@ -6,9 +6,9 @@ class ComplianceScoreCard extends StatelessWidget {
   final ComplianceDashboard dashboard;
 
   const ComplianceScoreCard({
-    Key? key,
+    super.key,
     required this.dashboard,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -23,7 +23,7 @@ class ComplianceScoreCard extends StatelessWidget {
           gradient: LinearGradient(
             colors: [
               dashboard.scoreColor,
-              dashboard.scoreColor.withOpacity(0.7),
+              dashboard.scoreColor.withValues(alpha:0.7),
             ],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
@@ -82,7 +82,7 @@ class ComplianceScoreCard extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.2),
+                color: Colors.white.withValues(alpha:0.2),
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Row(
@@ -138,7 +138,7 @@ class _CircularScorePainter extends CustomPainter {
 
     // Background circle
     final backgroundPaint = Paint()
-      ..color = color.withOpacity(0.2)
+      ..color = color.withValues(alpha:0.2)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 12
       ..strokeCap = StrokeCap.round;

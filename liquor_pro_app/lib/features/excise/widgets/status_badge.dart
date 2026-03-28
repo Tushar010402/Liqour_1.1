@@ -7,21 +7,21 @@ class StatusBadge extends StatelessWidget {
   final bool pulse;
 
   const StatusBadge({
-    Key? key,
+    super.key,
     required this.label,
     required this.color,
     this.icon,
     this.pulse = false,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
     Widget badge = Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
+        color: color.withValues(alpha:0.1),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withOpacity(0.3)),
+        border: Border.all(color: color.withValues(alpha:0.3)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -53,7 +53,7 @@ class StatusBadge extends StatelessWidget {
 class _PulsingWidget extends StatefulWidget {
   final Widget child;
 
-  const _PulsingWidget({Key? key, required this.child}) : super(key: key);
+  const _PulsingWidget({required this.child});
 
   @override
   State<_PulsingWidget> createState() => _PulsingWidgetState();

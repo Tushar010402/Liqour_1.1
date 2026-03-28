@@ -1,12 +1,14 @@
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../config/api_config.dart';
 import '../models/api_response.dart';
 import '../utils/network_retry.dart';
 import 'auth_service.dart';
-import '../../core/utils/logger.dart';
 
 /// HTTP API Service with interceptors
+/// OPTIMIZED: Added kDebugMode guards to reduce logging overhead
 class ApiService {
   final AuthService _authService;
   final http.Client _client;
@@ -25,8 +27,6 @@ class ApiService {
     final token = await _authService.getToken();
     final tenantId = await _authService.getTenantId();
 
-    Logger.debug('🔑 Getting headers - Token: ${token?.substring(0, 20)}..., Tenant ID: $tenantId');
-
     final headers = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
@@ -38,16 +38,10 @@ class ApiService {
 
     if (token != null && token.isNotEmpty) {
       headers['Authorization'] = 'Bearer $token';
-      Logger.debug('🔑 Authorization header added');
-    } else {
-      Logger.debug('⚠️ No token available!');
     }
 
     if (tenantId != null) {
       headers['X-Tenant-ID'] = tenantId.toString();
-      Logger.debug('🔑 X-Tenant-ID header added: $tenantId');
-    } else {
-      Logger.debug('⚠️ No tenant ID available!');
     }
 
     return headers;
@@ -67,7 +61,11 @@ class ApiService {
         parsedBody = json.decode(response.body);
       }
     } catch (e) {
-      Logger.debug('❌ JSON decode error: $e');
+      if (kDebugMode) {
+        print('🚨 ApiService: JSON parse error - Status: $statusCode');
+        print('🚨 ApiService: Response body: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
+        print('🚨 ApiService: Parse error: $e');
+      }
       return ApiResponse<T>(
         success: false,
         message: 'Invalid JSON response',
@@ -79,7 +77,6 @@ class ApiService {
     if (statusCode >= 200 && statusCode < 300) {
       // If response is a List (array), pass it directly to fromJson
       if (parsedBody is List) {
-        Logger.debug('📋 Response is a List with ${parsedBody.length} items');
         return ApiResponse<T>(
           success: true,
           data: fromJson != null ? fromJson(parsedBody) : parsedBody as T?,
@@ -105,7 +102,6 @@ class ApiService {
       }
 
       // Unexpected response type
-      Logger.debug('⚠️ Unexpected response type: ${parsedBody.runtimeType}');
       return ApiResponse<T>(
         success: false,
         message: 'Unexpected response format',
@@ -118,9 +114,22 @@ class ApiService {
         ? parsedBody
         : {};
 
+    // Backend can send error in either 'message' or 'error' key
+    // Check 'message' first as per backend convention
+    final errorMessage = (errorBody['message'] as String?) ??
+                        (errorBody['error'] as String?) ??
+                        'Request failed';
+
+    if (kDebugMode) {
+      print('🚨 ApiService: Error Response - Status: $statusCode, Message: $errorMessage');
+      if (errorBody['errors'] != null) {
+        print('🚨 ApiService: Field Errors: ${errorBody['errors']}');
+      }
+    }
+
     return ApiResponse<T>(
       success: false,
-      message: errorBody['message'] as String? ?? 'Request failed',
+      message: errorMessage,
       errors: errorBody['errors'] as Map<String, dynamic>?,
       statusCode: statusCode,
     );
@@ -133,7 +142,7 @@ class ApiService {
     T Function(dynamic)? fromJson,
   }) async {
     try {
-      final headers = await _getHeaders();
+      var headers = await _getHeaders();
 
       // Build URL with query parameters
       var url = Uri.parse('${ApiConfig.baseUrl}$endpoint');
@@ -143,30 +152,35 @@ class ApiService {
         ));
       }
 
-      // Debug logging
-      Logger.debug('🌐 API GET: $url');
-
-      final response = await NetworkRetry.executeHttp(
+      var response = await NetworkRetry.executeHttp(
         request: () => _client
             .get(url, headers: headers)
             .timeout(ApiConfig.connectionTimeout),
-        onRetry: (attempt, error) {
-          Logger.debug('🔄 Retrying GET $endpoint (attempt $attempt): $error');
-        },
+        onRetry: (attempt, error) {},
       );
 
-      // Debug logging
-      Logger.debug('📥 Response status: ${response.statusCode}');
-      Logger.debug('📥 Response body: ${response.body}');
-
-      // Handle 401 Unauthorized
+      // Handle 401 Unauthorized - Retry once with fresh token
       if (response.statusCode == 401) {
-        await _authService.logout();
-        return ApiResponse<T>(
-          success: false,
-          message: 'Session expired. Please login again.',
-          statusCode: 401,
-        );
+        if (kDebugMode) print('⚠️ ApiService: 401 on $endpoint, refreshing token');
+
+        // Get fresh headers (forces re-read from secure storage)
+        headers = await _getHeaders();
+
+        // Retry request
+        response = await _client
+            .get(url, headers: headers)
+            .timeout(ApiConfig.connectionTimeout);
+
+        // If still 401, logout
+        if (response.statusCode == 401) {
+          if (kDebugMode) print('🚫 ApiService: Still 401 after retry - logging out');
+          await _authService.logout();
+          return ApiResponse<T>(
+            success: false,
+            message: 'Session expired. Please login again.',
+            statusCode: 401,
+          );
+        }
       }
 
       return _handleResponse<T>(response, fromJson);
@@ -185,14 +199,12 @@ class ApiService {
     T Function(dynamic)? fromJson,
   }) async {
     try {
-      final headers = await _getHeaders();
+      var headers = await _getHeaders();
       final url = Uri.parse('${ApiConfig.baseUrl}$endpoint');
 
-      // Debug logging
-      Logger.debug('🌐 API POST: $url');
-      Logger.debug('📦 Request body: ${json.encode(body)}');
+      if (kDebugMode) print('🌐 ApiService: POST $endpoint');
 
-      final response = await NetworkRetry.executeHttp(
+      var response = await NetworkRetry.executeHttp(
         request: () => _client
             .post(
               url,
@@ -200,23 +212,37 @@ class ApiService {
               body: body != null ? json.encode(body) : null,
             )
             .timeout(ApiConfig.connectionTimeout),
-        onRetry: (attempt, error) {
-          Logger.debug('🔄 Retrying POST $endpoint (attempt $attempt): $error');
-        },
+        onRetry: (attempt, error) {},
       );
 
-      // Debug logging
-      Logger.debug('📥 Response status: ${response.statusCode}');
-      Logger.debug('📥 Response body: ${response.body}');
+      if (kDebugMode) print('🌐 ApiService: POST $endpoint - Status: ${response.statusCode}');
 
-      // Handle 401 Unauthorized
+      // Handle 401 Unauthorized - Retry once with fresh token
       if (response.statusCode == 401) {
-        await _authService.logout();
-        return ApiResponse<T>(
-          success: false,
-          message: 'Session expired. Please login again.',
-          statusCode: 401,
-        );
+        if (kDebugMode) print('⚠️ ApiService: 401 on $endpoint, refreshing token');
+
+        // Get fresh headers (forces re-read from secure storage)
+        headers = await _getHeaders();
+
+        // Retry request
+        response = await _client
+            .post(
+              url,
+              headers: headers,
+              body: body != null ? json.encode(body) : null,
+            )
+            .timeout(ApiConfig.connectionTimeout);
+
+        // If still 401, logout
+        if (response.statusCode == 401) {
+          if (kDebugMode) print('🚫 ApiService: Still 401 after retry - logging out');
+          await _authService.logout();
+          return ApiResponse<T>(
+            success: false,
+            message: 'Session expired. Please login again.',
+            statusCode: 401,
+          );
+        }
       }
 
       return _handleResponse<T>(response, fromJson);
@@ -235,10 +261,10 @@ class ApiService {
     T Function(dynamic)? fromJson,
   }) async {
     try {
-      final headers = await _getHeaders();
+      var headers = await _getHeaders();
       final url = Uri.parse('${ApiConfig.baseUrl}$endpoint');
 
-      final response = await _client
+      var response = await _client
           .put(
             url,
             headers: headers,
@@ -246,14 +272,32 @@ class ApiService {
           )
           .timeout(ApiConfig.connectionTimeout);
 
-      // Handle 401 Unauthorized
+      // Handle 401 Unauthorized - Retry once with fresh token
       if (response.statusCode == 401) {
-        await _authService.logout();
-        return ApiResponse<T>(
-          success: false,
-          message: 'Session expired. Please login again.',
-          statusCode: 401,
-        );
+        if (kDebugMode) print('⚠️ ApiService: 401 on $endpoint, refreshing token');
+
+        // Get fresh headers (forces re-read from secure storage)
+        headers = await _getHeaders();
+
+        // Retry request
+        response = await _client
+            .put(
+              url,
+              headers: headers,
+              body: body != null ? json.encode(body) : null,
+            )
+            .timeout(ApiConfig.connectionTimeout);
+
+        // If still 401, logout
+        if (response.statusCode == 401) {
+          if (kDebugMode) print('🚫 ApiService: Still 401 after retry - logging out');
+          await _authService.logout();
+          return ApiResponse<T>(
+            success: false,
+            message: 'Session expired. Please login again.',
+            statusCode: 401,
+          );
+        }
       }
 
       return _handleResponse<T>(response, fromJson);
@@ -271,21 +315,35 @@ class ApiService {
     T Function(dynamic)? fromJson,
   }) async {
     try {
-      final headers = await _getHeaders();
+      var headers = await _getHeaders();
       final url = Uri.parse('${ApiConfig.baseUrl}$endpoint');
 
-      final response = await _client
+      var response = await _client
           .delete(url, headers: headers)
           .timeout(ApiConfig.connectionTimeout);
 
-      // Handle 401 Unauthorized
+      // Handle 401 Unauthorized - Retry once with fresh token
       if (response.statusCode == 401) {
-        await _authService.logout();
-        return ApiResponse<T>(
-          success: false,
-          message: 'Session expired. Please login again.',
-          statusCode: 401,
-        );
+        if (kDebugMode) print('⚠️ ApiService: 401 on $endpoint, refreshing token');
+
+        // Get fresh headers (forces re-read from secure storage)
+        headers = await _getHeaders();
+
+        // Retry request
+        response = await _client
+            .delete(url, headers: headers)
+            .timeout(ApiConfig.connectionTimeout);
+
+        // If still 401, logout
+        if (response.statusCode == 401) {
+          if (kDebugMode) print('🚫 ApiService: Still 401 after retry - logging out');
+          await _authService.logout();
+          return ApiResponse<T>(
+            success: false,
+            message: 'Session expired. Please login again.',
+            statusCode: 401,
+          );
+        }
       }
 
       return _handleResponse<T>(response, fromJson);
@@ -293,6 +351,103 @@ class ApiService {
       return ApiResponse<T>(
         success: false,
         message: 'Network error: ${e.toString()}',
+      );
+    }
+  }
+
+  // Download file
+  Future<ApiResponse<String>> downloadFile(
+    String endpoint,
+    String savePath,
+  ) async {
+    try {
+      final headers = await _getHeaders();
+      final url = Uri.parse('${ApiConfig.baseUrl}$endpoint');
+
+      if (kDebugMode) print('📥 ApiService: Downloading file from $endpoint');
+
+      final response = await _client
+          .get(url, headers: headers)
+          .timeout(ApiConfig.connectionTimeout);
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        // Write file to disk
+        final file = File(savePath);
+        await file.writeAsBytes(response.bodyBytes);
+
+        if (kDebugMode) print('✅ ApiService: File downloaded - $savePath');
+
+        return ApiResponse<String>(
+          success: true,
+          data: savePath,
+          message: 'File downloaded successfully',
+          statusCode: response.statusCode,
+        );
+      }
+
+      return ApiResponse<String>(
+        success: false,
+        message: 'Failed to download file',
+        statusCode: response.statusCode,
+      );
+    } catch (e) {
+      if (kDebugMode) print('❌ ApiService: Download error - $e');
+      return ApiResponse<String>(
+        success: false,
+        message: 'Network error: ${e.toString()}',
+      );
+    }
+  }
+
+  // Upload file using multipart/form-data
+  Future<ApiResponse<T>> uploadFile<T>(
+    String endpoint,
+    String filePath, {
+    T Function(dynamic)? fromJson,
+    String fileFieldName = 'file',
+  }) async {
+    try {
+      final headers = await _getHeaders();
+      final url = Uri.parse('${ApiConfig.baseUrl}$endpoint');
+
+      if (kDebugMode) print('📤 ApiService: Uploading file to $endpoint');
+
+      // Create multipart request
+      final request = http.MultipartRequest('POST', url);
+
+      // Add headers (but remove Content-Type as multipart will set it)
+      headers.forEach((key, value) {
+        if (key.toLowerCase() != 'content-type') {
+          request.headers[key] = value;
+        }
+      });
+
+      // Add file
+      final file = File(filePath);
+      final stream = http.ByteStream(file.openRead());
+      final length = await file.length();
+      final multipartFile = http.MultipartFile(
+        fileFieldName,
+        stream,
+        length,
+        filename: file.path.split('/').last,
+      );
+      request.files.add(multipartFile);
+
+      if (kDebugMode) print('📤 ApiService: File size - $length bytes');
+
+      // Send request
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (kDebugMode) print('📤 ApiService: Upload complete - Status: ${response.statusCode}');
+
+      return _handleResponse<T>(response, fromJson);
+    } catch (e) {
+      if (kDebugMode) print('❌ ApiService: Upload error - $e');
+      return ApiResponse<T>(
+        success: false,
+        message: 'Upload error: ${e.toString()}',
       );
     }
   }

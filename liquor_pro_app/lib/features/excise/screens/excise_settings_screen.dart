@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 
 class ExciseSettingsScreen extends StatefulWidget {
-  const ExciseSettingsScreen({Key? key}) : super(key: key);
+  const ExciseSettingsScreen({super.key});
 
   @override
   State<ExciseSettingsScreen> createState() => _ExciseSettingsScreenState();
@@ -18,10 +19,8 @@ class _ExciseSettingsScreenState extends State<ExciseSettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Settings'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: const CustomAppBar(
+        title: 'Settings',
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
@@ -206,17 +205,19 @@ class _ExciseSettingsScreenState extends State<ExciseSettingsScreen> {
           const SizedBox(height: 24),
 
           // App Version
-          Center(
+          Builder(builder: (context) {
+            final cs = Theme.of(context).colorScheme;
+            return Center(
             child: Column(
               children: [
-                Icon(Icons.local_police, size: 48, color: Colors.grey[400]),
+                Icon(Icons.local_police, size: 48, color: cs.onSurfaceVariant),
                 const SizedBox(height: 8),
                 Text(
                   'UP Excise Compliance',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
-                    color: Colors.grey[700],
+                    color: cs.onSurface,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -224,13 +225,14 @@ class _ExciseSettingsScreenState extends State<ExciseSettingsScreen> {
                   'Version 1.0.0',
                   style: TextStyle(
                     fontSize: 14,
-                    color: Colors.grey[600],
+                    color: cs.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 24),
               ],
             ),
-          ),
+          );
+          }),
         ],
       ),
     );
@@ -241,8 +243,10 @@ class _ExciseSettingsScreenState extends State<ExciseSettingsScreen> {
     required IconData icon,
     required List<Widget> children,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -622,7 +626,7 @@ class _ExciseSettingsScreenState extends State<ExciseSettingsScreen> {
       context,
       MaterialPageRoute(
         builder: (context) => Scaffold(
-          appBar: AppBar(title: const Text('Help Center')),
+          appBar: const CustomAppBar(title: 'Help Center'),
           body: const Center(child: Text('Help Center Coming Soon')),
         ),
       ),

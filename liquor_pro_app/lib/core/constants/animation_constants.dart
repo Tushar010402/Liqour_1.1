@@ -1,5 +1,6 @@
 /// Animation Constants - Best Practice Animation Timings
 /// Centralized animation configuration for consistent UX
+library;
 
 class AnimationConstants {
   // Private constructor

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/theme/ios_design_tokens.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 import '../../../shared/widgets/empty_state_widget.dart';
@@ -33,6 +34,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
   }
 
   void _showAddExpenseDialog() {
+    final cs = Theme.of(context).colorScheme;
     final categoryController = TextEditingController();
     final amountController = TextEditingController();
     final descriptionController = TextEditingController();
@@ -64,13 +66,13 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
                 ),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<String>(
-                  value: selectedVendor,
+                  initialValue: selectedVendor,
                   decoration: const InputDecoration(
-                    labelText: 'Vendor',
+                    labelText: 'Godam',
                     prefixIcon: Icon(Icons.business),
                     border: OutlineInputBorder(),
                   ),
-                  items: ['Select Vendor', 'Vendor 1', 'Vendor 2', 'Other']
+                  items: ['Select Godam', 'Godam 1', 'Godam 2', 'Other']
                       .map((vendor) => DropdownMenuItem(
                             value: vendor,
                             child: Text(vendor),
@@ -127,7 +129,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
                 );
               },
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primary,
+                backgroundColor: cs.primary,
                 foregroundColor: Colors.white,
               ),
               child: const Text('Add'),
@@ -140,6 +142,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: const CustomAppBar(
         title: 'Expenses',
@@ -168,8 +171,12 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
           // Summary Card
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Card(
-              color: AppColors.error.withOpacity(0.1),
+            child: Container(
+              decoration: BoxDecoration(
+                color: AppColors.error.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+                border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+              ),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Row(
@@ -181,7 +188,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
                         Text(
                           'Total Expenses',
                           style: AppTextStyles.bodyMedium.copyWith(
-                            color: AppColors.textSecondary,
+                            color: cs.onSurfaceVariant,
                           ),
                         ),
                         const SizedBox(height: 4),
@@ -197,7 +204,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: AppColors.error.withOpacity(0.2),
+                        color: AppColors.error.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: const Icon(
@@ -239,7 +246,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _showAddExpenseDialog,
-        backgroundColor: AppColors.primary,
+        backgroundColor: cs.primary,
         icon: const Icon(Icons.add, color: Colors.white),
         label: const Text('Add Expense', style: TextStyle(color: Colors.white)),
       ),
@@ -247,6 +254,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
   }
 
   Widget _buildFilterChip(String label, String value) {
+    final cs = Theme.of(context).colorScheme;
     final isSelected = _filterPeriod == value;
     return ChoiceChip(
       label: Text(label),
@@ -255,29 +263,41 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
         setState(() => _filterPeriod = value);
         _loadExpenses();
       },
-      selectedColor: AppColors.primary,
+      selectedColor: cs.primary,
       labelStyle: TextStyle(
-        color: isSelected ? Colors.white : AppColors.textPrimary,
+        color: isSelected ? Colors.white : cs.onSurface,
         fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
       ),
     );
   }
 
   Widget _buildExpenseCard(Map<String, dynamic> expense) {
-    return Card(
+    final cs = Theme.of(context).colorScheme;
+    return Container(
       margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+      ),
       child: ListTile(
         contentPadding: const EdgeInsets.all(16),
         leading: Container(
-          width: 50,
-          height: 50,
+          width: 38,
+          height: 38,
           decoration: BoxDecoration(
-            color: AppColors.error.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(8),
+            gradient: LinearGradient(
+              colors: [
+                cs.primary.withValues(alpha: 0.15),
+                cs.primary.withValues(alpha: 0.06),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(10),
           ),
-          child: const Icon(
-            Icons.money_off,
-            color: AppColors.error,
+          child: Icon(
+            Icons.receipt_long,
+            color: cs.primary,
+            size: 20,
           ),
         ),
         title: Text(
@@ -293,7 +313,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
             Text(
               '${expense['date']} • ${expense['vendor'] ?? 'N/A'}',
               style: AppTextStyles.bodySmall.copyWith(
-                color: AppColors.textSecondary,
+                color: cs.onSurfaceVariant,
               ),
             ),
             if (expense['description'] != null) ...[
@@ -301,7 +321,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
               Text(
                 expense['description'],
                 style: AppTextStyles.bodySmall.copyWith(
-                  color: AppColors.textSecondary,
+                  color: cs.onSurfaceVariant,
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,

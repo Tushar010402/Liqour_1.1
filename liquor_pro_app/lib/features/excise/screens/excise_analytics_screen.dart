@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../providers/excise_provider.dart';
 
 class ExciseAnalyticsScreen extends StatefulWidget {
-  const ExciseAnalyticsScreen({Key? key}) : super(key: key);
+  const ExciseAnalyticsScreen({super.key});
 
   @override
   State<ExciseAnalyticsScreen> createState() => _ExciseAnalyticsScreenState();
@@ -33,10 +34,8 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Analytics & Insights'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: CustomAppBar(
+        title: 'Analytics & Insights',
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -99,8 +98,10 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   }
 
   Widget _buildPeriodSelector() {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(8),
         child: SegmentedButton<String>(
@@ -133,17 +134,18 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   Widget _buildComplianceTrendCard(ExciseProvider provider) {
     final dashboard = provider.dashboard;
     if (dashboard == null) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
 
     return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(16),
           gradient: LinearGradient(
             colors: [
               dashboard.scoreColor,
-              dashboard.scoreColor.withOpacity(0.7),
+              dashboard.scoreColor.withValues(alpha:0.7),
             ],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
@@ -166,7 +168,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.2),
+                    color: Colors.white.withValues(alpha:0.2),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Row(
@@ -222,7 +224,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
         Text(
           label,
           style: TextStyle(
-            color: color.withOpacity(0.8),
+            color: color.withValues(alpha:0.8),
             fontSize: 12,
           ),
         ),
@@ -232,9 +234,11 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
 
   Widget _buildLicenseAnalytics(ExciseProvider provider) {
     final licenses = provider.licenses;
+    final cs = Theme.of(context).colorScheme;
 
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -288,9 +292,11 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   Widget _buildReportAnalytics(ExciseProvider provider) {
     final reports = provider.dailyReports;
     final uploadedCount = reports.where((r) => r.uploadedToPortal).length;
+    final cs = Theme.of(context).colorScheme;
 
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -343,9 +349,11 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
     final utilizationRate = stats.totalCodes == 0
         ? 0.0
         : (stats.totalSold / stats.totalCodes * 100);
+    final cs = Theme.of(context).colorScheme;
 
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -406,9 +414,11 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
     );
     final considerationFees = (stats?.totalSold ?? 0) * 50.0;
     final totalFees = monthlyLicenseFees + considerationFees;
+    final cs = Theme.of(context).colorScheme;
 
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -452,9 +462,11 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   Widget _buildPerformanceMetrics(ExciseProvider provider) {
     final dashboard = provider.dashboard;
     if (dashboard == null) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
 
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -514,6 +526,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   }
 
   Widget _buildAnalyticsRow(String label, String value, Color color) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -534,7 +547,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
                 label,
                 style: TextStyle(
                   fontSize: 14,
-                  color: Colors.grey[600],
+                  color: cs.onSurfaceVariant,
                 ),
               ),
             ],
@@ -581,7 +594,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
           borderRadius: BorderRadius.circular(4),
           child: LinearProgressIndicator(
             value: percentage / 100,
-            backgroundColor: color.withOpacity(0.2),
+            backgroundColor: color.withValues(alpha:0.2),
             valueColor: AlwaysStoppedAnimation(color),
             minHeight: 8,
           ),
@@ -591,6 +604,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   }
 
   Widget _buildFinancialRow(String label, double amount, Color color, {bool isTotal = false}) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -601,7 +615,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
             style: TextStyle(
               fontSize: 14,
               fontWeight: isTotal ? FontWeight.bold : FontWeight.normal,
-              color: isTotal ? null : Colors.grey[600],
+              color: isTotal ? null : cs.onSurfaceVariant,
             ),
           ),
           Text(
@@ -618,8 +632,10 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
   }
 
   Widget _buildMetricCard(String label, String value, IconData icon, Color color) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 1,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
@@ -641,7 +657,7 @@ class _ExciseAnalyticsScreenState extends State<ExciseAnalyticsScreen> {
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 11,
-                color: Colors.grey[600],
+                color: cs.onSurfaceVariant,
               ),
             ),
           ],

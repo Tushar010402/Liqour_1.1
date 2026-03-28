@@ -40,6 +40,7 @@ class PremiumTextField extends StatelessWidget {
   
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -67,13 +68,11 @@ class PremiumTextField extends StatelessWidget {
             hintText: hint,
             hintStyle: const TextStyle(color: AppColors.hintWhite),
             filled: true,
-            fillColor: AppColors.darkGrey,
+            fillColor: cs.onSurface,
             prefixIcon: prefixIcon != null
                 ? Icon(prefixIcon, color: AppColors.mutedWhite, size: 20)
                 : null,
-            suffixIcon: suffixWidget != null
-                ? suffixWidget
-                : (suffixIcon != null
+            suffixIcon: suffixWidget ?? (suffixIcon != null
                     ? IconButton(
                         icon: Icon(suffixIcon, color: AppColors.mutedWhite, size: 20),
                         onPressed: onSuffixIconTap,
@@ -85,7 +84,7 @@ class PremiumTextField extends StatelessWidget {
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: AppColors.mediumGrey, width: 1),
+              borderSide: BorderSide(color: cs.onSurfaceVariant, width: 1),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),

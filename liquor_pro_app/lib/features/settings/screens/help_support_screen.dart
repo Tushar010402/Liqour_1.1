@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 
@@ -9,6 +8,7 @@ class HelpSupportScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: const CustomAppBar(
         title: 'Help & Support',
@@ -18,7 +18,7 @@ class HelpSupportScreen extends StatelessWidget {
         children: [
           // Contact Support Card
           Card(
-            color: AppColors.primary.withOpacity(0.1),
+            color: cs.primary.withValues(alpha:0.1),
             child: Padding(
               padding: const EdgeInsets.all(20),
               child: Column(
@@ -26,20 +26,20 @@ class HelpSupportScreen extends StatelessWidget {
                   Icon(
                     Icons.support_agent,
                     size: 64,
-                    color: AppColors.primary,
+                    color: cs.primary,
                   ),
                   const SizedBox(height: 16),
                   Text(
                     'Need Help?',
                     style: AppTextStyles.h4.copyWith(
-                      color: AppColors.primary,
+                      color: cs.primary,
                     ),
                   ),
                   const SizedBox(height: 8),
                   Text(
                     'Our support team is here to help you',
                     style: AppTextStyles.bodyMedium.copyWith(
-                      color: AppColors.textSecondary,
+                      color: cs.onSurfaceVariant,
                     ),
                     textAlign: TextAlign.center,
                   ),
@@ -54,7 +54,7 @@ class HelpSupportScreen extends StatelessWidget {
                           icon: const Icon(Icons.email_outlined),
                           label: const Text('Email'),
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.primary,
+                            foregroundColor: cs.primary,
                             padding: const EdgeInsets.symmetric(vertical: 12),
                           ),
                         ),
@@ -68,7 +68,7 @@ class HelpSupportScreen extends StatelessWidget {
                           icon: const Icon(Icons.phone_outlined),
                           label: const Text('Call'),
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.primary,
+                            foregroundColor: cs.primary,
                             padding: const EdgeInsets.symmetric(vertical: 12),
                           ),
                         ),
@@ -295,17 +295,22 @@ class HelpSupportScreen extends StatelessWidget {
     required String title,
     required VoidCallback onTap,
   }) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: Icon(icon, color: AppColors.primary),
-        title: Text(
-          title,
-          style: AppTextStyles.bodyMedium,
-        ),
-        trailing: const Icon(Icons.chevron_right, color: AppColors.textSecondary),
-        onTap: onTap,
-      ),
+    return Builder(
+      builder: (context) {
+        final cs = Theme.of(context).colorScheme;
+        return Card(
+          margin: const EdgeInsets.only(bottom: 8),
+          child: ListTile(
+            leading: Icon(icon, color: cs.primary),
+            title: Text(
+              title,
+              style: AppTextStyles.bodyMedium,
+            ),
+            trailing: Icon(Icons.chevron_right, color: cs.onSurfaceVariant),
+            onTap: onTap,
+          ),
+        );
+      },
     );
   }
 
@@ -313,27 +318,32 @@ class HelpSupportScreen extends StatelessWidget {
     required String title,
     required String content,
   }) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ExpansionTile(
-        title: Text(
-          title,
-          style: AppTextStyles.bodyMedium.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Text(
-              content,
+    return Builder(
+      builder: (context) {
+        final cs = Theme.of(context).colorScheme;
+        return Card(
+          margin: const EdgeInsets.only(bottom: 8),
+          child: ExpansionTile(
+            title: Text(
+              title,
               style: AppTextStyles.bodyMedium.copyWith(
-                color: AppColors.textSecondary,
+                fontWeight: FontWeight.w600,
               ),
             ),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Text(
+                  content,
+                  style: AppTextStyles.bodyMedium.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -342,29 +352,34 @@ class HelpSupportScreen extends StatelessWidget {
     required String label,
     required String value,
   }) {
-    return Row(
-      children: [
-        Icon(icon, size: 20, color: AppColors.primary),
-        const SizedBox(width: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Builder(
+      builder: (context) {
+        final cs = Theme.of(context).colorScheme;
+        return Row(
           children: [
-            Text(
-              label,
-              style: AppTextStyles.bodySmall.copyWith(
-                color: AppColors.textSecondary,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              value,
-              style: AppTextStyles.bodyMedium.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+            Icon(icon, size: 20, color: cs.primary),
+            const SizedBox(width: 12),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: AppTextStyles.bodySmall.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: AppTextStyles.bodyMedium.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
             ),
           ],
-        ),
-      ],
+        );
+      },
     );
   }
 

@@ -1,5 +1,6 @@
 /// Form Validators - Best Practice Input Validation
 /// Centralized validation logic for consistent form validation
+library;
 
 class Validators {
   // Private constructor to prevent instantiation

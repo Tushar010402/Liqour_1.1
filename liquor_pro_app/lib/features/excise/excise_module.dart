@@ -11,7 +11,7 @@
 /// // In your main.dart providers:
 /// ChangeNotifierProvider(
 ///   create: (_) => ExciseModule.createProvider(
-///     baseUrl: 'http://localhost:8093',
+///     baseUrl: EnvironmentConfig.apiBaseUrl,
 ///     getToken: () => yourAuthService.getToken(),
 ///   ),
 /// ),
@@ -24,6 +24,7 @@
 ///   ),
 /// );
 /// ```
+library;
 
 import 'package:flutter/material.dart';
 import 'providers/excise_provider.dart';
@@ -34,7 +35,7 @@ class ExciseModule {
   /// Create excise provider with API service
   static ExciseProvider createProvider({
     required String baseUrl,
-    required String Function() getToken,
+    required Future<String?> Function() getToken,
   }) {
     final apiService = ExciseApiService(
       baseUrl: baseUrl,

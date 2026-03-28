@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import '../utils/haptic_feedback_helper.dart';
+import '../constants/app_colors.dart';
+import '../utils/haptic_feedback.dart';
 
 /// Custom Button Widgets - Best Practice Buttons
 /// Reusable button components with consistent design and behavior
@@ -35,12 +36,12 @@ class PrimaryButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final bgColor = backgroundColor ?? theme.primaryColor;
+    final bgColor = backgroundColor ?? theme.colorScheme.primary;
     final fgColor = textColor ?? Colors.white;
 
     final button = ElevatedButton(
       onPressed: isLoading ? null : () {
-        HapticFeedbackHelper.medium();
+        HapticFeedbackUtil.medium();
         onPressed?.call();
       },
       style: ElevatedButton.styleFrom(
@@ -52,7 +53,7 @@ class PrimaryButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(borderRadius),
         ),
         elevation: 2,
-        shadowColor: bgColor.withOpacity(0.3),
+        shadowColor: bgColor.withValues(alpha:0.3),
       ),
       child: isLoading
           ? SizedBox(
@@ -115,12 +116,12 @@ class SecondaryButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final bColor = borderColor ?? theme.primaryColor;
-    final tColor = textColor ?? theme.primaryColor;
+    final bColor = borderColor ?? theme.colorScheme.primary;
+    final tColor = textColor ?? theme.colorScheme.primary;
 
     final button = OutlinedButton(
       onPressed: () {
-        HapticFeedbackHelper.light();
+        HapticFeedbackUtil.light();
         onPressed?.call();
       },
       style: OutlinedButton.styleFrom(
@@ -178,11 +179,11 @@ class CustomTextButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = textColor ?? theme.primaryColor;
+    final color = textColor ?? theme.colorScheme.primary;
 
     return TextButton(
       onPressed: () {
-        HapticFeedbackHelper.light();
+        HapticFeedbackUtil.light();
         onPressed?.call();
       },
       style: TextButton.styleFrom(
@@ -234,14 +235,14 @@ class DangerButton extends StatelessWidget {
     return PrimaryButton(
       text: text,
       onPressed: () {
-        HapticFeedbackHelper.heavy();
+        HapticFeedbackUtil.heavy();
         onPressed?.call();
       },
       icon: icon ?? Icons.delete,
       isLoading: isLoading,
       isFullWidth: isFullWidth,
       height: height,
-      backgroundColor: Colors.red,
+      backgroundColor: AppColors.error,
       textColor: Colors.white,
     );
   }
@@ -271,15 +272,15 @@ class IconButtonWithBackground extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final bgColor = backgroundColor ?? theme.primaryColor.withOpacity(0.1);
-    final iColor = iconColor ?? theme.primaryColor;
+    final bgColor = backgroundColor ?? theme.colorScheme.primary.withValues(alpha:0.1);
+    final iColor = iconColor ?? theme.colorScheme.primary;
 
     final button = Material(
       color: bgColor,
       borderRadius: BorderRadius.circular(size / 2),
       child: InkWell(
         onTap: () {
-          HapticFeedbackHelper.light();
+          HapticFeedbackUtil.light();
           onPressed?.call();
         },
         borderRadius: BorderRadius.circular(size / 2),
@@ -329,13 +330,13 @@ class AnimatedFAB extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final bgColor = backgroundColor ?? theme.primaryColor;
+    final bgColor = backgroundColor ?? theme.colorScheme.primary;
     final fgColor = foregroundColor ?? Colors.white;
 
     if (isExtended && label != null) {
       return FloatingActionButton.extended(
         onPressed: () {
-          HapticFeedbackHelper.medium();
+          HapticFeedbackUtil.medium();
           onPressed();
         },
         backgroundColor: bgColor,
@@ -353,7 +354,7 @@ class AnimatedFAB extends StatelessWidget {
 
     return FloatingActionButton(
       onPressed: () {
-        HapticFeedbackHelper.medium();
+        HapticFeedbackUtil.medium();
         onPressed();
       },
       backgroundColor: bgColor,
@@ -385,8 +386,9 @@ class ChipButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final selColor = selectedColor ?? theme.primaryColor;
-    final unselColor = unselectedColor ?? Colors.grey[300];
+    final cs = theme.colorScheme;
+    final selColor = selectedColor ?? theme.colorScheme.primary;
+    final unselColor = unselectedColor ?? cs.outlineVariant;
 
     return FilterChip(
       label: Row(
@@ -396,14 +398,14 @@ class ChipButton extends StatelessWidget {
             Icon(
               icon,
               size: 16,
-              color: isSelected ? Colors.white : Colors.grey[700],
+              color: isSelected ? Colors.white : cs.onSurface,
             ),
             const SizedBox(width: 6),
           ],
           Text(
             label,
             style: TextStyle(
-              color: isSelected ? Colors.white : Colors.grey[700],
+              color: isSelected ? Colors.white : cs.onSurface,
               fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
             ),
           ),
@@ -411,7 +413,7 @@ class ChipButton extends StatelessWidget {
       ),
       selected: isSelected,
       onSelected: onPressed != null ? (selected) {
-        HapticFeedbackHelper.light();
+        HapticFeedbackUtil.light();
         onPressed!();
       } : null,
       backgroundColor: unselColor,
@@ -444,18 +446,21 @@ class SocialLoginButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final effectiveBg = backgroundColor == Colors.white ? cs.surface : backgroundColor;
+    final effectiveText = textColor == Colors.black87 ? cs.onSurface : textColor;
     return ElevatedButton(
       onPressed: () {
-        HapticFeedbackHelper.medium();
+        HapticFeedbackUtil.medium();
         onPressed();
       },
       style: ElevatedButton.styleFrom(
-        backgroundColor: backgroundColor,
-        foregroundColor: textColor,
+        backgroundColor: effectiveBg,
+        foregroundColor: effectiveText,
         minimumSize: const Size(double.infinity, 56),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: Colors.grey[300]!),
+          side: BorderSide(color: cs.outlineVariant),
         ),
         elevation: 0,
       ),
@@ -473,7 +478,7 @@ class SocialLoginButton extends StatelessWidget {
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w600,
-              color: textColor,
+              color: effectiveText,
             ),
           ),
         ],
@@ -513,19 +518,13 @@ class GradientButton extends StatelessWidget {
           end: Alignment.centerRight,
         ),
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: gradientColors[0].withOpacity(0.3),
-            blurRadius: 12,
-            offset: const Offset(0, 6),
-          ),
-        ],
+        border: Border.all(color: gradientColors[0].withValues(alpha: 0.3)),
       ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: () {
-            HapticFeedbackHelper.medium();
+            HapticFeedbackUtil.medium();
             onPressed?.call();
           },
           borderRadius: BorderRadius.circular(16),

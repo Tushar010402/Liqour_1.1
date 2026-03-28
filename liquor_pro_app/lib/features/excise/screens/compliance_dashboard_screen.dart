@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/excise_models.dart';
 import '../providers/excise_provider.dart';
 import '../widgets/compliance_score_card.dart';
@@ -11,7 +12,7 @@ import 'daily_report_list_screen.dart';
 import 'security_code_scanner_screen.dart';
 
 class ComplianceDashboardScreen extends StatefulWidget {
-  const ComplianceDashboardScreen({Key? key}) : super(key: key);
+  const ComplianceDashboardScreen({super.key});
 
   @override
   State<ComplianceDashboardScreen> createState() => _ComplianceDashboardScreenState();
@@ -44,10 +45,8 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('UP Excise Compliance'),
-        centerTitle: true,
-        elevation: 0,
+      appBar: CustomAppBar(
+        title: 'UP Excise Compliance',
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -206,12 +205,17 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
   }
 
   Widget _buildConsiderationFeeCard(ExciseProvider provider) {
+    final cs = Theme.of(context).colorScheme;
     final soldCodes = provider.codeStats?.totalSold ?? 0;
     final feePerBottle = 50.0;
     final totalFee = soldCodes * feePerBottle;
 
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+      ),
       child: InkWell(
         onTap: () {
           // Navigate to consideration fees detail
@@ -241,7 +245,7 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
                   Icon(
                     Icons.arrow_forward_ios,
                     size: 16,
-                    color: Colors.grey[400],
+                    color: cs.onSurfaceVariant,
                   ),
                 ],
               ),
@@ -258,14 +262,14 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
                 'Consideration Fees',
                 style: TextStyle(
                   fontSize: 12,
-                  color: Colors.grey[600],
+                  color: cs.onSurface,
                 ),
               ),
               Text(
                 '$soldCodes bottles × ₹$feePerBottle',
                 style: TextStyle(
                   fontSize: 10,
-                  color: Colors.grey[500],
+                  color: cs.onSurfaceVariant,
                 ),
               ),
             ],
@@ -276,8 +280,13 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
   }
 
   Widget _buildAlertsSection(ExciseProvider provider) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -367,7 +376,7 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.1),
+                color: color.withValues(alpha:0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Icon(icon, color: color, size: 20),
@@ -389,13 +398,13 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
                     subtitle,
                     style: TextStyle(
                       fontSize: 12,
-                      color: Colors.grey[600],
+                      color: Theme.of(context).colorScheme.onSurface,
                     ),
                   ),
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: Colors.grey[400]),
+            Icon(Icons.chevron_right, color: Theme.of(context).colorScheme.onSurfaceVariant),
           ],
         ),
       ),
@@ -486,8 +495,13 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
   }
 
   Widget _buildRecentActivitySection(ComplianceDashboard dashboard) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
-      elevation: 2,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -514,6 +528,7 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
   }
 
   Widget _buildSummaryRow(String label, String value) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
@@ -522,7 +537,7 @@ class _ComplianceDashboardScreenState extends State<ComplianceDashboardScreen> {
           Text(
             label,
             style: TextStyle(
-              color: Colors.grey[600],
+              color: cs.onSurface,
               fontSize: 14,
             ),
           ),

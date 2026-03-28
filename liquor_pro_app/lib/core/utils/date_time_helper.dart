@@ -53,13 +53,102 @@ class DateTimeHelper {
     }
   }
 
-  /// Parse datetime from ISO 8601 string
+  /// Parse datetime from ISO 8601 string and convert to local time
+  /// USE THIS for all backend timestamps to ensure correct timezone display
+  static DateTime? parseIsoToLocal(String? isoString) {
+    if (isoString == null || isoString.isEmpty) return null;
+    try {
+      return DateTime.parse(isoString).toLocal();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// Parse datetime from ISO 8601 string (DEPRECATED - use parseIsoToLocal instead)
+  /// This method keeps UTC time without converting to local
+  @Deprecated('Use parseIsoToLocal() to ensure correct timezone display')
   static DateTime? parseIso(String isoString) {
     try {
       return DateTime.parse(isoString);
     } catch (e) {
       return null;
     }
+  }
+
+  /// Parse date string with custom format and convert to local time
+  static DateTime? parseToLocal(String? dateString, {String format = 'yyyy-MM-dd'}) {
+    if (dateString == null || dateString.isEmpty) return null;
+    try {
+      final formatter = DateFormat(format);
+      return formatter.parse(dateString).toLocal();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ==================== IST Timezone Operations ====================
+  // IST = Indian Standard Time = UTC+5:30
+  // Use these methods for consistent IST display regardless of device timezone
+
+  /// IST timezone offset: UTC+5:30
+  static const Duration istOffset = Duration(hours: 5, minutes: 30);
+
+  /// Convert any DateTime to IST explicitly (regardless of device timezone)
+  /// Use this when you need consistent IST time display across all devices
+  static DateTime toIST(DateTime dateTime) {
+    // First ensure we have UTC time
+    final utc = dateTime.isUtc ? dateTime : dateTime.toUtc();
+    // Then add IST offset
+    return utc.add(istOffset);
+  }
+
+  /// Format DateTime in IST with specified format
+  /// Default format: "04 Dec 2025, 03:30 PM"
+  static String formatIST(DateTime dateTime, {String format = 'dd MMM yyyy, hh:mm a'}) {
+    final istTime = toIST(dateTime);
+    return DateFormat(format).format(istTime);
+  }
+
+  /// Format DateTime in IST with date only
+  /// Result: "04 Dec 2025"
+  static String formatISTDate(DateTime dateTime, {String format = 'dd MMM yyyy'}) {
+    final istTime = toIST(dateTime);
+    return DateFormat(format).format(istTime);
+  }
+
+  /// Format DateTime in IST with time only
+  /// Result: "03:30 PM"
+  static String formatISTTime(DateTime dateTime, {String format = 'hh:mm a'}) {
+    final istTime = toIST(dateTime);
+    return DateFormat(format).format(istTime);
+  }
+
+  /// Parse ISO string and return IST DateTime
+  /// Use this for backend timestamps that need IST display
+  static DateTime? parseToIST(String? isoString) {
+    if (isoString == null || isoString.isEmpty) return null;
+    try {
+      final utc = DateTime.parse(isoString);
+      return toIST(utc);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// Get current time in IST
+  static DateTime nowIST() {
+    return toIST(DateTime.now().toUtc());
+  }
+
+  /// Convert IST DateTime back to UTC for sending to backend
+  static DateTime istToUtc(DateTime istDateTime) {
+    return istDateTime.subtract(istOffset);
+  }
+
+  /// Format IST DateTime to ISO 8601 UTC string for backend
+  static String toIsoUtcString(DateTime dateTime) {
+    final utc = dateTime.isUtc ? dateTime : dateTime.toUtc();
+    return utc.toIso8601String();
   }
 
   // ==================== Date Manipulation ====================
@@ -438,7 +527,7 @@ class DateTimeHelper {
     final minutes = duration.inMinutes.remainder(60);
 
     if (hours > 0) {
-      return '$hours hr ${minutes} min';
+      return '$hours hr $minutes min';
     } else {
       return '$minutes min';
     }

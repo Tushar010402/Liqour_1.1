@@ -177,6 +177,48 @@ class ShopProvider with ChangeNotifier {
     }
   }
 
+  /// Delete shop
+  /// Requires admin/manager/saas_admin role
+  Future<bool> deleteShop(String shopId) async {
+    _isLoading = true;
+    _errorMessage = null;
+    notifyListeners();
+
+    try {
+      Logger.debug('🏪 ShopProvider.deleteShop() called for shopId: $shopId');
+      final response = await _shopService.deleteShop(shopId);
+
+      if (response.success) {
+        _shops.removeWhere((s) => s.id == shopId);
+        if (_selectedShop?.id == shopId) {
+          _selectedShop = null;
+        }
+        _errorMessage = null;
+        _isLoading = false;
+        notifyListeners();
+        Logger.debug('🏪 ShopProvider: Shop deleted successfully');
+        return true;
+      } else {
+        // Handle 403 permission denied
+        if (response.statusCode == 403) {
+          _errorMessage = 'Permission denied: You do not have access to delete shops.';
+        } else {
+          _errorMessage = response.message ?? 'Failed to delete shop';
+        }
+        _isLoading = false;
+        notifyListeners();
+        Logger.debug('🏪 ShopProvider: Delete failed - $_errorMessage');
+        return false;
+      }
+    } catch (e) {
+      _errorMessage = 'Error deleting shop: $e';
+      _isLoading = false;
+      notifyListeners();
+      Logger.debug('🏪 ShopProvider: Exception during delete - $e');
+      return false;
+    }
+  }
+
   /// Clear error message
   void clearError() {
     _errorMessage = null;
@@ -187,5 +229,16 @@ class ShopProvider with ChangeNotifier {
   void clearSelectedShop() {
     _selectedShop = null;
     notifyListeners();
+  }
+
+  /// Reset provider state (called on logout)
+  /// Clears all cached data so new user starts fresh
+  void reset() {
+    _shops = [];
+    _selectedShop = null;
+    _isLoading = false;
+    _errorMessage = null;
+    notifyListeners();
+    Logger.debug('🔄 [ShopProvider] State reset for logout');
   }
 }

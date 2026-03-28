@@ -3,6 +3,7 @@ class Brand {
   final String id;
   final String name;
   final String description;
+  final String? category;
   final bool isActive;
   final DateTime? createdAt;
   final DateTime? updatedAt;
@@ -11,6 +12,7 @@ class Brand {
     required this.id,
     required this.name,
     required this.description,
+    this.category,
     required this.isActive,
     this.createdAt,
     this.updatedAt,
@@ -21,6 +23,7 @@ class Brand {
       id: json['id'] ?? '',
       name: json['name'] ?? '',
       description: json['description'] ?? '',
+      category: json['category'],
       isActive: json['is_active'] ?? true,
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'])
@@ -36,6 +39,7 @@ class Brand {
       'id': id,
       'name': name,
       'description': description,
+      'category': category,
       'is_active': isActive,
     };
   }

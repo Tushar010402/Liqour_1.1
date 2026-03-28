@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 /// Environment Configuration for LiquorPro
 /// Supports development, staging, and production environments
 enum Environment {
@@ -7,12 +9,12 @@ enum Environment {
 }
 
 class EnvironmentConfig {
-  static Environment _currentEnvironment = Environment.development;
+  static Environment _currentEnvironment = Environment.production;
 
   /// Initialize environment from --dart-define flag
   /// Usage: flutter run --dart-define=ENVIRONMENT=production
   static void initialize() {
-    const envString = String.fromEnvironment('ENVIRONMENT', defaultValue: 'development');
+    const envString = String.fromEnvironment('ENVIRONMENT', defaultValue: 'production');
 
     switch (envString.toLowerCase()) {
       case 'production':
@@ -47,16 +49,32 @@ class EnvironmentConfig {
   static String get apiBaseUrl {
     switch (_currentEnvironment) {
       case Environment.development:
-        // Local development - use localhost
-        return 'http://localhost:8090';
+        // Local development - Platform-aware configuration
+        // iOS Simulator: Can use localhost (runs on same Mac)
+        // iOS Physical Device: Must use Mac's IP (change if needed)
+        // Android Emulator: Use special alias 10.0.2.2 for host machine
+        // Android Physical Device: Use Mac's IP (same as iOS device)
+
+        if (Platform.isIOS) {
+          // iOS Simulator: Use localhost (works since simulator runs on Mac)
+          // iOS Physical Device: Change to your Mac's current IP if testing on device
+          return 'http://localhost:8090';
+        } else if (Platform.isAndroid) {
+          // Android Emulator: Use 10.0.2.2 alias for host machine
+          return 'http://10.0.2.2:8090';
+          // Android Physical Device: Use 'http://YOUR_MAC_IP:8090'
+        } else {
+          // Desktop/Web - can use localhost
+          return 'http://localhost:8090';
+        }
 
       case Environment.staging:
-        // Staging server - replace with your staging URL
-        return 'https://staging-api.liquorpro.com';
+        // Staging server
+        return 'https://new.v2.floelife.in';
 
       case Environment.production:
-        // Production server - replace with your production URL
-        return 'https://api.liquorpro.com';
+        // Production server - FloeLife
+        return 'https://new.v2.floelife.in';
     }
   }
 
@@ -81,15 +99,38 @@ class EnvironmentConfig {
   /// Enable crash reporting in staging/production
   static bool get enableCrashReporting => isStaging || isProduction;
 
+  /// Get WebSocket URL based on environment
+  static String get websocketUrl {
+    switch (_currentEnvironment) {
+      case Environment.development:
+        // Local development - WebSocket server on Gateway
+        if (Platform.isIOS) {
+          return 'ws://localhost:8090/ws';
+        } else if (Platform.isAndroid) {
+          return 'ws://10.0.2.2:8090/ws';
+        } else {
+          return 'ws://localhost:8090/ws';
+        }
+
+      case Environment.staging:
+        return 'wss://new.v2.floelife.in/ws';
+
+      case Environment.production:
+        // Production WebSocket - FloeLife
+        return 'wss://new.v2.floelife.in/ws';
+    }
+  }
+
   /// API timeout based on environment
+  /// Updated to 120 seconds for OCR image uploads (supports ~2MB images)
   static Duration get apiTimeout {
     switch (_currentEnvironment) {
       case Environment.development:
-        return const Duration(seconds: 60); // Longer timeout for debugging
+        return const Duration(seconds: 120); // Supports OCR batch processing
       case Environment.staging:
-        return const Duration(seconds: 30);
+        return const Duration(seconds: 120); // Supports OCR batch processing
       case Environment.production:
-        return const Duration(seconds: 30);
+        return const Duration(seconds: 120); // Supports OCR batch processing
     }
   }
 
@@ -109,7 +150,7 @@ class EnvironmentConfig {
     // ignore: avoid_print
     print('║ Environment: ${displayName.padRight(27)}║');
     // ignore: avoid_print
-    print('║ API URL: ${apiBaseUrl.padRight(31)}║');
+    print('║ API URL: ${apiBaseUrl.padRight(29)}║');
     // ignore: avoid_print
     print('║ Debug Logging: ${(enableDebugLogging ? 'Enabled' : 'Disabled').padRight(23)}║');
     // ignore: avoid_print

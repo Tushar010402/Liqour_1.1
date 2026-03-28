@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
 
 /// Category & Subcategory Navigation Tabs
@@ -106,18 +105,19 @@ class _BrandCategoryTabsState extends State<BrandCategoryTabs>
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         // Category Tabs
         Container(
-          color: Colors.white,
+          color: cs.surface,
           child: TabBar(
             controller: _tabController,
             isScrollable: true,
-            indicatorColor: AppColors.primary,
-            labelColor: AppColors.primary,
-            unselectedLabelColor: AppColors.textSecondary,
+            indicatorColor: cs.primary,
+            labelColor: cs.primary,
+            unselectedLabelColor: cs.onSurfaceVariant,
             labelStyle: AppTextStyles.bodyMedium.copyWith(
               fontWeight: FontWeight.w600,
             ),
@@ -151,7 +151,7 @@ class _BrandCategoryTabsState extends State<BrandCategoryTabs>
         if (_tabController.index > 0)
           Container(
             height: 56,
-            color: AppColors.surface,
+            color: cs.surface,
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: _buildSubcategoryChips(),
           ),
@@ -160,6 +160,7 @@ class _BrandCategoryTabsState extends State<BrandCategoryTabs>
   }
 
   Widget _buildSubcategoryChips() {
+    final cs = Theme.of(context).colorScheme;
     final currentIndex = _tabController.index;
     if (currentIndex == 0) return const SizedBox.shrink();
 
@@ -169,7 +170,7 @@ class _BrandCategoryTabsState extends State<BrandCategoryTabs>
         child: Text(
           'No subcategories',
           style: AppTextStyles.bodySmall.copyWith(
-            color: AppColors.textSecondary,
+            color: cs.onSurfaceVariant,
           ),
         ),
       );
@@ -200,22 +201,23 @@ class _BrandCategoryTabsState extends State<BrandCategoryTabs>
   }
 
   Widget _buildSubcategoryChip(String label, String? id, bool isSelected) {
+    final cs = Theme.of(context).colorScheme;
     return InkWell(
       onTap: () => _handleSubcategoryChange(id),
       borderRadius: BorderRadius.circular(20),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
         decoration: BoxDecoration(
-          color: isSelected ? AppColors.primary : Colors.white,
+          color: isSelected ? cs.primary : cs.surface,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
-            color: isSelected ? AppColors.primary : AppColors.border,
+            color: isSelected ? cs.primary : cs.outline,
             width: 1.5,
           ),
           boxShadow: isSelected
               ? [
                   BoxShadow(
-                    color: AppColors.primary.withOpacity(0.3),
+                    color: cs.primary.withValues(alpha: 0.3),
                     blurRadius: 4,
                     offset: const Offset(0, 2),
                   ),
@@ -225,7 +227,7 @@ class _BrandCategoryTabsState extends State<BrandCategoryTabs>
         child: Text(
           label,
           style: AppTextStyles.bodySmall.copyWith(
-            color: isSelected ? Colors.white : AppColors.textPrimary,
+            color: isSelected ? Colors.white : cs.onSurface,
             fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
           ),
         ),

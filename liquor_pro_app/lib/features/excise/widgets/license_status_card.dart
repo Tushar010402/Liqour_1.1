@@ -7,15 +7,16 @@ class LicenseStatusCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   const LicenseStatusCard({
-    Key? key,
+    super.key,
     required this.totalLicenses,
     required this.activeLicenses,
     required this.expiringLicenses,
     this.onTap,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Card(
       elevation: 2,
       child: InkWell(
@@ -76,7 +77,7 @@ class LicenseStatusCard extends StatelessWidget {
                 'Active Licenses',
                 style: TextStyle(
                   fontSize: 12,
-                  color: Colors.grey[600],
+                  color: cs.onSurface,
                 ),
               ),
               if (expiringLicenses > 0)

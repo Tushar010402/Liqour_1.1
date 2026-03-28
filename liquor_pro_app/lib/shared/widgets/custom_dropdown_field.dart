@@ -11,7 +11,7 @@ class CustomDropdownField<T> extends StatelessWidget {
   final bool enabled;
 
   const CustomDropdownField({
-    Key? key,
+    super.key,
     required this.value,
     required this.items,
     required this.label,
@@ -19,12 +19,13 @@ class CustomDropdownField<T> extends StatelessWidget {
     this.validator,
     this.hint,
     this.enabled = true,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return DropdownButtonFormField<T>(
-      value: value,
+      initialValue: value,
       items: items,
       onChanged: enabled ? onChanged : null,
       validator: validator,
@@ -35,7 +36,7 @@ class CustomDropdownField<T> extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
         ),
         filled: true,
-        fillColor: enabled ? null : Colors.grey[100],
+        fillColor: enabled ? null : cs.surfaceContainerHighest,
       ),
       isExpanded: true,
     );

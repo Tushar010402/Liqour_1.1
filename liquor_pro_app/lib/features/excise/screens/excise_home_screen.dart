@@ -9,7 +9,7 @@ import 'excise_analytics_screen.dart';
 import 'excise_settings_screen.dart';
 
 class ExciseHomeScreen extends StatefulWidget {
-  const ExciseHomeScreen({Key? key}) : super(key: key);
+  const ExciseHomeScreen({super.key});
 
   @override
   State<ExciseHomeScreen> createState() => _ExciseHomeScreenState();
@@ -52,7 +52,7 @@ class _ExciseHomeScreenState extends State<ExciseHomeScreen> {
       onDestinationSelected: (index) {
         setState(() => _selectedIndex = index);
       },
-      elevation: 8,
+      elevation: 0,
       destinations: const [
         NavigationDestination(
           icon: Icon(Icons.dashboard_outlined),

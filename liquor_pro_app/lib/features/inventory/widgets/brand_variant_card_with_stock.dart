@@ -70,45 +70,58 @@ class _BrandVariantCardWithStockState
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      elevation: widget.isSelected ? 4 : 1,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: widget.isSelected
-              ? AppColors.primary
-              : AppColors.border.withOpacity(0.3),
+    final cs = Theme.of(context).colorScheme;
+    final isOnboarded = widget.variant.isOnboarded == true;
+
+    return Opacity(
+      opacity: isOnboarded ? 0.6 : 1.0,
+      child: Card(
+        margin: const EdgeInsets.only(bottom: 12),
+        elevation: widget.isSelected ? 4 : 1,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(
+            color: isOnboarded
+                ? cs.primary.withOpacity(0.5)
+                : widget.isSelected
+                    ? cs.primary
+              : cs.outline.withValues(alpha:0.3),
           width: widget.isSelected ? 2 : 1,
         ),
       ),
       child: InkWell(
-        onTap: () => widget.onSelectionChanged(!widget.isSelected),
+        // Disable tap for already onboarded variants
+        onTap: isOnboarded ? null : () => widget.onSelectionChanged(!widget.isSelected),
         borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
-                  // Selection Checkbox
+                  // Selection Checkbox - disabled for onboarded items
                   Container(
                     width: 28,
                     height: 28,
                     decoration: BoxDecoration(
-                      color: widget.isSelected
-                          ? AppColors.primary
-                          : Colors.transparent,
+                      color: isOnboarded
+                          ? cs.primary
+                          : widget.isSelected
+                              ? cs.primary
+                              : Colors.transparent,
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
-                        color: widget.isSelected
-                            ? AppColors.primary
-                            : AppColors.border,
+                        color: isOnboarded
+                            ? cs.primary
+                            : widget.isSelected
+                                ? cs.primary
+                                : cs.outline,
                         width: 2,
                       ),
                     ),
-                    child: widget.isSelected
+                    child: (isOnboarded || widget.isSelected)
                         ? const Icon(
                             Icons.check,
                             color: Colors.white,
@@ -124,7 +137,7 @@ class _BrandVariantCardWithStockState
                     width: 60,
                     height: 60,
                     decoration: BoxDecoration(
-                      color: AppColors.primary.withOpacity(0.1),
+                      color: cs.primary.withValues(alpha:0.1),
                       borderRadius: BorderRadius.circular(12),
                       image: widget.variant.picture.isNotEmpty
                           ? DecorationImage(
@@ -134,9 +147,9 @@ class _BrandVariantCardWithStockState
                           : null,
                     ),
                     child: widget.variant.picture.isEmpty
-                        ? const Icon(
+                        ? Icon(
                             Icons.liquor,
-                            color: AppColors.primary,
+                            color: cs.primary,
                             size: 32,
                           )
                         : null,
@@ -149,40 +162,103 @@ class _BrandVariantCardWithStockState
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // Brand name chip with onboarded badge
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Flexible(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: cs.primary.withValues(alpha:0.1),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  widget.brandName,
+                                  style: AppTextStyles.bodySmall.copyWith(
+                                    color: cs.primary,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 11,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                            if (isOnboarded) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: cs.primary,
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.check_circle,
+                                      color: Colors.white,
+                                      size: 10,
+                                    ),
+                                    const SizedBox(width: 3),
+                                    Text(
+                                      'ADDED',
+                                      style: AppTextStyles.bodySmall.copyWith(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 9,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        // Variant size
                         Text(
-                          '${widget.brandName} ${widget.variant.size}',
+                          widget.variant.size,
                           style: AppTextStyles.bodyMedium.copyWith(
                             fontWeight: FontWeight.w600,
-                            color: AppColors.textPrimary,
+                            color: cs.onSurface,
                           ),
-                          maxLines: 2,
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                         const SizedBox(height: 4),
                         Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
+                                horizontal: 6,
+                                vertical: 3,
                               ),
                               decoration: BoxDecoration(
-                                color: AppColors.success.withOpacity(0.1),
+                                color: cs.primary.withValues(alpha:0.1),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
                                 '₹${widget.variant.mrp.toStringAsFixed(0)}',
                                 style: AppTextStyles.bodySmall.copyWith(
-                                  color: AppColors.success,
+                                  color: cs.primary,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 6),
                             Text(
                               'ABV ${widget.variant.alcoholContent}%',
                               style: AppTextStyles.bodySmall.copyWith(
-                                color: AppColors.textSecondary,
+                                color: cs.onSurfaceVariant,
                               ),
                             ),
                           ],
@@ -210,7 +286,7 @@ class _BrandVariantCardWithStockState
                           Text(
                             'Initial Stock',
                             style: AppTextStyles.bodySmall.copyWith(
-                              color: AppColors.textSecondary,
+                              color: cs.onSurfaceVariant,
                               fontWeight: FontWeight.w500,
                             ),
                           ),
@@ -218,12 +294,12 @@ class _BrandVariantCardWithStockState
                           Container(
                             height: 56,
                             decoration: BoxDecoration(
-                              color: AppColors.surface,
+                              color: cs.surface,
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
                                 color: _focusNode.hasFocus
-                                    ? AppColors.primary
-                                    : AppColors.border,
+                                    ? cs.primary
+                                    : cs.outline,
                                 width: _focusNode.hasFocus ? 2 : 1,
                               ),
                             ),
@@ -234,7 +310,7 @@ class _BrandVariantCardWithStockState
                               textAlign: TextAlign.center,
                               style: AppTextStyles.h6.copyWith(
                                 fontWeight: FontWeight.bold,
-                                color: AppColors.primary,
+                                color: cs.primary,
                               ),
                               inputFormatters: [
                                 FilteringTextInputFormatter.digitsOnly,
@@ -242,7 +318,7 @@ class _BrandVariantCardWithStockState
                               decoration: InputDecoration(
                                 hintText: '0',
                                 hintStyle: AppTextStyles.h6.copyWith(
-                                  color: AppColors.textSecondary.withOpacity(0.5),
+                                  color: cs.onSurfaceVariant.withValues(alpha:0.5),
                                 ),
                                 border: InputBorder.none,
                                 contentPadding: const EdgeInsets.symmetric(
@@ -251,7 +327,7 @@ class _BrandVariantCardWithStockState
                                 ),
                                 suffixText: 'units',
                                 suffixStyle: AppTextStyles.bodySmall.copyWith(
-                                  color: AppColors.textSecondary,
+                                  color: cs.onSurfaceVariant,
                                 ),
                               ),
                               onChanged: (value) {
@@ -275,7 +351,7 @@ class _BrandVariantCardWithStockState
                           Text(
                             'Quick Add',
                             style: AppTextStyles.bodySmall.copyWith(
-                              color: AppColors.textSecondary,
+                              color: cs.onSurfaceVariant,
                               fontWeight: FontWeight.w500,
                             ),
                           ),
@@ -320,13 +396,13 @@ class _BrandVariantCardWithStockState
                       Icon(
                         Icons.qr_code,
                         size: 14,
-                        color: AppColors.textSecondary,
+                        color: cs.onSurfaceVariant,
                       ),
                       const SizedBox(width: 4),
                       Text(
                         widget.variant.barcode,
                         style: AppTextStyles.bodySmall.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                           fontFamily: 'monospace',
                         ),
                       ),
@@ -338,7 +414,7 @@ class _BrandVariantCardWithStockState
                       Text(
                         'HSN: ${widget.variant.hsnCode}',
                         style: AppTextStyles.bodySmall.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                     ],
@@ -348,6 +424,7 @@ class _BrandVariantCardWithStockState
             ],
           ),
         ),
+      ),
       ),
     );
   }
@@ -367,17 +444,17 @@ class _BrandVariantCardWithStockState
         height: 28,
         decoration: BoxDecoration(
           color: isReset
-              ? AppColors.error.withOpacity(0.1)
+              ? AppColors.error.withValues(alpha:0.1)
               : delta > 0
-                  ? AppColors.success.withOpacity(0.1)
-                  : AppColors.warning.withOpacity(0.1),
+                  ? AppColors.success.withValues(alpha:0.1)
+                  : AppColors.warning.withValues(alpha:0.1),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: isReset
-                ? AppColors.error.withOpacity(0.3)
+                ? AppColors.error.withValues(alpha:0.3)
                 : delta > 0
-                    ? AppColors.success.withOpacity(0.3)
-                    : AppColors.warning.withOpacity(0.3),
+                    ? AppColors.success.withValues(alpha:0.3)
+                    : AppColors.warning.withValues(alpha:0.3),
           ),
         ),
         child: Center(

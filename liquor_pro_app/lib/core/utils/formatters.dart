@@ -15,6 +15,11 @@ class Formatters {
     return '$symbol${formatter.format(amount)}';
   }
 
+  /// Alias for currency (backward compatible)
+  static String formatCurrency(double amount, {String symbol = '₹'}) {
+    return currency(amount, symbol: symbol);
+  }
+
   /// Format currency without decimal
   static String currencyWithoutDecimal(double amount, {String symbol = '₹'}) {
     final formatter = NumberFormat('#,##,##0', 'en_IN');
@@ -112,10 +117,17 @@ class Formatters {
     return DateFormat('dd/MM/yyyy').format(date);
   }
 
+  /// Format date as YYYY-MM-DD for grouping
+  static String dateOnly(DateTime date) {
+    return DateFormat('yyyy-MM-dd').format(date);
+  }
+
   /// Relative time (e.g., "2 hours ago")
+  /// Ensures both dates are in local timezone before calculating difference
   static String relativeTime(DateTime date) {
-    final now = DateTime.now();
-    final difference = now.difference(date);
+    final now = DateTime.now().toLocal();
+    final localDate = date.toLocal();
+    final difference = now.difference(localDate);
 
     if (difference.inSeconds < 60) {
       return 'Just now';
@@ -141,6 +153,9 @@ class Formatters {
     }
   }
 
+  /// Alias for relativeTime
+  static String timeAgo(DateTime date) => relativeTime(date);
+
   /// Format date range (e.g., "Jan 15 - Jan 20, 2024")
   static String dateRange(DateTime start, DateTime end) {
     if (start.year == end.year && start.month == end.month) {
@@ -150,6 +165,56 @@ class Formatters {
     } else {
       return '${DateFormat('MMM dd, yyyy').format(start)} - ${DateFormat('MMM dd, yyyy').format(end)}';
     }
+  }
+
+  /// Smart timestamp - context-aware date/time display
+  /// Shows appropriate format based on how recent the date is:
+  /// - Today: "X minutes/hours ago"
+  /// - Yesterday: "Yesterday at HH:mm"
+  /// - This week: "Mon at HH:mm"
+  /// - This year: "15 Oct"
+  /// - Older: "15 Oct 2023"
+  static String smartTimestamp(DateTime date) {
+    final now = DateTime.now().toLocal();
+    final localDate = date.toLocal();
+    final difference = now.difference(localDate);
+
+    // Today (less than 24 hours)
+    if (difference.inHours < 24 &&
+        now.day == localDate.day &&
+        now.month == localDate.month &&
+        now.year == localDate.year) {
+      if (difference.inMinutes < 1) {
+        return 'Just now';
+      } else if (difference.inMinutes < 60) {
+        final minutes = difference.inMinutes;
+        return '$minutes min ago';
+      } else {
+        final hours = difference.inHours;
+        return '$hours hr ago';
+      }
+    }
+
+    // Yesterday
+    final yesterday = now.subtract(const Duration(days: 1));
+    if (localDate.day == yesterday.day &&
+        localDate.month == yesterday.month &&
+        localDate.year == yesterday.year) {
+      return 'Yesterday ${DateFormat('HH:mm').format(localDate)}';
+    }
+
+    // This week (within last 7 days)
+    if (difference.inDays < 7) {
+      return '${DateFormat('EEE').format(localDate)} ${DateFormat('HH:mm').format(localDate)}';
+    }
+
+    // This year (show date without year)
+    if (localDate.year == now.year) {
+      return DateFormat('dd MMM').format(localDate);
+    }
+
+    // Older (show full date with year)
+    return DateFormat('dd MMM yyyy').format(localDate);
   }
 
   // ==================== String Formatters ====================

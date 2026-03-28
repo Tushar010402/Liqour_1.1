@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/theme/ios_design_tokens.dart';
 
-/// Stat Card Widget - Display statistics
+/// Stat Card Widget - Display statistics (Settings-style)
 class StatCard extends StatelessWidget {
   final String title;
   final String value;
@@ -23,16 +23,20 @@ class StatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      elevation: 2,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
+    final cs = Theme.of(context).colorScheme;
+    final iconColor = color ?? cs.primary;
+    return Material(
+      color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
-          padding: const EdgeInsets.all(10),
+        borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+        child: Container(
+          padding: EdgeInsets.all(iOSDesignTokens.space12),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+            border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -47,7 +51,7 @@ class StatCard extends StatelessWidget {
                     child: Text(
                       title,
                       style: AppTextStyles.caption.copyWith(
-                        color: AppColors.textSecondary,
+                        color: cs.onSurfaceVariant,
                         fontSize: 11,
                       ),
                       maxLines: 1,
@@ -55,16 +59,20 @@ class StatCard extends StatelessWidget {
                     ),
                   ),
                   Container(
-                    padding: const EdgeInsets.all(8),
+                    width: 38,
+                    height: 38,
                     decoration: BoxDecoration(
-                      color: (color ?? AppColors.primary).withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
+                      gradient: LinearGradient(
+                        colors: [
+                          iconColor.withValues(alpha: 0.15),
+                          iconColor.withValues(alpha: 0.06),
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Icon(
-                      icon,
-                      size: 20,
-                      color: color ?? AppColors.primary,
-                    ),
+                    child: Icon(icon, color: iconColor, size: 20),
                   ),
                 ],
               ),
@@ -89,7 +97,7 @@ class StatCard extends StatelessWidget {
                       child: Text(
                         subtitle!,
                         style: AppTextStyles.caption.copyWith(
-                          color: AppColors.textSecondary,
+                          color: cs.onSurfaceVariant,
                           fontSize: 10,
                         ),
                         maxLines: 1,

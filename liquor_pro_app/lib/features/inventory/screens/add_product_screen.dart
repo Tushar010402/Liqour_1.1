@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
-import '../../../core/utils/formatters.dart';
+import '../../../core/theme/ios_design_tokens.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 import '../providers/product_provider.dart';
-import '../models/brand.dart';
 import '../../../core/utils/logger.dart';
 
 /// Add Product Screen - Create new product with validation
@@ -27,7 +25,6 @@ class _AddProductScreenState extends State<AddProductScreen> {
   final _skuController = TextEditingController();
   final _costPriceController = TextEditingController();
   final _sellingPriceController = TextEditingController();
-  final _mrpController = TextEditingController();
 
   String? _selectedCategoryId;
   String? _selectedBrandId;
@@ -55,7 +52,6 @@ class _AddProductScreenState extends State<AddProductScreen> {
     _skuController.dispose();
     _costPriceController.dispose();
     _sellingPriceController.dispose();
-    _mrpController.dispose();
     super.dispose();
   }
 
@@ -107,7 +103,6 @@ class _AddProductScreenState extends State<AddProductScreen> {
         sku: _skuController.text.trim(),
         costPrice: double.parse(_costPriceController.text),
         sellingPrice: double.parse(_sellingPriceController.text),
-        mrp: double.parse(_mrpController.text),
       );
 
       Logger.debug('   📦 createProduct() returned: $success');
@@ -153,6 +148,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: const CustomAppBar(
         title: 'Add New Product',
@@ -164,11 +160,11 @@ class _AddProductScreenState extends State<AddProductScreen> {
               Form(
                 key: _formKey,
                 child: ListView(
-                  padding: const EdgeInsets.all(16),
+                  padding: EdgeInsets.all(iOSDesignTokens.space16),
                   children: [
                     // Product Information Section
                     _buildSectionTitle('Product Information'),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     _buildTextField(
                       controller: _nameController,
@@ -182,7 +178,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                         return null;
                       },
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     _buildTextField(
                       controller: _descriptionController,
@@ -191,7 +187,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                       icon: Icons.description,
                       maxLines: 3,
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     // Category Dropdown
                     _buildDropdown(
@@ -211,7 +207,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                         });
                       },
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     // Brand Dropdown
                     _buildDropdown(
@@ -231,11 +227,11 @@ class _AddProductScreenState extends State<AddProductScreen> {
                         });
                       },
                     ),
-                    const SizedBox(height: 24),
+                    SizedBox(height: iOSDesignTokens.space20),
 
                     // Product Details Section
                     _buildSectionTitle('Product Details'),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     Row(
                       children: [
@@ -253,7 +249,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                             },
                           ),
                         ),
-                        const SizedBox(width: 16),
+                        SizedBox(width: iOSDesignTokens.space16),
                         Expanded(
                           child: _buildTextField(
                             controller: _alcoholContentController,
@@ -275,7 +271,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     Row(
                       children: [
@@ -293,7 +289,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                             },
                           ),
                         ),
-                        const SizedBox(width: 16),
+                        SizedBox(width: iOSDesignTokens.space16),
                         Expanded(
                           child: _buildTextField(
                             controller: _skuController,
@@ -310,11 +306,11 @@ class _AddProductScreenState extends State<AddProductScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 24),
+                    SizedBox(height: iOSDesignTokens.space20),
 
                     // Pricing Section
                     _buildSectionTitle('Pricing'),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     _buildTextField(
                       controller: _costPriceController,
@@ -334,7 +330,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                         return null;
                       },
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
 
                     _buildTextField(
                       controller: _sellingPriceController,
@@ -354,37 +350,17 @@ class _AddProductScreenState extends State<AddProductScreen> {
                         return null;
                       },
                     ),
-                    const SizedBox(height: 16),
-
-                    _buildTextField(
-                      controller: _mrpController,
-                      label: 'MRP',
-                      hint: 'Maximum retail price',
-                      icon: Icons.attach_money,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      prefixText: '₹ ',
-                      validator: (value) {
-                        if (value == null || value.trim().isEmpty) {
-                          return 'Required';
-                        }
-                        final number = double.tryParse(value);
-                        if (number == null || number <= 0) {
-                          return 'Invalid price';
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 32),
+                    SizedBox(height: iOSDesignTokens.space24),
 
                     // Save Button
                     ElevatedButton(
                       onPressed: _isLoading ? null : _saveProduct,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
+                        backgroundColor: cs.primary,
                         foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        padding: EdgeInsets.symmetric(vertical: iOSDesignTokens.space16),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
                         ),
                       ),
                       child: _isLoading
@@ -404,7 +380,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
                               ),
                             ),
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: iOSDesignTokens.space16),
                   ],
                 ),
               ),
@@ -412,7 +388,7 @@ class _AddProductScreenState extends State<AddProductScreen> {
               // Loading overlay
               if (provider.isLoading || provider.isCategoriesLoading || provider.isBrandsLoading)
                 Container(
-                  color: Colors.black26,
+                  color: Colors.black26, // KEEP: overlay with opacity
                   child: const Center(
                     child: CircularProgressIndicator(),
                   ),
@@ -425,12 +401,24 @@ class _AddProductScreenState extends State<AddProductScreen> {
   }
 
   Widget _buildSectionTitle(String title) {
-    return Text(
-      title,
-      style: AppTextStyles.h5.copyWith(
-        fontWeight: FontWeight.bold,
-        color: AppColors.primary,
-      ),
+    final cs = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        Container(
+          width: 3,
+          height: 14,
+          decoration: BoxDecoration(
+            color: cs.primary,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        SizedBox(width: iOSDesignTokens.space8),
+        Text(title,
+            style: AppTextStyles.bodyMedium.copyWith(
+              color: cs.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
+            )),
+      ],
     );
   }
 
@@ -444,30 +432,31 @@ class _AddProductScreenState extends State<AddProductScreen> {
     int maxLines = 1,
     String? prefixText,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return TextFormField(
       controller: controller,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
-        prefixIcon: Icon(icon, color: AppColors.primary),
+        prefixIcon: Icon(icon, color: cs.primary),
         prefixText: prefixText,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: AppColors.border),
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+          borderSide: BorderSide(color: cs.outline),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: AppColors.primary, width: 2),
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+          borderSide: BorderSide(color: cs.primary, width: 2),
         ),
         errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: AppColors.error),
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+          borderSide: BorderSide(color: cs.error),
         ),
         filled: true,
-        fillColor: Colors.white,
+        fillColor: cs.surface,
       ),
       keyboardType: keyboardType,
       maxLines: maxLines,
@@ -483,25 +472,26 @@ class _AddProductScreenState extends State<AddProductScreen> {
     required List<DropdownMenuItem<String>> items,
     required void Function(String?) onChanged,
   }) {
+    final cs = Theme.of(context).colorScheme;
     return DropdownButtonFormField<String>(
-      value: value,
+      initialValue: value,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
-        prefixIcon: Icon(icon, color: AppColors.primary),
+        prefixIcon: Icon(icon, color: cs.primary),
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: AppColors.border),
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+          borderSide: BorderSide(color: cs.outline),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: AppColors.primary, width: 2),
+          borderRadius: BorderRadius.circular(iOSDesignTokens.radiusMedium),
+          borderSide: BorderSide(color: cs.primary, width: 2),
         ),
         filled: true,
-        fillColor: Colors.white,
+        fillColor: cs.surface,
       ),
       items: items,
       onChanged: onChanged,

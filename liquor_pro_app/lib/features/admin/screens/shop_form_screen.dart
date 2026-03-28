@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/shop_model.dart';
 import '../providers/shop_provider.dart';
+import '../../../core/providers/shop_selection_provider.dart';
 
 /// Shop Form Screen - Create or Edit Shop
 class ShopFormScreen extends StatefulWidget {
@@ -102,20 +102,39 @@ class _ShopFormScreenState extends State<ShopFormScreen> {
       }
 
       if (success && mounted) {
-        // Show success message
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isEditMode
-                  ? 'Shop updated successfully'
-                  : 'Shop created successfully',
-            ),
-            backgroundColor: AppColors.success,
-          ),
-        );
+        // Update global shop selection provider for instant UI refresh across the app
+        final globalShopProvider = context.read<ShopSelectionProvider>();
 
-        // Go back to shops list and return true to trigger refresh
-        Navigator.pop(context, true);
+        if (isEditMode) {
+          // Update existing shop in global list
+          if (shopProvider.selectedShop != null) {
+            await globalShopProvider.updateShopInList(shopProvider.selectedShop!);
+          }
+        } else {
+          // Add newly created shop to global list and auto-select it
+          if (shopProvider.shops.isNotEmpty) {
+            final newShop = shopProvider.shops.last;
+            await globalShopProvider.addShop(newShop);
+          }
+        }
+
+        // Show success message
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                isEditMode
+                    ? 'Shop updated successfully'
+                    : 'Shop created successfully ✓',
+              ),
+              backgroundColor: AppColors.success,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+
+          // Go back to shops list - no need to return value, Provider handles refresh
+          Navigator.pop(context);
+        }
       } else if (mounted) {
         // Show error message
         ScaffoldMessenger.of(context).showSnackBar(
@@ -147,6 +166,7 @@ class _ShopFormScreenState extends State<ShopFormScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: CustomAppBar(
         title: isEditMode ? 'Edit Shop' : 'Add New Shop',
@@ -326,7 +346,7 @@ class _ShopFormScreenState extends State<ShopFormScreen> {
                     _isActive = value;
                   });
                 },
-                activeColor: AppColors.success,
+                activeThumbColor: AppColors.success,
               ),
               const SizedBox(height: 20),
             ],
@@ -337,7 +357,7 @@ class _ShopFormScreenState extends State<ShopFormScreen> {
               child: ElevatedButton(
                 onPressed: _isSubmitting ? null : _submitForm,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
+                  backgroundColor: cs.primary,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),

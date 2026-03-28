@@ -64,9 +64,29 @@ class UserModel {
     };
   }
 
-  String get displayName => '$firstName $lastName'.trim().isEmpty
-      ? username
-      : '$firstName $lastName'.trim();
+  /// Smart display name that handles missing/duplicate names
+  String get displayName {
+    final firstTrimmed = firstName.trim();
+    final lastTrimmed = lastName.trim();
+
+    // If no name at all, use username
+    if (firstTrimmed.isEmpty && lastTrimmed.isEmpty) {
+      return username;
+    }
+
+    // If only first name exists, use it
+    if (lastTrimmed.isEmpty) {
+      return firstTrimmed;
+    }
+
+    // If last name is same as first name (duplicate), only show first name
+    if (firstTrimmed.toLowerCase() == lastTrimmed.toLowerCase()) {
+      return firstTrimmed;
+    }
+
+    // Both names exist and are different, show full name
+    return '$firstTrimmed $lastTrimmed';
+  }
 
   String get fullName => '$firstName $lastName'.trim();
 }

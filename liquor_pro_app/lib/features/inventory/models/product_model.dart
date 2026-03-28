@@ -10,9 +10,15 @@ class Product {
   final double costPrice;
   final double sellingPrice;
   final double? mrp;
+  final String? barcode;
+  final String? sku;
+  final int? minStockLevel;
+  final double? alcoholPercentage;
   final String? size;
+  final double? volume;
   final double? alcoholContent;
   final int? stockQuantity;
+  final double? dutyFee;
   final bool isActive;
   final DateTime? createdAt;
   final DateTime? updatedAt;
@@ -28,9 +34,15 @@ class Product {
     required this.costPrice,
     required this.sellingPrice,
     this.mrp,
+    this.barcode,
+    this.sku,
+    this.minStockLevel,
+    this.alcoholPercentage,
     this.size,
+    this.volume,
     this.alcoholContent,
     this.stockQuantity,
+    this.dutyFee,
     this.isActive = true,
     this.createdAt,
     this.updatedAt,
@@ -48,9 +60,15 @@ class Product {
       costPrice: (json['cost_price'] ?? 0).toDouble(),
       sellingPrice: (json['selling_price'] ?? 0).toDouble(),
       mrp: json['mrp']?.toDouble(),
+      barcode: json['barcode'],
+      sku: json['sku'],
+      minStockLevel: json['min_stock_level'],
+      alcoholPercentage: json['alcohol_percentage']?.toDouble(),
       size: json['size'],
+      volume: json['volume']?.toDouble(),
       alcoholContent: json['alcohol_content']?.toDouble(),
-      stockQuantity: json['stock_quantity'],
+      stockQuantity: json['current_stock'] ?? json['stock_quantity'],
+      dutyFee: json['duty_fee']?.toDouble() ?? json['government_duty']?.toDouble(),
       isActive: json['is_active'] ?? true,
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'])
@@ -71,7 +89,12 @@ class Product {
       'cost_price': costPrice,
       'selling_price': sellingPrice,
       'mrp': mrp,
+      'barcode': barcode,
+      'sku': sku,
+      'min_stock_level': minStockLevel,
+      'alcohol_percentage': alcoholPercentage,
       'size': size,
+      'volume': volume,
       'alcohol_content': alcoholContent,
       'is_active': isActive,
     };

@@ -14,6 +14,24 @@ class ApiResponse<T> {
     this.statusCode,
   });
 
+  // Factory constructors for easy creation
+  factory ApiResponse.success(T data, {String? message}) {
+    return ApiResponse<T>(
+      success: true,
+      data: data,
+      message: message,
+      statusCode: 200,
+    );
+  }
+
+  factory ApiResponse.error({required String error, int? statusCode}) {
+    return ApiResponse<T>(
+      success: false,
+      message: error,
+      statusCode: statusCode ?? 400,
+    );
+  }
+
   factory ApiResponse.fromJson(
     Map<String, dynamic> json,
     T Function(dynamic)? fromJsonT,
@@ -41,6 +59,7 @@ class ApiResponse<T> {
 
   bool get isSuccess => success && statusCode != null && statusCode! >= 200 && statusCode! < 300;
   bool get isError => !success || (statusCode != null && statusCode! >= 400);
+  String? get error => message;
 }
 
 /// Paginated Response

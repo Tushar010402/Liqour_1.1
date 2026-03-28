@@ -1,3 +1,5 @@
+import '../../../core/utils/date_time_helper.dart';
+
 /// Shop Model
 class Shop {
   final String id;
@@ -40,12 +42,8 @@ class Shop {
       latitude: json['latitude']?.toDouble(),
       longitude: json['longitude']?.toDouble(),
       isActive: json['is_active'] ?? true,
-      createdAt: json['created_at'] != null
-          ? DateTime.parse(json['created_at'])
-          : null,
-      updatedAt: json['updated_at'] != null
-          ? DateTime.parse(json['updated_at'])
-          : null,
+      createdAt: DateTimeHelper.parseIsoToLocal(json['created_at']),
+      updatedAt: DateTimeHelper.parseIsoToLocal(json['updated_at']),
     );
   }
 

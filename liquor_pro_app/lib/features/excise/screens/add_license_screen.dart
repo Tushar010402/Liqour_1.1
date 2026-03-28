@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../shared/widgets/custom_app_bar.dart';
 import '../models/excise_models.dart';
 import '../providers/excise_provider.dart';
 
 class AddLicenseScreen extends StatefulWidget {
-  const AddLicenseScreen({Key? key}) : super(key: key);
+  const AddLicenseScreen({super.key});
 
   @override
   State<AddLicenseScreen> createState() => _AddLicenseScreenState();
@@ -81,12 +82,9 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Add New License'),
-        centerTitle: true,
-        elevation: 0,
-      ),
+      appBar: const CustomAppBar(title: 'Add New License'),
       body: Form(
         key: _formKey,
         child: ListView(
@@ -94,7 +92,11 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
           children: [
             // License Type Selection
             Card(
-              elevation: 2,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+              ),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Column(
@@ -117,7 +119,11 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
 
             // License Details
             Card(
-              elevation: 2,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+              ),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Column(
@@ -170,7 +176,11 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
 
             // Dates
             Card(
-              elevation: 2,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+              ),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Column(
@@ -239,7 +249,11 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
 
             // Financial
             Card(
-              elevation: 2,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+              ),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Column(
@@ -275,7 +289,7 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
                     Text(
                       'Annual Fee: ₹${(double.tryParse(_monthlyFeeController.text) ?? 0) * 12}',
                       style: TextStyle(
-                        color: Colors.grey[600],
+                        color: cs.onSurfaceVariant,
                         fontSize: 12,
                       ),
                     ),
@@ -319,6 +333,7 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
   }
 
   Widget _buildLicenseTypeOption(LicenseType type) {
+    final cs = Theme.of(context).colorScheme;
     final isSelected = _selectedType == type;
 
     return Container(
@@ -330,18 +345,18 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             border: Border.all(
-              color: isSelected ? type.color : Colors.grey[300]!,
+              color: isSelected ? type.color : cs.outlineVariant,
               width: isSelected ? 2 : 1,
             ),
             borderRadius: BorderRadius.circular(12),
-            color: isSelected ? type.color.withOpacity(0.1) : null,
+            color: isSelected ? type.color.withValues(alpha:0.1) : null,
           ),
           child: Row(
             children: [
               Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: type.color.withOpacity(0.2),
+                  color: type.color.withValues(alpha:0.2),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Icon(
@@ -368,7 +383,7 @@ class _AddLicenseScreenState extends State<AddLicenseScreen> {
                       _getTypeDescription(type),
                       style: TextStyle(
                         fontSize: 12,
-                        color: Colors.grey[600],
+                        color: cs.onSurfaceVariant,
                       ),
                     ),
                   ],

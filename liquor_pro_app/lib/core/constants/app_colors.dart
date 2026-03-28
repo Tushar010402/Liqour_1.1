@@ -2,10 +2,10 @@ import 'package:flutter/material.dart';
 
 /// Application color scheme - Modern vibrant palette
 class AppColors {
-  // Primary Colors - Rich Purple/Indigo
-  static const Color primary = Color(0xFF6366F1); // Vibrant Indigo
-  static const Color primaryLight = Color(0xFF818CF8);
-  static const Color primaryDark = Color(0xFF4F46E5);
+  // Primary Colors - Bold Blue
+  static const Color primary = Color(0xFF0D47A1); // Bold Blue
+  static const Color primaryLight = Color(0xFF2196F3);
+  static const Color primaryDark = Color(0xFF0A3680);
 
   // Accent Colors - Energetic Orange
   static const Color accent = Color(0xFFFF6B35); // Vibrant Orange
@@ -13,7 +13,7 @@ class AppColors {
   static const Color accentDark = Color(0xFFE85A2A);
 
   // Background Colors
-  static const Color background = Color(0xFFF8FAFC);
+  static const Color background = Color(0xFFF5F6FA);
   static const Color surface = Color(0xFFFFFFFF);
   static const Color surfaceDark = Color(0xFF0F172A);
 
@@ -33,7 +33,7 @@ class AppColors {
 
   // Status Colors - Modern vibrant versions
   static const Color success = Color(0xFF10B981); // Emerald
-  static const Color error = Color(0xFFEF4444); // Red
+  static const Color error = Color(0xFFE53935); // Red
   static const Color warning = Color(0xFFF59E0B); // Amber
   static const Color info = Color(0xFF3B82F6); // Blue
 
@@ -49,7 +49,7 @@ class AppColors {
 
   // Gradient Colors - Modern vibrant gradients
   static const LinearGradient primaryGradient = LinearGradient(
-    colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+    colors: [Color(0xFF0D47A1), Color(0xFF2196F3)],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );
@@ -80,7 +80,7 @@ class AppColors {
 
   // Chart Colors - Modern vibrant palette
   static const List<Color> chartColors = [
-    Color(0xFF6366F1), // Indigo
+    Color(0xFF0D47A1), // Blue
     Color(0xFFFF6B35), // Orange
     Color(0xFF10B981), // Emerald
     Color(0xFFEF4444), // Red
@@ -115,7 +115,7 @@ class AppColors {
 
   // Category Colors - Rich vibrant colors for different sections
   static const Color salesColor = Color(0xFF10B981); // Emerald green
-  static const Color inventoryColor = Color(0xFF6366F1); // Indigo
+  static const Color inventoryColor = Color(0xFF0D47A1); // Blue
   static const Color financeColor = Color(0xFFF59E0B); // Amber
   static const Color exciseColor = Color(0xFFA855F7); // Purple
   static const Color reportsColor = Color(0xFF3B82F6); // Blue
@@ -127,4 +127,10 @@ class AppColors {
   static const Color danger = Color(0xFFDC2626); // Dark red
   static const Color safe = Color(0xFF059669); // Green
   static const Color neutral = Color(0xFF6B7280); // Gray
+
+  // New design token colors
+  static const Color darkCard = Color(0xFF0D1B3E);
+  static const Color inputBackground = Color(0xFFECEEF3);
+  static const Color borderLight = Color(0xFFD0D5DD);
+  static const Color borderLighter = Color(0xFFEAEDF1);
 }

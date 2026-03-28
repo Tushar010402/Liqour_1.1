@@ -215,7 +215,7 @@ class PrefKeys {
   static const String lastSelectedSubcategory = 'last_selected_subcategory';
 
   // UI Preferences
-  static const String theme = 'theme'; // 'light' or 'dark'
+  static const String theme = 'theme'; // 'warm_white', 'light', or 'dark'
   static const String language = 'language';
   static const String gridView = 'grid_view'; // true for grid, false for list
   static const String showStockInput = 'show_stock_input';
@@ -293,7 +293,7 @@ class UserPreferences {
   }
 
   String getTheme() {
-    return _prefs.getString(PrefKeys.theme, defaultValue: 'light')!;
+    return _prefs.getString(PrefKeys.theme, defaultValue: 'warm_white')!;
   }
 
   bool isDarkMode() {

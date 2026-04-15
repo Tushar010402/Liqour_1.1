@@ -12,6 +12,7 @@ class PurchaReportItem {
   final String productId;
   final String brandName;
   final String productName;
+  final String displayName;
   final String size;
   final String categoryName;
   final int openingStock;
@@ -27,6 +28,7 @@ class PurchaReportItem {
     required this.productId,
     required this.brandName,
     required this.productName,
+    this.displayName = '',
     required this.size,
     required this.categoryName,
     required this.openingStock,
@@ -44,6 +46,7 @@ class PurchaReportItem {
       productId: json['product_id'] ?? '',
       brandName: json['brand_name'] ?? '',
       productName: json['product_name'] ?? '',
+      displayName: json['display_name'] ?? '',
       size: json['size'] ?? '',
       categoryName: json['category_name'] ?? '',
       openingStock: json['opening_stock'] ?? 0,

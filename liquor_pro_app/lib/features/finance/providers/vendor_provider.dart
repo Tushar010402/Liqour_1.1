@@ -363,4 +363,15 @@ class VendorProvider with ChangeNotifier {
       await selectVendor(_selectedVendor!.id);
     }
   }
+
+  /// Reset all state — called on logout to prevent stale data
+  void reset() {
+    _vendors = [];
+    _selectedVendor = null;
+    _selectedVendorTransactions = [];
+    _isLoading = false;
+    _isLoadingTransactions = false;
+    _errorMessage = null;
+    notifyListeners();
+  }
 }

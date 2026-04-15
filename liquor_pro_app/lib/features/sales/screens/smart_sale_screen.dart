@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../core/constants/app_colors.dart';
@@ -1856,6 +1857,9 @@ class _SmartSaleScreenState extends State<SmartSaleScreen> with WidgetsBindingOb
       _processingStatus = 'Starting...';
     });
 
+    // Keep screen awake during AI processing
+    try { await WakelockPlus.enable(); } catch (_) {}
+
     try {
       debugPrint('📤 Smart Sale - Processing ${images.length} images');
 
@@ -1897,6 +1901,7 @@ class _SmartSaleScreenState extends State<SmartSaleScreen> with WidgetsBindingOb
         SnackbarHelper.showError(context, 'Error: $e');
       }
     } finally {
+      try { await WakelockPlus.disable(); } catch (_) {}
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -2389,6 +2394,9 @@ class _SmartSaleResultPageState extends State<SmartSaleResultPage> with WidgetsB
           'receipt': item.receiptQty,
           'total_stock': item.total,
           'closing_stock': item.total - editedQty,
+          // Alias learning fields — backend uses these to improve future matching
+          'ocr_text': item.ocrText ?? item.brandName,
+          'was_corrected': false, // Flutter doesn't have alternative selection UI yet
         });
       }
 

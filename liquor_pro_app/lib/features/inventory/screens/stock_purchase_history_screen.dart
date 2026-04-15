@@ -706,7 +706,7 @@ class _StockPurchaseHistoryScreenState
                       _buildDetailRow('Subtotal',
                           _currencyFormat.format(purchase.subtotal)),
                       _buildDetailRow(
-                          'TDS (1%)', _currencyFormat.format(purchase.tdsAmount)),
+                          'TCS (2%)', _currencyFormat.format(purchase.tcsAmount)),
                       // Show round off if not zero
                       if (purchase.roundOff != 0)
                         _buildDetailRow(

@@ -24,6 +24,10 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.1.0" apply false
     // Firebase Google Services plugin
     id("com.google.gms.google-services") version "4.4.2" apply false
+    // Firebase Crashlytics plugin
+    id("com.google.firebase.crashlytics") version "3.0.3" apply false
+    // Firebase Performance plugin
+    id("com.google.firebase.firebase-perf") version "1.4.2" apply false
 }
 
 include(":app")

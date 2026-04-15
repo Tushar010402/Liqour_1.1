@@ -9,15 +9,19 @@ import '../../sales/providers/expense_header_provider.dart';
 /// Shows all active UP liquor shop expense categories with amount inputs.
 class AddExpenseSheet extends StatefulWidget {
   final void Function(Map<String, double> expenses)? onAdd;
+  final Map<String, double>? initialExpenses;
 
-  const AddExpenseSheet({super.key, this.onAdd});
+  const AddExpenseSheet({super.key, this.onAdd, this.initialExpenses});
 
-  static Future<void> show(BuildContext context, {void Function(Map<String, double>)? onAdd}) {
+  static Future<void> show(BuildContext context, {
+    void Function(Map<String, double>)? onAdd,
+    Map<String, double>? initialExpenses,
+  }) {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => AddExpenseSheet(onAdd: onAdd),
+      builder: (_) => AddExpenseSheet(onAdd: onAdd, initialExpenses: initialExpenses),
     );
   }
 
@@ -39,7 +43,11 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
     final provider = context.read<ExpenseHeaderProvider>();
     _activeHeaders = provider.allActiveHeaders;
     for (final header in _activeHeaders) {
-      _controllers[header.id] = TextEditingController();
+      // Backend stores expenses by header name, not ID
+      final initial = widget.initialExpenses?[header.name];
+      _controllers[header.id] = TextEditingController(
+        text: initial != null && initial > 0 ? initial.toStringAsFixed(0) : '',
+      );
     }
   }
 

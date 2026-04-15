@@ -12,6 +12,7 @@ import '../../inventory/providers/product_provider.dart';
 import '../providers/daily_sales_provider.dart';
 import 'ai_sales_entry_screen.dart';
 import 'daily_sales_entry_screen.dart';
+import 'sales_summary_screen.dart';
 
 /// Local asset paths for sales setup images
 class _SalesAssets {
@@ -39,15 +40,16 @@ class SalesEntrySetupScreen extends StatefulWidget {
   /// Optional initial date — when passed from dashboard, this date is pre-selected
   final DateTime? initialDate;
   final String? initialDateLabel;
+  final String? initialRangeLabel;
 
-  const SalesEntrySetupScreen({super.key, this.initialDate, this.initialDateLabel});
+  const SalesEntrySetupScreen({super.key, this.initialDate, this.initialDateLabel, this.initialRangeLabel});
 
   @override
   State<SalesEntrySetupScreen> createState() => _SalesEntrySetupScreenState();
 }
 
 class _SalesEntrySetupScreenState extends State<SalesEntrySetupScreen> {
-  SalesEntryMode _mode = SalesEntryMode.manual;
+  SalesEntryMode _mode = SalesEntryMode.ai;
   late String _selectedDateLabel;
   late DateTime _selectedDate;
   bool _isLoadingProducts = true;
@@ -69,7 +71,13 @@ class _SalesEntrySetupScreenState extends State<SalesEntrySetupScreen> {
   void initState() {
     super.initState();
     _selectedDate = widget.initialDate ?? DateTime.now().subtract(const Duration(days: 1));
-    _selectedDateLabel = widget.initialDateLabel ?? 'Yesterday';
+    if (widget.initialRangeLabel != null) {
+      _selectedDateLabel = widget.initialRangeLabel!;
+      _activeRangeLabel = widget.initialRangeLabel;
+      _stripSelectedDate = _selectedDate;
+    } else {
+      _selectedDateLabel = widget.initialDateLabel ?? 'Yesterday';
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadData());
   }
 
@@ -111,7 +119,7 @@ class _SalesEntrySetupScreenState extends State<SalesEntrySetupScreen> {
       await salesProvider.fetchRecords(
         shopId: shopId,
         startDate: _selectedDate,
-        endDate: _selectedDate,
+        endDate: _selectedDate.add(const Duration(days: 1)),
       );
 
       final records = salesProvider.records;
@@ -257,10 +265,7 @@ class _SalesEntrySetupScreenState extends State<SalesEntrySetupScreen> {
       final products = _getProductsForCategory(category);
       final sizes = _extractSizesFromProducts(products);
       final allSubmitted = sizes.isNotEmpty && sizes.every((s) => _submittedSizes.contains(s));
-      if (allSubmitted) {
-        SnackbarHelper.showInfo(context, '$category sales already submitted for ${DateFormat('dd MMM').format(_selectedDate)}');
-        return;
-      }
+      // Allow navigation even when all submitted — user can view summaries
     }
 
     HapticFeedbackUtil.medium();
@@ -268,7 +273,8 @@ class _SalesEntrySetupScreenState extends State<SalesEntrySetupScreen> {
     final products = _getProductsForCategory(category);
     final sizes = _extractSizesFromProducts(products);
 
-    if (sizes.isEmpty) {
+    // Beer: skip size selection — go directly to entry with all sizes combined
+    if (sizes.isEmpty || category == 'Beer') {
       final result = await Navigator.push<String>(
         context,
         MaterialPageRoute(
@@ -487,20 +493,39 @@ class _SalesEntrySetupScreenState extends State<SalesEntrySetupScreen> {
 
   Widget _buildModeTab(String label, SalesEntryMode mode) {
     final isSelected = _mode == mode;
+    final isAI = mode == SalesEntryMode.ai;
     return Expanded(
       child: GestureDetector(
         onTap: () { HapticFeedbackUtil.selection(); setState(() => _mode = mode); },
         child: Container(
           height: 42,
           decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFF3855B3) : Colors.transparent,
+            color: isSelected
+                ? (isAI ? const Color(0xFF1A1A2E) : const Color(0xFF3855B3))
+                : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
+            gradient: isSelected && isAI ? const LinearGradient(
+              colors: [Color(0xFF1A1A2E), Color(0xFF2D1B69)],
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+            ) : null,
           ),
           alignment: Alignment.center,
-          child: Text(label, style: _body(
-            size: 14, weight: FontWeight.w700,
-            color: isSelected ? Colors.white : const Color(0xFF888888),
-          )),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isAI) ...[
+                Icon(Icons.workspace_premium,
+                  size: 16,
+                  color: isSelected ? const Color(0xFFFFD700) : const Color(0xFFBBBBBB),
+                ),
+                const SizedBox(width: 5),
+              ],
+              Text(label, style: _body(
+                size: 14, weight: FontWeight.w700,
+                color: isSelected ? Colors.white : const Color(0xFF888888),
+              )),
+            ],
+          ),
         ),
       ),
     );
@@ -763,6 +788,7 @@ class _SalesCapacityScreenState extends State<_SalesCapacityScreen> {
   late DateTime _selectedDate;
   String? _activeRangeLabel;
   DateTime? _stripSelectedDate;
+  late Set<String> _submittedSizes;
 
   @override
   void initState() {
@@ -772,6 +798,7 @@ class _SalesCapacityScreenState extends State<_SalesCapacityScreen> {
     _selectedDateLabel = widget.selectedDateLabel;
     _activeRangeLabel = widget.activeRangeLabel;
     _stripSelectedDate = widget.stripSelectedDate;
+    _submittedSizes = Set<String>.from(widget.submittedSizes);
   }
 
   String get _category => widget.category;
@@ -808,31 +835,102 @@ class _SalesCapacityScreenState extends State<_SalesCapacityScreen> {
     return '';
   }
 
-  Map<String, _SizeStats> _getSizeStats() {
+  /// Size range definitions
+  static const _beerRanges = [
+    ('330ml & Below', 0, 400, 1),
+    ('500ml', 401, 550, 2),
+    ('650ml', 551, 999, 3),
+    ('Keg/Bulk', 1000, 999999, 4),
+  ];
+  static const _nonBeerRanges = [
+    ('90ml (Nip)', 0, 100, 1),
+    ('180ml (Quarter)', 101, 250, 2),
+    ('375ml (Half)', 251, 400, 3),
+    ('750ml (Full)', 401, 999, 4),
+    ('1L+ (Large)', 1000, 999999, 5),
+  ];
+
+  int _sizeToMl(String size) {
+    final num = int.tryParse(size.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+    if (size.toUpperCase().contains('L') && !size.toUpperCase().contains('ML') && num < 100) return num * 1000;
+    return num;
+  }
+
+  String? _sizeToRange(String size) {
+    final ml = _sizeToMl(size);
+    final ranges = _category == 'Beer' ? _beerRanges : _nonBeerRanges;
+    for (final (label, minMl, maxMl, _) in ranges) {
+      if (ml >= minMl && ml <= maxMl) return label;
+    }
+    return null;
+  }
+
+  /// Get actual sizes within a range
+  List<String> _actualSizesInRange(String rangeLabel) {
     final products = _getProductsForCategory();
-    final stats = <String, _SizeStats>{};
+    final sizes = <String>{};
     for (var p in products) {
       final size = _extractProductSize(p);
       if (size.isEmpty) continue;
+      if (_sizeToRange(size) == rangeLabel) sizes.add(size);
+    }
+    return sizes.toList()..sort((a, b) => _sizeToMl(a).compareTo(_sizeToMl(b)));
+  }
+
+  Map<String, _SizeStats> _getSizeStats() {
+    final products = _getProductsForCategory();
+    final ranges = _category == 'Beer' ? _beerRanges : _nonBeerRanges;
+    final stats = <String, _SizeStats>{};
+    // Initialize all ranges
+    for (final (label, _, _, _) in ranges) {
+      stats[label] = _SizeStats(size: label);
+    }
+    // Bucket products into ranges
+    for (var p in products) {
+      final size = _extractProductSize(p);
+      if (size.isEmpty) continue;
+      final range = _sizeToRange(size);
+      if (range == null) continue;
       final stock = widget.stockMap[p.id];
       final qty = stock?.quantity ?? 0;
-      if (!stats.containsKey(size)) stats[size] = _SizeStats(size: size);
-      stats[size]!.totalStock += qty;
-      stats[size]!.totalValue += p.sellingPrice * qty;
+      stats[range]!.totalStock += qty;
+      stats[range]!.totalValue += (p.mrp > 0 ? p.mrp : p.sellingPrice) * qty;
     }
-    final sorted = stats.values.toList()
-      ..sort((a, b) {
-        final aNum = int.tryParse(a.size.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-        final bNum = int.tryParse(b.size.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-        return aNum.compareTo(bNum);
-      });
-    return {for (var s in sorted) s.size: s};
+    // Remove empty ranges
+    stats.removeWhere((_, v) => v.totalStock == 0 && v.totalValue == 0);
+    return stats;
   }
 
   String _formatValue(double value) {
     if (value >= 100000) return '${(value / 100000).toStringAsFixed(1)}L';
     if (value >= 1000) return '${(value / 1000).toStringAsFixed(0)}K';
     return value.toStringAsFixed(0);
+  }
+
+  Future<void> _reloadSubmittedSizes() async {
+    if (!mounted) return;
+    final shopId = context.read<ShopSelectionProvider>().selectedShopId;
+    if (shopId == null) return;
+    try {
+      final salesProvider = context.read<DailySalesProvider>();
+      await salesProvider.fetchRecords(
+        shopId: shopId,
+        startDate: _selectedDate,
+        endDate: _selectedDate.add(const Duration(days: 1)),
+      );
+      final records = salesProvider.records;
+      final sizes = <String>{};
+      for (final record in records) {
+        if (record.status.toLowerCase() == 'rejected') continue;
+        for (final item in record.items) {
+          final size = item.size ?? '';
+          if (size.isNotEmpty) sizes.add(ProductConstants.normalizeSize(size));
+        }
+      }
+      if (mounted) setState(() => _submittedSizes = sizes);
+    } catch (e) {
+      debugPrint('[CapacityScreen] Error reloading records: $e');
+    }
   }
 
   void _onDatePillTapped(String label) async {
@@ -868,11 +966,13 @@ class _SalesCapacityScreenState extends State<_SalesCapacityScreen> {
         _activeRangeLabel = null; _stripSelectedDate = null;
       });
     }
+    _reloadSubmittedSizes();
   }
 
   void _onStripDateTapped(DateTime date) {
     HapticFeedbackUtil.selection();
     setState(() { _stripSelectedDate = date; _selectedDate = date; });
+    _reloadSubmittedSizes();
   }
 
   Widget _buildDateStrip() {
@@ -1122,6 +1222,7 @@ class _SalesCapacityScreenState extends State<_SalesCapacityScreen> {
 
   Widget _modeTab(String label, SalesEntryMode tabMode, bool isAI) {
     final isSelected = _currentMode == tabMode;
+    final isAITab = tabMode == SalesEntryMode.ai;
     return Expanded(
       child: GestureDetector(
         onTap: () {
@@ -1131,116 +1232,172 @@ class _SalesCapacityScreenState extends State<_SalesCapacityScreen> {
         child: Container(
           height: 42,
           decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFF3855B3) : Colors.transparent,
+            color: isSelected
+                ? (isAITab ? const Color(0xFF1A1A2E) : const Color(0xFF3855B3))
+                : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
+            gradient: isSelected && isAITab ? const LinearGradient(
+              colors: [Color(0xFF1A1A2E), Color(0xFF2D1B69)],
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+            ) : null,
           ),
           alignment: Alignment.center,
-          child: Text(label, style: _body(
-            size: 14, weight: FontWeight.w700,
-            color: isSelected ? Colors.white : const Color(0xFF888888),
-          )),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isAITab) ...[
+                Icon(Icons.workspace_premium, size: 16,
+                  color: isSelected ? const Color(0xFFFFD700) : const Color(0xFFBBBBBB)),
+                const SizedBox(width: 5),
+              ],
+              Text(label, style: _body(
+                size: 14, weight: FontWeight.w700,
+                color: isSelected ? Colors.white : const Color(0xFF888888),
+              )),
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildSizeRow(_SizeStats stat) {
-    final isSubmitted = widget.submittedSizes.contains(stat.size);
+    // Check if ANY actual size in this range is submitted
+    final actualSizes = _actualSizesInRange(stat.size);
+    final isSubmitted = actualSizes.any((s) => _submittedSizes.contains(s));
 
     return GestureDetector(
-      onTap: isSubmitted ? () {
-        SnackbarHelper.showInfo(context, '${stat.size} $_categoryLabel already submitted');
-      } : () async {
+      onTap: () async {
         HapticFeedbackUtil.medium();
-        final result = await Navigator.push<String>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => _currentMode == SalesEntryMode.ai
-                ? AISalesEntryScreen(
-                    category: _category,
-                    size: stat.size,
-                    selectedDate: _selectedDate,
-                  )
-                : DailySalesEntryScreen(
-                    showHeader: true,
-                    initialCategoryName: _category,
-                    initialSize: stat.size,
-                    selectedDate: _selectedDate,
-                  ),
-          ),
-        );
-        if (result == 'submitted' && mounted) {
-          Navigator.pop(context, 'submitted');
+        if (isSubmitted) {
+          // Convert submitted DailySalesItems → SalesSummaryItems and show the same summary screen
+          final salesProvider = context.read<DailySalesProvider>();
+          final records = salesProvider.records;
+          final items = <SalesSummaryItem>[];
+          for (final record in records) {
+            if (record.status.toLowerCase() == 'rejected') continue;
+            for (final item in record.items) {
+              // Filter by category
+              final catName = (item.categoryName ?? '').toLowerCase();
+              final matchesCategory = _category == 'Beer' ? catName.contains('beer') : !catName.contains('beer');
+              if (!matchesCategory) continue;
+              // Filter by size range
+              final itemSize = ProductConstants.normalizeSize(item.size ?? '');
+              if (!actualSizes.contains(itemSize)) continue;
+              items.add(SalesSummaryItem(
+                productId: item.productId,
+                name: item.productName ?? item.brandName ?? 'Unknown',
+                price: item.unitPrice,
+                quantity: item.quantity,
+                mrp: item.unitPrice,
+                stock: item.openingStock,
+                closingStock: item.closingStock,
+              ));
+            }
+          }
+          // Sort by price ascending
+          items.sort((a, b) => a.price.compareTo(b.price));
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => SalesSummaryScreen(
+              items: items,
+              saleDate: DateFormat('dd MMM yyyy').format(_selectedDate),
+              saleCategory: _category == 'Beer' ? 'Beer' : 'Whisky',
+              saleSize: stat.size,
+              // No onSubmit — read-only view
+            ),
+          ));
+        } else {
+          // Enter new sale — pass the range label so the entry screen auto-selects the matching chip
+          final result = await Navigator.push<String>(
+            context,
+            MaterialPageRoute(
+              builder: (_) => _currentMode == SalesEntryMode.ai
+                  ? AISalesEntryScreen(
+                      category: _category,
+                      size: stat.size,
+                      selectedDate: _selectedDate,
+                    )
+                  : DailySalesEntryScreen(
+                      showHeader: true,
+                      initialCategoryName: _category,
+                      initialSize: stat.size,
+                      selectedDate: _selectedDate,
+                    ),
+            ),
+          );
+          if (result == 'submitted' && mounted) {
+            Navigator.pop(context, 'submitted');
+          }
         }
       },
-      child: Opacity(
-        opacity: isSubmitted ? 0.45 : 1.0,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              // Left: bottle icon in grey circle
-              Container(
-                width: 34, height: 34,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF0F1F5),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(
-                  _category == 'Beer' ? Icons.sports_bar_rounded : Icons.liquor_rounded,
-                  size: 18, color: const Color(0xFF888888),
-                ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Left: bottle icon
+            Container(
+              width: 34, height: 34,
+              decoration: BoxDecoration(
+                color: isSubmitted ? const Color(0xFFE8F5E9) : const Color(0xFFF0F1F5),
+                borderRadius: BorderRadius.circular(10),
               ),
-              const SizedBox(width: 12),
-              // Middle: name + stats
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${stat.size.replaceAll("ML", "ml")} $_categoryLabel',
-                      style: _body(size: 15, weight: FontWeight.w600),
-                    ),
-                    if (!isSubmitted) ...[
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          SvgPicture.asset('assets/icons/cart_stock.svg', width: 13, height: 13, colorFilter: const ColorFilter.mode(Color(0xFF999999), BlendMode.srcIn)),
-                          const SizedBox(width: 5),
-                          Text('${stat.totalStock}', style: _body(size: 13, weight: FontWeight.w600, color: const Color(0xFF999999))),
-                          const SizedBox(width: 16),
-                          SvgPicture.asset('assets/icons/wallet_income.svg', width: 13, height: 13, colorFilter: const ColorFilter.mode(Color(0xFF999999), BlendMode.srcIn)),
-                          const SizedBox(width: 5),
-                          Text(_formatValue(stat.totalValue), style: _body(size: 13, weight: FontWeight.w600, color: const Color(0xFF999999))),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
+              child: Icon(
+                _category == 'Beer' ? Icons.sports_bar_rounded : Icons.liquor_rounded,
+                size: 18, color: isSubmitted ? const Color(0xFF2E7D32) : const Color(0xFF888888),
               ),
-              const SizedBox(width: 8),
-              // Right: View button or Submitted
-              if (!isSubmitted)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFFD0D5DD)),
+            ),
+            const SizedBox(width: 12),
+            // Middle: name + stats
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${stat.size} $_categoryLabel',
+                    style: _body(size: 15, weight: FontWeight.w600),
                   ),
-                  child: Text('View', style: _body(size: 12, weight: FontWeight.w600, color: const Color(0xFF888888))),
-                )
-              else
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.check_circle, size: 14, color: Color(0xFF2E7D32)),
-                    const SizedBox(width: 4),
-                    Text('Submitted', style: _body(size: 12, weight: FontWeight.w600, color: const Color(0xFF2E7D32))),
-                  ],
-                ),
-            ],
-          ),
+                  if (actualSizes.isNotEmpty)
+                    Text(actualSizes.join(', '), style: _body(size: 11, weight: FontWeight.w500, color: const Color(0xFF999999)), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 3),
+                  if (isSubmitted)
+                    Row(
+                      children: [
+                        const Icon(Icons.check_circle, size: 12, color: Color(0xFF2E7D32)),
+                        const SizedBox(width: 4),
+                        Text('Submitted', style: _body(size: 12, weight: FontWeight.w600, color: const Color(0xFF2E7D32))),
+                      ],
+                    )
+                  else
+                    Row(
+                      children: [
+                        SvgPicture.asset('assets/icons/cart_stock.svg', width: 13, height: 13, colorFilter: const ColorFilter.mode(Color(0xFF999999), BlendMode.srcIn)),
+                        const SizedBox(width: 5),
+                        Text('${stat.totalStock}', style: _body(size: 13, weight: FontWeight.w600, color: const Color(0xFF999999))),
+                        const SizedBox(width: 16),
+                        SvgPicture.asset('assets/icons/wallet_income.svg', width: 13, height: 13, colorFilter: const ColorFilter.mode(Color(0xFF999999), BlendMode.srcIn)),
+                        const SizedBox(width: 5),
+                        Text(_formatValue(stat.totalValue), style: _body(size: 13, weight: FontWeight.w600, color: const Color(0xFF999999))),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            // Right: action button
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                color: isSubmitted ? const Color(0xFF2E7D32).withValues(alpha: 0.08) : Colors.transparent,
+                border: Border.all(color: isSubmitted ? const Color(0xFF2E7D32).withValues(alpha: 0.3) : const Color(0xFFD0D5DD)),
+              ),
+              child: Text(
+                isSubmitted ? 'View Summary' : 'Enter Sale',
+                style: _body(size: 12, weight: FontWeight.w600, color: isSubmitted ? const Color(0xFF2E7D32) : const Color(0xFF888888)),
+              ),
+            ),
+          ],
         ),
       ),
     );

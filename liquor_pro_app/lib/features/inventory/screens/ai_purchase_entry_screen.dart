@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -48,7 +49,8 @@ class AIPurchaseEntryScreen extends StatefulWidget {
 
 class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with TickerProviderStateMixin {
   final ImagePicker _picker = ImagePicker();
-  final List<File> _images = [];
+  final List<File> _images = [];       // Bill/Invoice images
+  final List<File> _gatePassImages = []; // Gate Pass images (optional)
   _Phase _phase = _Phase.upload;
 
   // Processing state
@@ -105,7 +107,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
 
   // ── Image picking ──
 
-  void _showImageSourceSheet() {
+  void _showImageSourceSheet({bool isGatePass = false}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.white,
@@ -117,17 +119,17 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
             const SizedBox(height: 8),
             Container(width: 36, height: 4, decoration: BoxDecoration(color: const Color(0xFFD0D5DD), borderRadius: BorderRadius.circular(2))),
             const SizedBox(height: 16),
-            Text('Add Invoice Image', style: _heading(size: 16, weight: FontWeight.w700)),
+            Text(isGatePass ? 'Add Gate Pass Image' : 'Add Invoice Image', style: _heading(size: 16, weight: FontWeight.w700)),
             const SizedBox(height: 16),
             ListTile(
-              leading: const Icon(Icons.camera_alt_rounded, color: Color(0xFF3855B3)),
+              leading: Icon(Icons.camera_alt_rounded, color: isGatePass ? const Color(0xFF2E7D32) : const Color(0xFF3855B3)),
               title: Text('Camera', style: _body(size: 15, weight: FontWeight.w600)),
-              onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.camera); },
+              onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.camera, isGatePass: isGatePass); },
             ),
             ListTile(
-              leading: const Icon(Icons.photo_library_rounded, color: Color(0xFF3855B3)),
+              leading: Icon(Icons.photo_library_rounded, color: isGatePass ? const Color(0xFF2E7D32) : const Color(0xFF3855B3)),
               title: Text('Gallery', style: _body(size: 15, weight: FontWeight.w600)),
-              onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.gallery); },
+              onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.gallery, isGatePass: isGatePass); },
             ),
             const SizedBox(height: 12),
           ],
@@ -136,14 +138,15 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
     );
   }
 
-  Future<void> _pickImage(ImageSource source) async {
+  Future<void> _pickImage(ImageSource source, {bool isGatePass = false}) async {
     try {
+      final targetList = isGatePass ? _gatePassImages : _images;
       if (source == ImageSource.gallery) {
         final picked = await _picker.pickMultiImage(imageQuality: 90);
         if (picked.isNotEmpty && mounted) {
           setState(() {
             for (final xf in picked) {
-              if (_images.length < 5) _images.add(File(xf.path));
+              if (targetList.length < 5) targetList.add(File(xf.path));
             }
           });
         }
@@ -151,7 +154,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
         final picked = await _picker.pickImage(source: source, imageQuality: 90);
         if (picked != null && mounted) {
           setState(() {
-            if (_images.length < 5) _images.add(File(picked.path));
+            if (targetList.length < 5) targetList.add(File(picked.path));
           });
         }
       }
@@ -350,6 +353,9 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
       _cancelled = false;
     });
 
+    // Keep screen awake during AI processing
+    try { await WakelockPlus.enable(); } catch (_) {}
+
     try {
       final service = SmartPurchaseService(authService);
 
@@ -357,6 +363,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
         images: List<File>.from(_images),
         shopId: shopId,
         invoiceDate: widget.selectedDate,
+        gatePassImages: _gatePassImages.isNotEmpty ? List<File>.from(_gatePassImages) : null,
         onProgress: (current, total, status) {
           if (!mounted || _cancelled) return;
           setState(() {
@@ -365,6 +372,9 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
           });
         },
       );
+
+      // Release WakeLock
+      try { await WakelockPlus.disable(); } catch (_) {}
 
       if (_cancelled || !mounted) return;
 
@@ -390,6 +400,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
         });
       }
     } catch (e) {
+      try { await WakelockPlus.disable(); } catch (_) {}
       if (_cancelled || !mounted) return;
       setState(() {
         _phase = _Phase.error;
@@ -400,6 +411,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
 
   void _cancelProcessing() {
     _cancelled = true;
+    try { WakelockPlus.disable(); } catch (_) {}
     setState(() => _phase = _Phase.upload);
   }
 
@@ -427,6 +439,203 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
     });
   }
 
+  // ── Edit item inline ──
+
+  void _showEditSheet(SmartPurchaseItem item) {
+    final qtyController = TextEditingController(text: item.effectiveQuantity.toString());
+    final costController = TextEditingController(
+      text: item.effectiveCostPrice > 0 ? item.effectiveCostPrice.toStringAsFixed(2) : '',
+    );
+    final dutyController = TextEditingController(
+      text: item.effectiveDutyFee > 0 ? item.effectiveDutyFee.toStringAsFixed(2) : '',
+    );
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(ctx).viewInsets.bottom + 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Handle
+            Center(
+              child: Container(
+                width: 36, height: 4,
+                decoration: BoxDecoration(color: const Color(0xFFD0D5DD), borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Title
+            Text('Edit Purchase Item', style: _heading(size: 16, weight: FontWeight.w700)),
+            const SizedBox(height: 12),
+
+            // Invoice brand info
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8F9FB),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE8EAF0)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.receipt_long, size: 14, color: Color(0xFF666666)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          '${item.brandName} · ${item.size}',
+                          style: _body(size: 12, weight: FontWeight.w700, color: const Color(0xFF333333)),
+                          maxLines: 1, overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (item.resolvedBrandName != item.brandName) ...[
+                    const SizedBox(height: 4),
+                    GestureDetector(
+                      onTap: () async {
+                        Navigator.pop(ctx);
+                        await _resolveItem(item);
+                        if (mounted) _showEditSheet(item);
+                      },
+                      child: Row(
+                        children: [
+                          const Icon(Icons.arrow_forward, size: 12, color: Color(0xFF3855B3)),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              'Matched: ${item.resolvedBrandName}',
+                              style: _body(size: 11, weight: FontWeight.w600, color: const Color(0xFF3855B3)),
+                              maxLines: 1, overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text('Change \u25B8', style: _body(size: 11, weight: FontWeight.w700, color: const Color(0xFF3855B3))),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Editable fields
+            Row(
+              children: [
+                Expanded(
+                  child: _editField('Qty (bottles)', qtyController, isInt: true),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _editField('Cost Price/btl', costController),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _editField('Duty/btl', dutyController),
+                ),
+              ],
+            ),
+
+            // DB reference
+            if (item.dbCostPrice != null && item.dbCostPrice! > 0) ...[
+              const SizedBox(height: 8),
+              Text(
+                'DB Cost: \u20B9${item.dbCostPrice!.toStringAsFixed(2)}',
+                style: _body(size: 11, color: const Color(0xFF999999)),
+              ),
+            ],
+
+            const SizedBox(height: 20),
+
+            // Buttons
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFD0D5DD)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    child: Text('Cancel', style: _body(size: 14, weight: FontWeight.w600, color: const Color(0xFF666666))),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      setState(() {
+                        final qty = int.tryParse(qtyController.text);
+                        final cost = double.tryParse(costController.text);
+                        final duty = double.tryParse(dutyController.text);
+                        if (qty != null && qty > 0) item.userQuantity = qty;
+                        if (cost != null && cost > 0) item.userCostPrice = cost;
+                        if (duty != null && duty >= 0) item.userDutyFee = duty;
+                      });
+                      Navigator.pop(ctx);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF2962FF),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      elevation: 0,
+                    ),
+                    child: Text('Save Changes', style: _body(size: 14, weight: FontWeight.w700, color: Colors.white)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _editField(String label, TextEditingController controller, {bool isInt = false}) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: _body(size: 11, weight: FontWeight.w600, color: const Color(0xFF888888))),
+        const SizedBox(height: 4),
+        TextField(
+          controller: controller,
+          keyboardType: TextInputType.numberWithOptions(decimal: !isInt),
+          style: _body(size: 14, weight: FontWeight.w700),
+          decoration: InputDecoration(
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: Color(0xFFD0D5DD)),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: Color(0xFFD0D5DD)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: Color(0xFF2962FF), width: 1.5),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   // ── Navigate to PurchaseEntryScreen ──
 
   void _proceedToPurchaseEntry() {
@@ -439,13 +648,13 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
       if (productId == null || productId.isEmpty) continue;
       if (item.quantityBottles <= 0) continue;
 
-      prefill[productId] = item.quantityBottles;
+      prefill[productId] = item.effectiveQuantity;
 
       final warnings = <String>[];
       if (item.hasRateMismatch) {
         warnings.add(
-          'Invoice rate \u20B9${item.ratePerBottle.toStringAsFixed(0)} '
-          'differs from cost \u20B9${item.dbCostPrice?.toStringAsFixed(0) ?? "?"}',
+          'Invoice cost \u20B9${item.effectiveCostPrice.toStringAsFixed(0)} '
+          'differs from DB \u20B9${item.dbCostPrice?.toStringAsFixed(0) ?? "?"}',
         );
       }
       if (item.needsReview) {
@@ -457,12 +666,13 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
 
       meta[productId] = AIPurchaseItemMeta(
         confidence: item.matchConfidence,
-        aiRate: item.ratePerBottle,
+        aiRate: item.effectiveCostPrice,
         aiBrandName: item.brandName,
         aiSize: item.size,
-        quantityBottles: item.quantityBottles,
+        quantityBottles: item.effectiveQuantity,
         quantityUnit: item.quantityUnit,
         bottlesPerCase: item.bottlesPerCase,
+        dutyFee: item.effectiveDutyFee,
         warnings: warnings,
       );
     }
@@ -586,11 +796,113 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
             ),
           ),
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 16),
+        // ── BILL / INVOICE SECTION ──
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            children: [
+              const Icon(Icons.receipt_long_rounded, size: 18, color: Color(0xFF3855B3)),
+              const SizedBox(width: 8),
+              Text('Bill / Invoice', style: _heading(size: 14, weight: FontWeight.w700, color: const Color(0xFF3855B3))),
+              const Spacer(),
+              Text('${_images.length}/5', style: _body(size: 12, color: const Color(0xFF888888))),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
         Expanded(
+          flex: 3,
           child: _images.isEmpty ? _buildEmptyImageState() : _buildImageGrid(),
         ),
+        // ── GATE PASS SECTION (Optional) ──
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+          child: Row(
+            children: [
+              const Icon(Icons.assignment_rounded, size: 18, color: Color(0xFF2E7D32)),
+              const SizedBox(width: 8),
+              Text('Gate Pass', style: _heading(size: 14, weight: FontWeight.w700, color: const Color(0xFF2E7D32))),
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5E9),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text('Optional', style: _body(size: 10, weight: FontWeight.w600, color: const Color(0xFF2E7D32))),
+              ),
+              const Spacer(),
+              if (_gatePassImages.isEmpty)
+                GestureDetector(
+                  onTap: () => _showImageSourceSheet(isGatePass: true),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F5E9),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF81C784)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.add_rounded, size: 16, color: Color(0xFF2E7D32)),
+                        const SizedBox(width: 4),
+                        Text('Add', style: _body(size: 12, weight: FontWeight.w600, color: const Color(0xFF2E7D32))),
+                      ],
+                    ),
+                  ),
+                )
+              else
+                Text('${_gatePassImages.length}/5', style: _body(size: 12, color: const Color(0xFF888888))),
+            ],
+          ),
+        ),
+        if (_gatePassImages.isNotEmpty)
+          SizedBox(
+            height: 80,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+              itemCount: _gatePassImages.length + (_gatePassImages.length < 5 ? 1 : 0),
+              itemBuilder: (_, i) {
+                if (i == _gatePassImages.length) {
+                  return GestureDetector(
+                    onTap: () => _showImageSourceSheet(isGatePass: true),
+                    child: Container(
+                      width: 64, height: 72, margin: const EdgeInsets.only(right: 8),
+                      decoration: BoxDecoration(color: const Color(0xFFF5F7FA), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFF81C784))),
+                      child: const Icon(Icons.add_rounded, size: 22, color: Color(0xFF2E7D32)),
+                    ),
+                  );
+                }
+                return Stack(
+                  children: [
+                    Container(
+                      width: 64, height: 72, margin: const EdgeInsets.only(right: 8),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.file(_gatePassImages[i], fit: BoxFit.cover),
+                      ),
+                    ),
+                    Positioned(
+                      top: 2, right: 10,
+                      child: GestureDetector(
+                        onTap: () => setState(() => _gatePassImages.removeAt(i)),
+                        child: Container(
+                          width: 20, height: 20,
+                          decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                          child: const Icon(Icons.close, size: 12, color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
         if (_images.isNotEmpty) ...[
+          const SizedBox(height: 8),
           const Divider(height: 1, color: Color(0xFFE8EAF0)),
           Padding(
             padding: EdgeInsets.fromLTRB(20, 14, 20, MediaQuery.of(context).padding.bottom + 18),
@@ -612,7 +924,8 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
                     children: [
                       const Icon(Icons.auto_awesome, size: 20, color: Colors.white),
                       const SizedBox(width: 8),
-                      Text('Proceed with AI', style: _body(size: 16, weight: FontWeight.w700, color: Colors.white)),
+                      Text(_gatePassImages.isNotEmpty ? 'Process Bill + Gate Pass' : 'Proceed with AI',
+                        style: _body(size: 16, weight: FontWeight.w700, color: Colors.white)),
                     ],
                   ),
                 ),
@@ -932,53 +1245,118 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
   Widget _buildMatchedRow(SmartPurchaseItem item) {
     final confPct = (item.matchConfidence * 100).toInt();
     final qtyLabel = item.quantityUnit == 'cases'
-        ? '${item.quantityRaw}cs (${item.quantityBottles}btl)'
-        : '${item.quantityBottles}btl';
+        ? '${item.quantityRaw}cs (${item.effectiveQuantity}btl)'
+        : '${item.effectiveQuantity}btl';
+    final nameMismatch = item.hasNameMismatch;
+    final isEdited = item.userCostPrice != null || item.userDutyFee != null || item.userQuantity != null;
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE0E0E0)),
-      ),
-      child: Row(
-        children: [
-          _confidenceDot(item.matchConfidence),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return GestureDetector(
+      onTap: () => _showEditSheet(item),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isEdited ? const Color(0xFFF1F8E9) : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: isEdited ? const Color(0xFFC8E6C9) : const Color(0xFFE0E0E0)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Row 1: Invoice brand name + confidence
+            Row(
               children: [
-                Text(
-                  item.matchedBrandName ?? item.brandName,
-                  style: _body(size: 13, weight: FontWeight.w700),
-                  maxLines: 1, overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    _sizePill(item.size),
-                    const SizedBox(width: 8),
-                    Text(qtyLabel, style: _body(size: 11, color: const Color(0xFF666666))),
-                    const SizedBox(width: 8),
-                    Text('\u20B9${item.ratePerBottle.toStringAsFixed(0)}/btl',
-                      style: _body(size: 11, color: const Color(0xFF666666))),
-                  ],
-                ),
-                if (item.hasRateMismatch) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    'Rate \u20B9${item.ratePerBottle.toStringAsFixed(0)} vs DB \u20B9${item.dbCostPrice?.toStringAsFixed(0)}',
-                    style: _body(size: 10, color: const Color(0xFFF57C00)),
+                _confidenceDot(item.matchConfidence),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    item.brandName,
+                    style: _body(size: 13, weight: FontWeight.w700),
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
                   ),
-                ],
+                ),
+                Text('$confPct%', style: _body(size: 12, weight: FontWeight.w700, color: const Color(0xFF4CAF50))),
               ],
             ),
-          ),
-          Text('$confPct%', style: _body(size: 12, weight: FontWeight.w700, color: const Color(0xFF4CAF50))),
-        ],
+
+            // Row 2: Matched product name (if different)
+            if (nameMismatch && item.matchedBrandName != null) ...[
+              Padding(
+                padding: const EdgeInsets.only(left: 26, top: 2),
+                child: Row(
+                  children: [
+                    const Icon(Icons.arrow_forward, size: 11, color: Color(0xFFF57C00)),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        'Matched: ${item.resolvedBrandName}',
+                        style: _body(size: 11, weight: FontWeight.w600, color: const Color(0xFFF57C00)),
+                        maxLines: 1, overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 6),
+
+            // Row 3: Size + Qty + pricing pills
+            Padding(
+              padding: const EdgeInsets.only(left: 26),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  _sizePill(item.size),
+                  _dataPill(qtyLabel),
+                  _dataPill('Cost \u20B9${item.effectiveCostPrice.toStringAsFixed(0)}/btl'),
+                  if (item.dbCostPrice != null && item.dbCostPrice! > 0)
+                    _dataPill('DB \u20B9${item.dbCostPrice!.toStringAsFixed(0)}',
+                      highlight: item.hasRateMismatch),
+                  if (item.effectiveDutyFee > 0)
+                    _dataPill('Duty \u20B9${item.effectiveDutyFee.toStringAsFixed(0)}',
+                      color: const Color(0xFF7B1FA2)),
+                ],
+              ),
+            ),
+
+            // Row 4: Edit hint
+            Padding(
+              padding: const EdgeInsets.only(left: 26, top: 5),
+              child: Row(
+                children: [
+                  if (isEdited)
+                    Text('Edited', style: _body(size: 10, weight: FontWeight.w700, color: const Color(0xFF4CAF50))),
+                  const Spacer(),
+                  Text('Edit \u25B8', style: _body(size: 11, weight: FontWeight.w700, color: const Color(0xFF3855B3))),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _dataPill(String text, {bool highlight = false, Color? color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: highlight ? const Color(0xFFFFF3E0) : const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(
+          color: highlight ? const Color(0xFFFFCC80) : const Color(0xFFE0E0E0),
+          width: 0.5,
+        ),
+      ),
+      child: Text(
+        text,
+        style: _body(
+          size: 10,
+          weight: FontWeight.w600,
+          color: color ?? (highlight ? const Color(0xFFF57C00) : const Color(0xFF666666)),
+        ),
       ),
     );
   }
@@ -986,59 +1364,99 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
   Widget _buildReviewRow(SmartPurchaseItem item) {
     final isResolved = item.isResolved;
     final qtyLabel = item.quantityUnit == 'cases'
-        ? '${item.quantityRaw}cs (${item.quantityBottles}btl)'
-        : '${item.quantityBottles}btl';
+        ? '${item.quantityRaw}cs (${item.effectiveQuantity}btl)'
+        : '${item.effectiveQuantity}btl';
+    final confPct = (item.matchConfidence * 100).toInt();
 
     return GestureDetector(
-      onTap: () => _resolveItem(item),
+      onTap: () => isResolved ? _showEditSheet(item) : _resolveItem(item),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 6),
-        padding: const EdgeInsets.all(10),
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: isResolved ? const Color(0xFFF1F8E9) : const Color(0xFFFFF8E1),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: isResolved ? const Color(0xFFC8E6C9) : const Color(0xFFFFE082)),
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _confidenceDot(item.matchConfidence),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
+            // Row 1: Invoice brand name + confidence
+            Row(
+              children: [
+                _confidenceDot(item.matchConfidence),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
                     item.brandName,
                     style: _body(size: 13, weight: FontWeight.w700),
                     maxLines: 1, overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 2),
-                  Row(
-                    children: [
-                      _sizePill(item.size),
-                      const SizedBox(width: 8),
-                      Text(qtyLabel, style: _body(size: 11, color: const Color(0xFF666666))),
-                    ],
-                  ),
-                  if (isResolved && !item.userSkipped) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      'Resolved: ${item.resolvedBrandName}',
-                      style: _body(size: 11, weight: FontWeight.w600, color: const Color(0xFF4CAF50)),
-                      maxLines: 1, overflow: TextOverflow.ellipsis,
+                ),
+                Text('$confPct%', style: _body(size: 12, weight: FontWeight.w700,
+                  color: isResolved ? const Color(0xFF4CAF50) : const Color(0xFFFFA726))),
+              ],
+            ),
+
+            // Row 2: Resolved/status info
+            if (isResolved && !item.userSkipped) ...[
+              Padding(
+                padding: const EdgeInsets.only(left: 26, top: 2),
+                child: Row(
+                  children: [
+                    const Icon(Icons.check_circle, size: 12, color: Color(0xFF4CAF50)),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        'Resolved: ${item.resolvedBrandName}',
+                        style: _body(size: 11, weight: FontWeight.w600, color: const Color(0xFF4CAF50)),
+                        maxLines: 1, overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ] else if (item.userSkipped) ...[
-                    const SizedBox(height: 4),
-                    Text('Skipped', style: _body(size: 11, color: const Color(0xFF999999))),
                   ],
+                ),
+              ),
+            ] else if (item.userSkipped) ...[
+              Padding(
+                padding: const EdgeInsets.only(left: 26, top: 2),
+                child: Text('Skipped', style: _body(size: 11, color: const Color(0xFF999999))),
+              ),
+            ] else ...[
+              Padding(
+                padding: const EdgeInsets.only(left: 26, top: 2),
+                child: Text('Tap to resolve', style: _body(size: 11, color: const Color(0xFFFFA726))),
+              ),
+            ],
+
+            const SizedBox(height: 6),
+
+            // Row 3: Size + Qty + pricing pills
+            Padding(
+              padding: const EdgeInsets.only(left: 26),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  _sizePill(item.size),
+                  _dataPill(qtyLabel),
+                  if (item.effectiveCostPrice > 0)
+                    _dataPill('Cost \u20B9${item.effectiveCostPrice.toStringAsFixed(0)}/btl'),
+                  if (item.effectiveDutyFee > 0)
+                    _dataPill('Duty \u20B9${item.effectiveDutyFee.toStringAsFixed(0)}',
+                      color: const Color(0xFF7B1FA2)),
                 ],
               ),
             ),
-            Icon(
-              isResolved ? Icons.check_circle : Icons.touch_app,
-              size: 22,
-              color: isResolved ? const Color(0xFF4CAF50) : const Color(0xFFFFA726),
-            ),
+
+            // Row 4: Edit hint
+            if (isResolved)
+              Padding(
+                padding: const EdgeInsets.only(left: 26, top: 5),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: Text('Edit \u25B8', style: _body(size: 11, weight: FontWeight.w700, color: const Color(0xFF3855B3))),
+                ),
+              ),
           ],
         ),
       ),

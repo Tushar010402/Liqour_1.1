@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../constants/app_colors.dart';
 import '../constants/app_text_styles.dart';
 import '../constants/animation_constants.dart';
+import '../providers/tagline_provider.dart';
 import '../theme/ios_design_tokens.dart';
 import '../utils/haptic_feedback.dart';
 
@@ -1040,20 +1042,41 @@ class HomeScreenHeader extends StatelessWidget {
                   ],
                 ),
                 SizedBox(height: iOSDesignTokens.space8),
-                Text.rich(
-                  TextSpan(
+                Consumer<TagLineProvider>(
+                builder: (context, tagProv, _) {
+                  final info = tagProv.selectedInfo;
+                  return Row(
                     children: [
-                      TextSpan(
-                          text: '$greeting, ',
-                          style: AppTextStyles.bodyMedium
-                              .copyWith(color: cs.onSurfaceVariant)),
-                      TextSpan(
-                          text: userName,
-                          style: AppTextStyles.bodyMedium
-                              .copyWith(fontWeight: FontWeight.w600, color: cs.onSurface)),
+                      Text(info.icon, style: const TextStyle(fontSize: 14)),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: info.text,
+                                style: AppTextStyles.bodyMedium.copyWith(
+                                  fontWeight: FontWeight.w600, color: info.color,
+                                ),
+                              ),
+                              TextSpan(
+                                text: ', ',
+                                style: AppTextStyles.bodyMedium.copyWith(color: cs.onSurfaceVariant),
+                              ),
+                              TextSpan(
+                                text: userName,
+                                style: AppTextStyles.bodyMedium.copyWith(
+                                  fontWeight: FontWeight.w600, color: cs.onSurface,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     ],
-                  ),
-                ),
+                  );
+                },
+              ),
                 if (shopName != null) ...[
                   SizedBox(height: iOSDesignTokens.space4),
                   GestureDetector(

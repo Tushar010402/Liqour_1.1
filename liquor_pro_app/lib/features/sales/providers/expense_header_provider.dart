@@ -210,4 +210,12 @@ class ExpenseHeaderProvider extends ChangeNotifier {
     await prefs.remove(_defaultHeadersStateKey);
     await _initializeHeaders();
   }
+
+  /// Reset all state — called on logout to prevent stale data
+  void reset() {
+    _defaultHeaders = [];
+    _customHeaders = [];
+    _isLoading = false;
+    notifyListeners();
+  }
 }

@@ -550,7 +550,7 @@ class _StockManagementScreenState extends State<StockManagementScreen>
                 children: [
                   _buildPriceRow('Subtotal', purchase.subtotal),
                   const SizedBox(height: 4),
-                  _buildPriceRow('TDS (1%)', purchase.tdsAmount),
+                  _buildPriceRow('TCS (2%)', purchase.tcsAmount),
                   const SizedBox(height: 4),
                   _buildPriceRow('Round Off', purchase.roundOff, isRoundOff: true),
                   const Divider(height: 16),
@@ -1880,7 +1880,7 @@ class _StockManagementScreenState extends State<StockManagementScreen>
                         children: [
                           _buildPriceRow('Subtotal', purchase.subtotal),
                           const SizedBox(height: 8),
-                          _buildPriceRow('TDS (1%)', purchase.tdsAmount),
+                          _buildPriceRow('TCS (2%)', purchase.tcsAmount),
                           const SizedBox(height: 8),
                           _buildPriceRow('Round Off', purchase.roundOff, isRoundOff: true),
                           const Divider(height: 20),

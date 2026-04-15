@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/utils/responsive_utils.dart';
+import '../../../core/models/app_version_config.dart';
+import '../../../core/services/app_version_service.dart';
 import '../../../core/services/fcm_service.dart';
 import '../providers/auth_provider.dart';
 
@@ -43,6 +45,19 @@ class _SplashScreenState extends State<SplashScreen> {
 
       if (!mounted) return;
 
+      // Version gate — check before proceeding
+      final versionResult = await AppVersionService.instance.checkVersion();
+      if (!mounted) return;
+
+      if (versionResult == VersionCheckResult.forceUpdateRequired ||
+          versionResult == VersionCheckResult.maintenanceMode) {
+        AppVersionService.instance.showForceUpdateScreen(
+          context,
+          isMaintenance: versionResult == VersionCheckResult.maintenanceMode,
+        );
+        return; // Stop — user is gated
+      }
+
       // Navigate based on auth state
       if (authProvider.isAuthenticated) {
         if (kDebugMode) debugPrint('✅ [SplashScreen] Authenticated → Home');
@@ -52,6 +67,13 @@ class _SplashScreenState extends State<SplashScreen> {
 
         // Initialize FCM in background AFTER navigation - doesn't block user
         _initFCMInBackground();
+
+        // Non-blocking soft update after navigation
+        if (versionResult == VersionCheckResult.softUpdateAvailable) {
+          Future.delayed(const Duration(seconds: 1), () {
+            AppVersionService.instance.showSoftUpdateDialog();
+          });
+        }
       } else {
         if (kDebugMode) debugPrint('ℹ️ [SplashScreen] Not authenticated → Login');
         context.go('/phone-login');

@@ -36,6 +36,7 @@ class ApiConfig {
   static const String refreshToken = '/api/auth/refresh';
   static const String logout = '/api/auth/logout';
   static const String forceLoginOtp = '/api/auth/force-login-otp'; // For device limit bypass
+  static const String verifyFirebaseToken = '/api/auth/verify-firebase-token'; // Firebase Phone Auth
 
   // Session Management Endpoints
   static const String sessions = '/api/auth/sessions'; // GET: list sessions, DELETE: logout all others
@@ -112,6 +113,9 @@ class ApiConfig {
   static const String notificationChannels = '/api/notifications/channels';
   static const String notificationRules = '/api/notification-rules';  // Admin only
   static const String notificationTest = '/api/notifications/test';
+
+  // App Version Check (no auth required)
+  static const String appVersionCheck = '/api/app/version-check';
 
   // Gateway Endpoints (NEW - from backend)
   static const String gatewayVersion = '/gateway/version';

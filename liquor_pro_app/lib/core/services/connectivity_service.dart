@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import '../config/environment_config.dart';
+import '../config/debug_performance_config.dart';
 import '../utils/logger.dart';
 
 /// Connectivity Service - Network status monitoring
@@ -17,8 +18,8 @@ class ConnectivityService {
   /// Connectivity check timer
   Timer? _connectivityTimer;
 
-  /// Check interval (30 seconds)
-  static const Duration _checkInterval = Duration(seconds: 30);
+  /// Check interval — relaxed in debug to reduce simulator CPU load.
+  static final Duration _checkInterval = DebugPerformanceConfig.connectivityCheckInterval;
 
   ConnectivityService._();
 

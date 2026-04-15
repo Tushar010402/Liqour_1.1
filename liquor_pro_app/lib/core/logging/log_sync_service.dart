@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'log_database.dart';
 import 'session_manager.dart';
 import '../config/api_config.dart';
+import '../config/debug_performance_config.dart';
 import '../utils/logger.dart';
 
 /// Sync status for UI display
@@ -38,7 +39,7 @@ class LogSyncService {
   final _sessionManager = SessionManager();
 
   // Sync configuration
-  static const Duration syncInterval = Duration(minutes: 5);
+  static final Duration syncInterval = DebugPerformanceConfig.logSyncInterval;
   static const int maxLogsPerBatch = 50;
   static const int syncThreshold = 100; // Auto-sync when buffer reaches this
   static const int maxRetries = 3;

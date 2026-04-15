@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
@@ -7,14 +8,22 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:firebase_auth/firebase_auth.dart' show FirebaseAuth;
 import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
+import 'package:firebase_performance/firebase_performance.dart';
+import 'package:clarity_flutter/clarity_flutter.dart';
 import 'core/config/environment_config.dart';
+import 'core/config/debug_performance_config.dart';
 import 'core/services/auth_service.dart';
 import 'core/services/dio_api_service.dart';
 import 'core/services/offline_queue_service.dart';
 import 'core/services/preferences_service.dart';
 import 'core/providers/shop_selection_provider.dart';
+import 'core/providers/tagline_provider.dart';
 import 'core/providers/theme_provider.dart';
 import 'features/auth/providers/auth_provider.dart';
 import 'features/auth/screens/splash_screen.dart';
@@ -49,12 +58,17 @@ import 'features/admin/providers/user_management_provider.dart';
 import 'features/admin/services/user_management_service.dart';
 import 'features/inventory/providers/brand_selection_provider.dart';
 import 'core/providers/service_providers.dart';
+import 'core/services/app_version_service.dart';
 import 'core/services/notification_navigation_service.dart';
+import 'core/models/app_version_config.dart';
+import 'core/widgets/soft_update_dialog.dart';
+import 'features/auth/screens/force_update_screen.dart';
 // ATT removed - app does NOT track users for advertising
 // import 'core/services/app_tracking_service.dart';
 
 // Industrial-grade logging system
 import 'core/logging/logging.dart';
+import 'core/services/analytics_service.dart';
 
 /// Background message handler - must be top-level function
 /// This handles push notifications when app is terminated or in background
@@ -110,13 +124,49 @@ void main() {
         secureStorage: const FlutterSecureStorage(),
         prefs: prefs,
       );
+
+      // Late-bound AuthProvider reference — set once MultiProvider creates it
+      AuthProvider? authProviderRef;
+
       final apiService = DioApiService(
         authService: authService,
         onSessionExpired: () {
-          // Handle session expiration - navigate to login
+          // Clear AuthProvider user state so GoRouter redirect sees isAuthenticated=false
+          authProviderRef?.clearSessionState();
+          // Show session expired dialog and navigate to login
           NotificationNavigationService.handleSessionExpiration();
         },
       );
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // APP VERSION SERVICE: Initialize version checking
+      // ═══════════════════════════════════════════════════════════════════════
+      await AppVersionService.instance.initialize(apiService, prefs);
+
+      // Register UI builders for force update / soft update (avoids circular imports)
+      AppVersionService.registerForceUpdateScreenBuilder(({
+        AppVersionConfig? config,
+        String currentVersion = '0.0.0',
+        bool isMaintenance = false,
+      }) {
+        return ForceUpdateScreen(
+          config: config,
+          currentVersion: currentVersion,
+          isMaintenance: isMaintenance,
+        );
+      });
+
+      AppVersionService.registerSoftUpdateDialogBuilder(({
+        required BuildContext context,
+        required AppVersionConfig config,
+        required VoidCallback onSkip,
+      }) {
+        showSoftUpdateDialog(
+          context: context,
+          config: config,
+          onSkip: onSkip,
+        );
+      });
 
       // ═══════════════════════════════════════════════════════════════════════
       // INDUSTRIAL-GRADE LOGGING: Initialize logging service
@@ -124,8 +174,26 @@ void main() {
       final loggingService = LoggingService();
       await loggingService.initialize();
 
-      // Setup Flutter error handler
-      FlutterError.onError = loggingService.logFlutterError;
+      // Initialize AnalyticsService singleton — skip in debug to reduce overhead
+      if (!kDebugMode) {
+        await AnalyticsService.getInstance();
+      }
+
+      // Setup Flutter error handler (logging + Crashlytics)
+      FlutterError.onError = (details) {
+        loggingService.logFlutterError(details);
+        if (EnvironmentConfig.enableCrashReporting) {
+          FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+        }
+      };
+
+      // Catch platform-level errors not caught by Flutter framework
+      PlatformDispatcher.instance.onError = (error, stack) {
+        if (EnvironmentConfig.enableCrashReporting) {
+          FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+        }
+        return true;
+      };
 
       // Run app
       runApp(
@@ -138,6 +206,9 @@ void main() {
             userPrefs: userPrefs,
             authService: authService,
             apiService: apiService,
+            onAuthProviderCreated: (provider) {
+              authProviderRef = provider;
+            },
           ),
         ),
       );
@@ -155,6 +226,10 @@ void main() {
       } catch (_) {
         // Service not ready yet, already logged to console
       }
+      // Report to Crashlytics
+      if (EnvironmentConfig.enableCrashReporting) {
+        FirebaseCrashlytics.instance.recordError(error, stackTrace, fatal: true);
+      }
     },
   );
 }
@@ -162,8 +237,44 @@ void main() {
 /// Isolated Firebase initialization - won't block app if fails
 Future<void> _initFirebase() async {
   try {
-    await Firebase.initializeApp();
+    // Firebase is initialized natively in AppDelegate.swift (for iOS phone auth).
+    // This call reuses the existing instance or initializes on Android.
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+    // Phone auth test mode — enabled in debug builds for emulators/simulators.
+    // This allows test phone numbers to bypass rate limits and verification.
+    // In release builds (real devices), this is NOT set — uses real APNs/Play Integrity.
+    if (kDebugMode) {
+      try {
+        await FirebaseAuth.instance.setSettings(appVerificationDisabledForTesting: true);
+        debugPrint('✅ Firebase Phone Auth: test mode enabled (debug build)');
+      } catch (e) {
+        debugPrint('⚠️ Firebase Auth settings error: $e');
+      }
+    }
+
+    // Wire Crashlytics
+    if (EnvironmentConfig.enableCrashReporting) {
+      await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
+    } else {
+      await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(false);
+    }
+
+    // Wire Analytics
+    if (EnvironmentConfig.enableAnalytics) {
+      await FirebaseAnalytics.instance.setAnalyticsCollectionEnabled(true);
+    } else {
+      await FirebaseAnalytics.instance.setAnalyticsCollectionEnabled(false);
+    }
+
+    // Wire Performance — disabled in debug to reduce simulator CPU load
+    FirebasePerformance.instance.setPerformanceCollectionEnabled(
+      EnvironmentConfig.enableAnalytics && DebugPerformanceConfig.enableFirebasePerformance,
+    );
+
     if (kDebugMode) debugPrint('✅ Firebase initialized');
   } catch (e) {
     if (kDebugMode) debugPrint('⚠️ Firebase init error (non-blocking): $e');
@@ -175,6 +286,7 @@ class LiquorProApp extends StatelessWidget {
   final UserPreferences userPrefs;
   final AuthService authService;
   final DioApiService apiService;
+  final void Function(AuthProvider)? onAuthProviderCreated;
 
   const LiquorProApp({
     super.key,
@@ -182,6 +294,7 @@ class LiquorProApp extends StatelessWidget {
     required this.userPrefs,
     required this.authService,
     required this.apiService,
+    this.onAuthProviderCreated,
   });
 
   @override
@@ -199,11 +312,22 @@ class LiquorProApp extends StatelessWidget {
         ChangeNotifierProvider<ThemeProvider>(
           create: (_) => ThemeProvider(prefs: userPrefs),
         ),
+        ChangeNotifierProvider<TagLineProvider>(
+          create: (_) {
+            final provider = TagLineProvider();
+            provider.apiService = apiService;
+            return provider;
+          },
+        ),
         ChangeNotifierProxyProvider2<AuthService, DioApiService, AuthProvider>(
-          create: (_) => AuthProvider(
-            authService: authService,
-            apiService: apiService,
-          ),
+          create: (_) {
+            final provider = AuthProvider(
+              authService: authService,
+              apiService: apiService,
+            );
+            onAuthProviderCreated?.call(provider);
+            return provider;
+          },
           update: (_, authService, apiService, previous) =>
             previous ?? AuthProvider(
               authService: authService,
@@ -382,6 +506,22 @@ class _AppShell extends StatefulWidget {
 class _AppShellState extends State<_AppShell> {
   GoRouter? _router;
 
+  @override
+  void initState() {
+    super.initState();
+    AppVersionService.instance.startPeriodicCheck();
+
+    // Initialize Microsoft Clarity for session replay & heatmaps
+    // Disabled in debug — adds significant CPU and memory overhead on simulator
+    if (DebugPerformanceConfig.enableClarity) {
+      final clarityId = EnvironmentConfig.clarityProjectId;
+      if (clarityId.isNotEmpty) {
+        final config = ClarityConfig(projectId: clarityId);
+        Clarity.initialize(context, config);
+      }
+    }
+  }
+
   GoRouter _getRouter(AuthProvider authProvider) {
     return _router ??= GoRouter(
       navigatorKey: NotificationNavigationService.navigatorKey,
@@ -505,6 +645,7 @@ class _AppShellState extends State<_AppShell> {
 
   @override
   void dispose() {
+    AppVersionService.instance.stopPeriodicCheck();
     _router?.dispose();
     super.dispose();
   }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
+import '../config/debug_performance_config.dart';
 import '../services/analytics_service.dart';
 import 'logger.dart';
 
@@ -163,9 +164,11 @@ class FPSMonitor {
   static bool _isMonitoring = false;
   static Timer? _reportTimer;
 
-  /// Start FPS monitoring
+  /// Start FPS monitoring.
+  /// Skipped in debug mode to avoid adding overhead on the simulator.
   static void start({Duration reportInterval = const Duration(seconds: 5)}) {
     if (_isMonitoring) return;
+    if (!DebugPerformanceConfig.enablePerformanceMonitors) return;
 
     _isMonitoring = true;
     _frameTimes.clear();
@@ -263,9 +266,11 @@ class MemoryMonitor {
   static Timer? _monitorTimer;
   static bool _isMonitoring = false;
 
-  /// Start memory monitoring
+  /// Start memory monitoring.
+  /// Skipped in debug mode to reduce timer overhead on the simulator.
   static void start({Duration checkInterval = const Duration(seconds: 10)}) {
     if (_isMonitoring) return;
+    if (!DebugPerformanceConfig.enablePerformanceMonitors) return;
 
     _isMonitoring = true;
 

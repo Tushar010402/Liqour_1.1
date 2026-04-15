@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
@@ -795,6 +796,9 @@ class _MultiPhotoStockOCRScreenState extends ConsumerState<MultiPhotoStockOCRScr
   Future<void> _processAllPhotos() async {
     if (_selectedImages.isEmpty) return;
 
+    // Keep screen awake during OCR processing
+    try { await WakelockPlus.enable(); } catch (_) {}
+
     setState(() {
       _isProcessing = true;
       _currentPhotoIndex = 0;
@@ -884,6 +888,7 @@ class _MultiPhotoStockOCRScreenState extends ConsumerState<MultiPhotoStockOCRScr
     } finally {
       setState(() {
         _isProcessing = false;
+      try { WakelockPlus.disable(); } catch (_) {}
       });
     }
   }

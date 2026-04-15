@@ -7,15 +7,19 @@ import '../../../core/constants/app_text_styles.dart';
 /// Shows: denomination label, count input, and live subtotal per row.
 class CashDetailsSheet extends StatefulWidget {
   final void Function(Map<int, int> denominations, double total)? onAdd;
+  final Map<int, int>? initialDenominations;
 
-  const CashDetailsSheet({super.key, this.onAdd});
+  const CashDetailsSheet({super.key, this.onAdd, this.initialDenominations});
 
-  static Future<void> show(BuildContext context, {void Function(Map<int, int>, double)? onAdd}) {
+  static Future<void> show(BuildContext context, {
+    void Function(Map<int, int>, double)? onAdd,
+    Map<int, int>? initialDenominations,
+  }) {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => CashDetailsSheet(onAdd: onAdd),
+      builder: (_) => CashDetailsSheet(onAdd: onAdd, initialDenominations: initialDenominations),
     );
   }
 
@@ -32,7 +36,10 @@ class _CashDetailsSheetState extends State<CashDetailsSheet> {
   void initState() {
     super.initState();
     for (final d in _denomValues) {
-      _controllers[d] = TextEditingController();
+      final initial = widget.initialDenominations?[d];
+      _controllers[d] = TextEditingController(
+        text: initial != null && initial > 0 ? initial.toString() : '',
+      );
     }
   }
 

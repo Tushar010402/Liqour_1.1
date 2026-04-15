@@ -317,51 +317,10 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
                 ],
               ),
               const SizedBox(height: 8),
-              // Row 3: View Mode (Flat/Category) and Opening Toggle
+              // Row 3: Stock Manage toggle (show/hide Opening & Closing data)
               Row(
                 children: [
-                  // View Mode Toggle (Flat / Category)
-                  Expanded(
-                    child: Container(
-                      height: 36,
-                      decoration: BoxDecoration(
-                        border: Border.all(color: cs.outlineVariant),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: PurchaViewMode.values.map((mode) {
-                          final isSelected = provider.viewMode == mode;
-                          return Expanded(
-                            child: GestureDetector(
-                              onTap: () {
-                                HapticFeedback.selectionClick();
-                                provider.setViewMode(mode);
-                                _loadReport();
-                              },
-                              child: Container(
-                                alignment: Alignment.center,
-                                decoration: BoxDecoration(
-                                  color: isSelected ? Colors.blue.shade700 : Colors.transparent,
-                                  borderRadius: BorderRadius.circular(7),
-                                ),
-                                child: Text(
-                                  mode == PurchaViewMode.flat ? 'Flat' : 'Category',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: isSelected ? Colors.white : cs.onSurface,
-                                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  // Opening Toggle - Controls visibility of Opening column
-                  // Data is always fetched, toggle only controls UI display
+                  const Spacer(),
                   GestureDetector(
                     onTap: () {
                       HapticFeedback.selectionClick();
@@ -370,7 +329,7 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
                       height: 36,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
                       decoration: BoxDecoration(
                         border: Border.all(
                           color: provider.showOpening ? Colors.green.shade600 : Colors.orange.shade400,
@@ -389,15 +348,14 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            'Opening',
+                            'Stock Manage',
                             style: TextStyle(
                               fontSize: 12,
                               color: provider.showOpening ? Colors.green.shade800 : Colors.orange.shade800,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
-                          const SizedBox(width: 4),
-                          // Show ON/OFF indicator
+                          const SizedBox(width: 6),
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
@@ -406,11 +364,7 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
                             ),
                             child: Text(
                               provider.showOpening ? 'ON' : 'OFF',
-                              style: const TextStyle(
-                                fontSize: 9,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
+                              style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.white),
                             ),
                           ),
                         ],
@@ -559,11 +513,9 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
               tabs: provider.availableSizes.map((size) => Tab(text: size)).toList(),
             ),
           ),
-        // Table Header
-        _buildTableHeader(provider.showOpening),
-        // Table Content
+        // 2-Column A4 Layout
         Expanded(
-          child: _buildTableContent(provider),
+          child: _buildTwoColumnLayout(provider),
         ),
         // Grand Total
         _buildGrandTotalRow(provider),
@@ -571,99 +523,134 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
     );
   }
 
-  Widget _buildTableHeader(bool showOpening) {
-    final cs = Theme.of(context).colorScheme;
-    // ALWAYS show all 9 columns - headers are always visible
-    return Container(
-      color: cs.outlineVariant,
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+  /// Flatten and sort all items from current page
+  List<PurchaReportItem> _getFlatItems(PurchaReportProvider provider) {
+    final page = provider.currentPage;
+    if (page == null) return [];
+    final items = <PurchaReportItem>[];
+    for (final cat in page.categories) {
+      items.addAll(cat.items);
+    }
+    items.sort((a, b) {
+      final p = a.rate.compareTo(b.rate);
+      if (p != 0) return p;
+      return a.brandName.compareTo(b.brandName);
+    });
+    return items;
+  }
+
+  /// 2-column A4-style layout: left half (items 1-28), right half (items 29-56)
+  Widget _buildTwoColumnLayout(PurchaReportProvider provider) {
+    final items = _getFlatItems(provider);
+    final showOpening = provider.showOpening;
+    const rowsPerCol = 20;
+
+    // Pad to at least 28 so left column is always full
+    final totalSlots = items.length <= rowsPerCol ? rowsPerCol : ((items.length - 1) ~/ rowsPerCol + 1) * rowsPerCol;
+    final leftCount = totalSlots >= rowsPerCol ? rowsPerCol : totalSlots;
+    final rightCount = totalSlots > rowsPerCol ? totalSlots - rowsPerCol : 0;
+
+    return SingleChildScrollView(
+      controller: _scrollController,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _headerCell('No', width: 24),
-          _headerCell('Brand Name', flex: 1),
-          _headerCell('Open', width: 42),
-          _headerCell('Rcpt', width: 38),
-          _headerCell('Total', width: 40),
-          _headerCell('Sale', width: 40),
-          _headerCell('Rate', width: 42),
-          _headerCell('Amt', width: 52),
-          _headerCell('Close', width: 42),
+          // Left column
+          Expanded(child: _buildHalfTable(items, 0, leftCount, showOpening)),
+          const SizedBox(width: 4),
+          // Right column
+          if (rightCount > 0 || items.length > rowsPerCol)
+            Expanded(child: _buildHalfTable(items, rowsPerCol, rightCount > 0 ? rightCount : rowsPerCol, showOpening))
+          else
+            Expanded(child: _buildHalfTable(items, rowsPerCol, rowsPerCol, showOpening)),
         ],
       ),
     );
   }
 
-  Widget _headerCell(String text, {double? width, int? flex}) {
+  Widget _buildHalfTable(List<PurchaReportItem> allItems, int startIdx, int count, bool showOpening) {
     final cs = Theme.of(context).colorScheme;
-    final child = Text(
-      text,
-      style: TextStyle(
-        fontSize: 10,
-        fontWeight: FontWeight.bold,
-        color: cs.onSurface,
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: cs.outlineVariant, width: 0.5),
+        borderRadius: BorderRadius.circular(4),
       ),
-      textAlign: TextAlign.center,
-    );
-
-    if (flex != null) {
-      return Expanded(flex: flex, child: child);
-    }
-    return SizedBox(width: width, child: Center(child: child));
-  }
-
-  Widget _buildTableContent(PurchaReportProvider provider) {
-    final page = provider.currentPage;
-    if (page == null) return const SizedBox.shrink();
-
-    // Build list with category headers if in category mode
-    final List<Widget> rows = [];
-    int serialNo = 0;
-
-    for (final category in page.categories) {
-      // Filter items to only show those with actual stock activity
-      // AND sort by PRICE (rate) ascending - matching Daily Sales Entry
-      final activeItems = category.items
-          .where(_hasStockActivity)
-          .toList()
-        ..sort((a, b) {
-          // Sort by rate (price) ascending - same as Daily Sales Entry
-          final priceComparison = a.rate.compareTo(b.rate);
-          if (priceComparison != 0) return priceComparison;
-          // If same price, sort by brand name
-          return a.brandName.compareTo(b.brandName);
-        });
-
-      // Skip category if no active items
-      if (activeItems.isEmpty) continue;
-
-      // Add category header if in category mode
-      if (provider.viewMode == PurchaViewMode.category) {
-        rows.add(_buildCategoryHeader(category.categoryName, activeItems.length));
-      }
-
-      // Add items
-      for (final item in activeItems) {
-        serialNo++;
-        rows.add(_buildTableRow(item, provider.showOpening, serialNo));
-      }
-    }
-
-    return ListView(
-      controller: _scrollController,
-      padding: EdgeInsets.zero,
-      children: rows,
+      child: Column(
+        children: [
+          // Header
+          Container(
+            color: cs.outlineVariant,
+            padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 8),
+            child: Row(
+              children: [
+                _hCell('No', 24),
+                Expanded(child: Text('Brand (\u20B9MRP)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: cs.onSurface))),
+                _hCell('Open', 36),
+                _hCell('Sale', 36),
+                _hCell('Close', 36),
+              ],
+            ),
+          ),
+          // Rows
+          for (int i = 0; i < count; i++)
+            _buildA4Row(
+              startIdx + i + 1,
+              startIdx + i < allItems.length ? allItems[startIdx + i] : null,
+              showOpening,
+              i % 2 == 0,
+            ),
+        ],
+      ),
     );
   }
 
-  /// Check if item has any stock activity (not all zeros)
-  bool _hasStockActivity(PurchaReportItem item) {
-    return item.openingStock > 0 ||
-           item.receipt > 0 ||
-           item.sale > 0 ||
-           item.closingStock > 0 ||
-           item.total > 0 ||
-           item.amount > 0;
+  Widget _hCell(String text, double width) {
+    final cs = Theme.of(context).colorScheme;
+    return SizedBox(
+      width: width,
+      child: Text(text, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: cs.onSurface)),
+    );
   }
+
+  Widget _buildA4Row(int serialNo, PurchaReportItem? item, bool showOpening, bool isEven) {
+    final cs = Theme.of(context).colorScheme;
+    final dName = item != null && item.displayName.isNotEmpty ? item.displayName : (item?.brandName ?? '');
+    final brandText = item != null
+        ? (item.rate > 0 ? '$dName (\u20B9${item.rate.toStringAsFixed(0)})' : dName)
+        : '';
+
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 3),
+      decoration: BoxDecoration(
+        color: isEven ? cs.surface : cs.surfaceContainerHighest,
+        border: Border(bottom: BorderSide(color: cs.outlineVariant, width: 0.3)),
+      ),
+      child: Row(
+        children: [
+          SizedBox(width: 24, child: Text('$serialNo', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: cs.onSurface))),
+          Expanded(
+            child: Text(brandText, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: cs.onSurface), maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
+          SizedBox(width: 36, child: Text(
+            item != null && showOpening ? _formatValue(item.openingStock) : '',
+            textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: cs.onSurface),
+          )),
+          SizedBox(width: 36, child: Text(
+            item != null ? _formatValue(item.sale) : '',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, fontWeight: item != null && item.sale > 0 ? FontWeight.bold : FontWeight.normal, color: item != null && item.sale > 0 ? Colors.blue.shade800 : cs.onSurface),
+          )),
+          SizedBox(width: 36, child: Text(
+            item != null && showOpening ? _formatValue(item.closingStock) : '',
+            textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: cs.onSurface),
+          )),
+        ],
+      ),
+    );
+  }
+
 
   Widget _buildCategoryHeader(String categoryName, int itemCount) {
     return Container(
@@ -707,7 +694,12 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
   Widget _buildTableRow(PurchaReportItem item, bool showOpening, int index) {
     final cs = Theme.of(context).colorScheme;
     final isEven = index % 2 == 0;
-    // ALWAYS show all 9 columns - Opening/Total/Closing show empty when showOpening is false
+    // Brand Name with MRP: "Royal Stag (₹94)" — use display_name if available
+    final displayName = item.displayName.isNotEmpty ? item.displayName : item.brandName;
+    final brandWithMrp = item.rate > 0
+        ? '$displayName (\u20B9${_formatRate(item.rate)})'
+        : displayName;
+
     return Container(
       decoration: BoxDecoration(
         color: isEven ? cs.surface : cs.surfaceContainerHighest,
@@ -716,57 +708,31 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
       child: Row(
         children: [
-          // S.No
           SizedBox(
-            width: 24,
-            child: Text(
-              '$index',
-              style: _cellStyle(),
-              textAlign: TextAlign.center,
-            ),
+            width: 28,
+            child: Text('$index', style: _cellStyle(), textAlign: TextAlign.center),
           ),
-          // Brand Name - takes remaining space
           Expanded(
             child: Padding(
               padding: const EdgeInsets.only(left: 4),
               child: Text(
-                item.brandName,
-                style: _cellStyle().copyWith(fontWeight: FontWeight.w500),
+                brandWithMrp,
+                style: _cellStyle().copyWith(fontWeight: FontWeight.bold),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
             ),
           ),
-          // Opening - ALWAYS show column, empty value when showOpening is false
           SizedBox(
-            width: 42,
+            width: 48,
             child: Text(
               showOpening ? _formatValue(item.openingStock) : '',
               style: _cellStyle(),
               textAlign: TextAlign.center,
             ),
           ),
-          // Receipt
           SizedBox(
-            width: 38,
-            child: Text(
-              _formatValue(item.receipt),
-              style: _cellStyle(),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Total - ALWAYS show column, empty value when showOpening is false
-          SizedBox(
-            width: 40,
-            child: Text(
-              showOpening ? _formatValue(item.total) : '',
-              style: _cellStyle(),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Sale
-          SizedBox(
-            width: 40,
+            width: 48,
             child: Text(
               _formatValue(item.sale),
               style: _cellStyle().copyWith(
@@ -776,30 +742,8 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
               textAlign: TextAlign.center,
             ),
           ),
-          // Rate
           SizedBox(
-            width: 42,
-            child: Text(
-              _formatRate(item.rate),
-              style: _cellStyle().copyWith(fontWeight: FontWeight.w600),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Amount
-          SizedBox(
-            width: 52,
-            child: Text(
-              _formatAmount(item.amount),
-              style: _cellStyle().copyWith(
-                fontWeight: item.amount > 0 ? FontWeight.bold : FontWeight.normal,
-                color: item.amount > 0 ? Colors.green.shade800 : cs.onSurface,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Closing - ALWAYS show column, empty value when showOpening is false
-          SizedBox(
-            width: 42,
+            width: 48,
             child: Text(
               showOpening ? _formatValue(item.closingStock) : '',
               style: _cellStyle(),
@@ -821,77 +765,38 @@ class _PurchaReportScreenState extends State<PurchaReportScreen>
     final stats = provider.currentPageStats;
     final showOpening = provider.showOpening;
 
-    // ALWAYS show all 9 columns - Opening/Total/Closing show empty when showOpening is false
     return Container(
       color: cs.outlineVariant,
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
       child: Row(
         children: [
-          const SizedBox(width: 24),
+          const SizedBox(width: 28),
           Expanded(
             child: Text(
               'GRAND TOTAL',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                color: cs.onSurface,
-              ),
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: cs.onSurface),
             ),
           ),
-          // Opening - ALWAYS show column, empty value when showOpening is false
+          // Empty boxes for manual writing
           SizedBox(
-            width: 42,
-            child: Text(
-              showOpening ? _formatValue(stats['opening'] as int) : '',
-              style: _totalStyle(),
-              textAlign: TextAlign.center,
+            width: 48,
+            child: Container(
+              height: 24,
+              decoration: BoxDecoration(border: Border.all(color: cs.outline, width: 0.5)),
             ),
           ),
-          // Receipt - always shown
           SizedBox(
-            width: 38,
-            child: Text(
-              _formatValue(stats['receipt'] as int),
-              style: _totalStyle(),
-              textAlign: TextAlign.center,
+            width: 48,
+            child: Container(
+              height: 24,
+              decoration: BoxDecoration(border: Border.all(color: cs.outline, width: 0.5)),
             ),
           ),
-          // Total - ALWAYS show column, empty value when showOpening is false
           SizedBox(
-            width: 40,
-            child: Text(
-              showOpening ? _formatValue(stats['total'] as int) : '',
-              style: _totalStyle(),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Sale - always shown
-          SizedBox(
-            width: 40,
-            child: Text(
-              _formatValue(stats['sale'] as int),
-              style: _totalStyle().copyWith(color: Colors.blue.shade900),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Rate - empty space, always shown
-          const SizedBox(width: 42),
-          // Amount - always shown
-          SizedBox(
-            width: 52,
-            child: Text(
-              _formatAmount(stats['amount'] as double),
-              style: _totalStyle().copyWith(color: Colors.green.shade900),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Closing - ALWAYS show column, empty value when showOpening is false
-          SizedBox(
-            width: 42,
-            child: Text(
-              showOpening ? _formatValue(stats['closing'] as int) : '',
-              style: _totalStyle(),
-              textAlign: TextAlign.center,
+            width: 48,
+            child: Container(
+              height: 24,
+              decoration: BoxDecoration(border: Border.all(color: cs.outline, width: 0.5)),
             ),
           ),
         ],

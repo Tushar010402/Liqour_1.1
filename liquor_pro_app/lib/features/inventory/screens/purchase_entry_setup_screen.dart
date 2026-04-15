@@ -4,11 +4,16 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../../../core/providers/shop_selection_provider.dart';
+import '../../../core/services/dio_api_service.dart';
 import '../../../core/utils/haptic_feedback.dart';
 import '../../inventory/models/product.dart' as models;
+import '../../inventory/models/stock_purchase.dart';
 import '../../inventory/providers/product_provider.dart';
+import '../../inventory/services/stock_purchase_service.dart';
 import 'ai_purchase_entry_screen.dart';
 import 'purchase_entry_screen.dart';
+import 'purchase_summary_screen.dart';
+import 'purchase_summary_view_screen.dart';
 
 /// Font helpers — identical to SalesEntrySetupScreen
 TextStyle _heading({double size = 18, FontWeight weight = FontWeight.w800, Color color = const Color(0xFF1A1D26)}) {
@@ -25,16 +30,20 @@ enum PurchaseEntryMode { manual, ai }
 /// Purchase Entry Setup — mirrors SalesEntrySetupScreen exactly.
 /// Shows AI/Manual toggle, date pills, and category cards (Whisky / Beer).
 class PurchaseEntrySetupScreen extends StatefulWidget {
-  const PurchaseEntrySetupScreen({super.key});
+  final DateTime? initialDate;
+  final String? initialDateLabel;
+  final String? initialRangeLabel;
+
+  const PurchaseEntrySetupScreen({super.key, this.initialDate, this.initialDateLabel, this.initialRangeLabel});
 
   @override
   State<PurchaseEntrySetupScreen> createState() => _PurchaseEntrySetupScreenState();
 }
 
 class _PurchaseEntrySetupScreenState extends State<PurchaseEntrySetupScreen> {
-  PurchaseEntryMode _mode = PurchaseEntryMode.manual;
-  String _selectedDateLabel = 'Yesterday';
-  DateTime _selectedDate = DateTime.now().subtract(const Duration(days: 1));
+  PurchaseEntryMode _mode = PurchaseEntryMode.ai;
+  late String _selectedDateLabel;
+  late DateTime _selectedDate;
   bool _isLoadingProducts = true;
 
   /// Date strip state (like home page)
@@ -43,10 +52,19 @@ class _PurchaseEntrySetupScreenState extends State<PurchaseEntrySetupScreen> {
 
   List<models.Product> _allProducts = [];
   Map<String, models.Stock> _stockMap = {};
+  List<StockPurchase> _submittedPurchases = [];
 
   @override
   void initState() {
     super.initState();
+    _selectedDate = widget.initialDate ?? DateTime.now().subtract(const Duration(days: 1));
+    if (widget.initialRangeLabel != null) {
+      _selectedDateLabel = widget.initialRangeLabel!;
+      _activeRangeLabel = widget.initialRangeLabel;
+      _stripSelectedDate = _selectedDate;
+    } else {
+      _selectedDateLabel = widget.initialDateLabel ?? 'Yesterday';
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadData());
   }
 
@@ -70,12 +88,41 @@ class _PurchaseEntrySetupScreenState extends State<PurchaseEntrySetupScreen> {
       _allProducts = List<models.Product>.from(productProvider.products);
       _stockMap = Map<String, models.Stock>.from(productProvider.stockByProductId);
 
+      // Load submitted purchases for this date
+      await _loadSubmittedPurchases(shopId);
+
       if (mounted) setState(() => _isLoadingProducts = false);
     } catch (e) {
       debugPrint('[PurchaseSetup] Error: $e');
       if (mounted) setState(() => _isLoadingProducts = false);
     }
   }
+
+  Future<void> _loadSubmittedPurchases(String shopId) async {
+    try {
+      final apiService = context.read<DioApiService>();
+      final purchaseService = StockPurchaseService(apiService);
+      final startOfDay = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+      final endOfDay = startOfDay.add(const Duration(days: 1));
+      final response = await purchaseService.getPurchaseHistory(
+        shopId: shopId,
+        fromDate: startOfDay,
+        toDate: endOfDay,
+      );
+      if (response.success && response.data != null) {
+        _submittedPurchases = response.data!.purchases
+            .where((p) => p.status != StockPurchaseStatus.rejected)
+            .toList();
+      } else {
+        _submittedPurchases = [];
+      }
+    } catch (e) {
+      debugPrint('[PurchaseSetup] Error loading purchases: $e');
+      _submittedPurchases = [];
+    }
+  }
+
+  bool _hasPurchasesForDate() => _submittedPurchases.isNotEmpty;
 
   List<models.Product> _getProductsForCategory(String category) {
     return _allProducts.where((p) {
@@ -145,11 +192,20 @@ class _PurchaseEntrySetupScreenState extends State<PurchaseEntrySetupScreen> {
         _activeRangeLabel = null; _stripSelectedDate = null;
       });
     }
+    // Reload purchases for new date
+    if (!mounted) return;
+    final shopId = context.read<ShopSelectionProvider>().selectedShopId;
+    if (shopId != null) await _loadSubmittedPurchases(shopId);
+    if (mounted) setState(() {});
   }
 
-  void _onStripDateTapped(DateTime date) {
+  void _onStripDateTapped(DateTime date) async {
     HapticFeedbackUtil.selection();
     setState(() { _stripSelectedDate = date; _selectedDate = date; });
+    if (!mounted) return;
+    final shopId = context.read<ShopSelectionProvider>().selectedShopId;
+    if (shopId != null) await _loadSubmittedPurchases(shopId);
+    if (mounted) setState(() {});
   }
 
   void _onCategoryTapped(String category) async {
@@ -252,6 +308,23 @@ class _PurchaseEntrySetupScreenState extends State<PurchaseEntrySetupScreen> {
                             imageUrl: 'assets/images/sales/beer_card.png',
                             icon: Icons.sports_bar,
                           ),
+                          // Show submitted purchases for this date
+                          if (_submittedPurchases.isNotEmpty) ...[
+                            const SizedBox(height: 20),
+                            Row(
+                              children: [
+                                const Icon(Icons.check_circle, size: 16, color: Color(0xFF2E7D32)),
+                                const SizedBox(width: 6),
+                                Text('Purchases on ${DateFormat('dd MMM').format(_selectedDate)}',
+                                  style: _body(size: 13, weight: FontWeight.w700, color: const Color(0xFF2E7D32))),
+                                const Spacer(),
+                                Text('${_submittedPurchases.length} ${_submittedPurchases.length == 1 ? 'entry' : 'entries'}',
+                                  style: _body(size: 12, weight: FontWeight.w600, color: const Color(0xFF888888))),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            ..._submittedPurchases.map((purchase) => _buildPurchaseHistoryCard(purchase)),
+                          ],
                           const SizedBox(height: 20),
                         ],
                       ),
@@ -317,20 +390,37 @@ class _PurchaseEntrySetupScreenState extends State<PurchaseEntrySetupScreen> {
 
   Widget _buildModeTab(String label, PurchaseEntryMode mode) {
     final isSelected = _mode == mode;
+    final isAI = mode == PurchaseEntryMode.ai;
     return Expanded(
       child: GestureDetector(
         onTap: () { HapticFeedbackUtil.selection(); setState(() => _mode = mode); },
         child: Container(
           height: 42,
           decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFF3855B3) : Colors.transparent,
+            color: isSelected
+                ? (isAI ? const Color(0xFF1A1A2E) : const Color(0xFF3855B3))
+                : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
+            gradient: isSelected && isAI ? const LinearGradient(
+              colors: [Color(0xFF1A1A2E), Color(0xFF2D1B69)],
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+            ) : null,
           ),
           alignment: Alignment.center,
-          child: Text(label, style: _body(
-            size: 14, weight: FontWeight.w700,
-            color: isSelected ? Colors.white : const Color(0xFF888888),
-          )),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isAI) ...[
+                Icon(Icons.workspace_premium, size: 16,
+                  color: isSelected ? const Color(0xFFFFD700) : const Color(0xFFBBBBBB)),
+                const SizedBox(width: 5),
+              ],
+              Text(label, style: _body(
+                size: 14, weight: FontWeight.w700,
+                color: isSelected ? Colors.white : const Color(0xFF888888),
+              )),
+            ],
+          ),
         ),
       ),
     );
@@ -511,6 +601,86 @@ class _PurchaseEntrySetupScreenState extends State<PurchaseEntrySetupScreen> {
                   ),
                 ],
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPurchaseHistoryCard(StockPurchase purchase) {
+    final itemCount = purchase.items.length;
+    final statusColor = purchase.status == StockPurchaseStatus.approved
+        ? const Color(0xFF2E7D32)
+        : purchase.status == StockPurchaseStatus.pending
+            ? const Color(0xFFE65100)
+            : const Color(0xFF888888);
+    final statusLabel = purchase.status.name.toUpperCase();
+
+    return GestureDetector(
+      onTap: () {
+        HapticFeedbackUtil.medium();
+        // Convert purchase items to PurchaseSummaryItems and show read-only summary
+        final items = purchase.items.map((item) => PurchaseSummaryItem(
+          productId: item.productId,
+          name: item.productName,
+          brandName: item.brandName,
+          size: item.size,
+          costPrice: item.costPrice,
+          sellingPrice: 0,
+          quantity: item.quantity,
+          stock: 0,
+        )).toList();
+        Navigator.push(context, MaterialPageRoute(
+          builder: (_) => PurchaseSummaryScreen(
+            items: items,
+            selectedDate: _selectedDate,
+            readOnly: true,
+          ),
+        ));
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFE5E7EB)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36, height: 36,
+              decoration: BoxDecoration(
+                color: statusColor.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(Icons.shopping_cart_rounded, size: 18, color: statusColor),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(purchase.vendorName.isNotEmpty ? purchase.vendorName : 'Purchase',
+                    style: _body(size: 14, weight: FontWeight.w700)),
+                  const SizedBox(height: 2),
+                  Text('$itemCount items \u2022 \u20B9${purchase.totalAmount.toStringAsFixed(0)}',
+                    style: _body(size: 12, weight: FontWeight.w500, color: const Color(0xFF888888))),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(color: statusColor.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(6)),
+                  child: Text(statusLabel, style: _body(size: 9, weight: FontWeight.w700, color: statusColor)),
+                ),
+                const SizedBox(height: 4),
+                Text('View Summary', style: _body(size: 11, weight: FontWeight.w600, color: const Color(0xFF3855B3))),
+              ],
             ),
           ],
         ),

@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/providers/shop_selection_provider.dart';
+import '../../../core/providers/tagline_provider.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../dashboard/providers/dashboard_provider.dart';
 import '../../dashboard/models/dashboard_metrics.dart';
@@ -127,26 +128,22 @@ class _SalesmanHomeScreenState extends State<SalesmanHomeScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        RichText(
-                          text: TextSpan(
-                            style: AppTextStyles.bodySmall.copyWith(
-                              fontSize: 13, fontWeight: FontWeight.w500, color: const Color(0xFF888888),
-                            ),
-                            children: [
-                              TextSpan(text: 'Om ', style: TextStyle(color: const Color(0xFF2E7D32), fontWeight: FontWeight.w600)),
-                              TextSpan(
-                                text: 'Namah',
-                                style: TextStyle(
-                                  color: const Color(0xFF2E7D32),
-                                  fontWeight: FontWeight.w600,
-                                  decoration: TextDecoration.underline,
+                        Consumer<TagLineProvider>(
+                          builder: (context, tagProvider, _) {
+                            final info = tagProvider.selectedInfo;
+                            return Center(
+                              child: Text(
+                                '${info.icon} ${info.text}',
+                                style: AppTextStyles.bodySmall.copyWith(
+                                  fontSize: 14, fontWeight: FontWeight.w700, color: info.color,
                                 ),
                               ),
-                              TextSpan(text: ' Shivaya, '),
-                              TextSpan(text: today, style: const TextStyle(fontStyle: FontStyle.italic)),
-                            ],
-                          ),
+                            );
+                          },
                         ),
+                        const SizedBox(height: 2),
+                        Text(today, style: AppTextStyles.bodySmall.copyWith(
+                          fontSize: 12, fontWeight: FontWeight.w500, color: const Color(0xFF888888), fontStyle: FontStyle.italic)),
                         const SizedBox(height: 3),
                         Row(
                           children: [
@@ -355,17 +352,24 @@ class _SalesmanHomeScreenState extends State<SalesmanHomeScreen> {
 
     return GestureDetector(
       onTap: () {
-        // Tap sales card -> show sales history
+        // Tap sales card -> open sales entry setup (category → size → enter/view summary)
+        final filter = dashboard.dateFilter;
+        DateTime date;
+        String label;
+        String? rangeLabel;
+        switch (filter) {
+          case DateFilterOption.today:
+            date = DateTime.now(); label = 'Today';
+          case DateFilterOption.yesterday:
+            date = DateTime.now().subtract(const Duration(days: 1)); label = 'Yesterday';
+          default:
+            date = _selectedDate ?? DateTime.now().subtract(const Duration(days: 1));
+            label = DateFormat('dd MMM').format(date);
+            if (_activeRangeFilter == DateFilterOption.last7Days) rangeLabel = 'Last 7 Days';
+            if (_activeRangeFilter == DateFilterOption.last30Days) rangeLabel = 'Last Month';
+        }
         Navigator.push(context, MaterialPageRoute(
-          builder: (_) => Scaffold(
-            appBar: AppBar(
-              title: const Text('Sales History'),
-              backgroundColor: Colors.white,
-              surfaceTintColor: Colors.transparent,
-              foregroundColor: const Color(0xFF1A1A2E),
-            ),
-            body: const SimpleSalesHistory(),
-          ),
+          builder: (_) => SalesEntrySetupScreen(initialDate: date, initialDateLabel: label, initialRangeLabel: rangeLabel),
         ));
       },
       child: Container(
@@ -426,7 +430,7 @@ class _SalesmanHomeScreenState extends State<SalesmanHomeScreen> {
                 CustomPaint(size: const Size(60, 48), painter: _TrendChartPainter()),
               ],
             ),
-            // Enter Sale button inside card
+            // Enter Daily Sale button
             const SizedBox(height: 14),
             SizedBox(
               width: double.infinity,
@@ -460,8 +464,24 @@ class _SalesmanHomeScreenState extends State<SalesmanHomeScreen> {
 
     return GestureDetector(
       onTap: () {
+        // Open purchase entry setup (category selection → enter/view summary)
+        final filter = dashboard.dateFilter;
+        DateTime date;
+        String label;
+        String? rangeLabel;
+        switch (filter) {
+          case DateFilterOption.today:
+            date = DateTime.now(); label = 'Today';
+          case DateFilterOption.yesterday:
+            date = DateTime.now().subtract(const Duration(days: 1)); label = 'Yesterday';
+          default:
+            date = _selectedDate ?? DateTime.now().subtract(const Duration(days: 1));
+            label = DateFormat('dd MMM').format(date);
+            if (_activeRangeFilter == DateFilterOption.last7Days) rangeLabel = 'Last 7 Days';
+            if (_activeRangeFilter == DateFilterOption.last30Days) rangeLabel = 'Last Month';
+        }
         Navigator.push(context, MaterialPageRoute(
-          builder: (_) => StockPurchaseHistoryScreen(shopId: shopId),
+          builder: (_) => PurchaseEntrySetupScreen(initialDate: date, initialDateLabel: label, initialRangeLabel: rangeLabel),
         ));
       },
       child: Container(
@@ -492,7 +512,7 @@ class _SalesmanHomeScreenState extends State<SalesmanHomeScreen> {
                   fontWeight: FontWeight.w900, fontSize: 32, color: const Color(0xFF1A1A2E))),
             const SizedBox(height: 5),
             Text(
-              returnCount > 0 ? '$returnCount items · Tap for history' : 'Tap to view purchase history',
+              returnCount > 0 ? '$returnCount items' : 'Tap to add purchase or view history',
               style: AppTextStyles.bodySmall.copyWith(fontWeight: FontWeight.w600, fontSize: 13, color: const Color(0xFF888888)),
             ),
             // Add Purchase button
@@ -508,7 +528,7 @@ class _SalesmanHomeScreenState extends State<SalesmanHomeScreen> {
                 label: Text('Add Purchase', style: AppTextStyles.bodySmall.copyWith(
                   fontWeight: FontWeight.w800, fontSize: 14, color: Colors.white)),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF0D47A1),
+                  backgroundColor: const Color(0xFFE53935),
                   foregroundColor: Colors.white,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   elevation: 0,

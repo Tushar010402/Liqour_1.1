@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/providers/shop_selection_provider.dart';
@@ -15,6 +16,7 @@ import '../widgets/dense_product_list_tile.dart';
 import '../widgets/empty_inventory_state.dart';
 import 'brand_import_screen.dart';
 import 'brand_catalog_modern_screen.dart';
+import 'brand_onboarding_setup_screen.dart';
 import 'custom_brand_form_screen.dart';
 import 'invoice_ocr_screen.dart';
 import '../../../core/widgets/modern_skeleton_loader.dart';
@@ -22,6 +24,7 @@ import '../../navigation/screens/main_navigation_screen.dart';
 import '../../../core/widgets/modern_retry_widget.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../../core/utils/logger.dart';
+import '../../../core/constants/size_range_constants.dart';
 
 /// Helper class to cache selected product's category and size info
 /// Used to maintain selection counts even when switching tabs
@@ -47,12 +50,18 @@ class ProductsGridScreen extends StatefulWidget {
   final Set<String>? selectedProductIds;
   final Function(String productId)? onProductSelectionToggle;
 
+  // Initial category/size from inventory setup flow
+  final String? initialCategory;
+  final String? initialSize;
+
   const ProductsGridScreen({
     super.key,
     this.isGridView = false,
     this.onToggleView,
     this.selectedProductIds,
     this.onProductSelectionToggle,
+    this.initialCategory,
+    this.initialSize,
   });
 
   @override
@@ -88,6 +97,7 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
   bool _hasSetDefaultSize = false;      // Track if default size was set
   bool _hasRestoredFilters = false;     // Track if filters have been restored from provider
   bool _isInitialLoad = true;           // Track if initial load in initState is complete
+  bool get _isSetupFlowMode => widget.initialCategory != null; // Setup flow provides category+size
 
   // Cache for selected products' metadata (persists across tab switches)
   // Key: productId, Value: {categoryId, size}
@@ -423,12 +433,50 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
         Logger.debug('📦 [ProductsGridScreen] Shop names: ${shopProvider.shops.map((s) => s.name).join(", ")}');
       }
 
-      // Load categories first, then set default and load products
+      // Load categories first
       Logger.debug('📦 [ProductsGridScreen] Loading categories with shopId: $shopId');
       await productProvider.loadCategories(shopId: shopId);
 
-      // Set default category (Whisky > Beer > first available) and load sizes
-      // Then auto-select first size and load products with both filters
+      // ── SETUP FLOW MODE: Use initial category + size from inventory setup ──
+      if (_isSetupFlowMode && mounted) {
+        Logger.debug('📦 [ProductsGridScreen] SETUP FLOW: category=${widget.initialCategory}, size=${widget.initialSize}');
+        final isEnglish = widget.initialCategory == 'English';
+        final isBeer = widget.initialCategory == 'Beer';
+
+        if (isEnglish) {
+          final englishIds = _getEnglishCategoryIds(productProvider.categories);
+          setState(() {
+            _isEnglishFilterSelected = true;
+            _selectedCategoryIds = englishIds;
+            _selectedCategoryName = 'English';
+            _selectedSize = widget.initialSize;
+            _hasSetDefaultCategory = true;
+            _hasSetDefaultSize = widget.initialSize != null;
+          });
+          await productProvider.loadAvailableSizes(categoryIds: englishIds, shopId: shopId);
+          await productProvider.loadProducts(shopId: shopId, categoryIds: englishIds, size: widget.initialSize);
+        } else if (isBeer) {
+          final beerCat = productProvider.categories.where((c) => c.name.toLowerCase().contains('beer')).firstOrNull;
+          if (beerCat != null) {
+            setState(() {
+              _isEnglishFilterSelected = false;
+              _selectedCategoryId = beerCat.id;
+              _selectedCategoryName = beerCat.name;
+              _selectedCategoryIds = [beerCat.id];
+              _selectedSize = widget.initialSize;
+              _hasSetDefaultCategory = true;
+              _hasSetDefaultSize = true;
+            });
+            await productProvider.loadAvailableSizes(categoryId: beerCat.id, shopId: shopId);
+            await productProvider.loadProducts(shopId: shopId, categoryId: beerCat.id, size: widget.initialSize);
+          }
+        }
+        await productProvider.loadStock(shopId: shopId);
+        if (mounted) setState(() => _isInitialLoad = false);
+        return; // Skip default logic
+      }
+
+      // ── DEFAULT MODE: Auto-select category + size ──
       if (!_hasSetDefaultCategory && productProvider.categories.isNotEmpty) {
         final defaultCategory = _getDefaultCategory(productProvider.categories);
         if (defaultCategory != null && mounted) {
@@ -839,17 +887,9 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
     // NOTE: Category filtering is now handled by backend via loadProducts(categoryId: ...)
     // No client-side category filtering needed - backend returns only matching products
 
-    // Client-side size filter — backend sends size param but may not filter by it
-    // This ensures the displayed products match the selected size chip
-    // SAFETY: Only apply if size chips are actually showing (avoids ghost filtering
-    // when sizes fail to load but _selectedSize still has a stale value)
-    if (_selectedSize != null && _selectedSize!.isNotEmpty) {
-      final provider = context.read<ProductProvider>();
-      final sizesAvailable = provider.availableSizesWithCounts.isNotEmpty;
-      if (sizesAvailable) {
-        products = products.where((p) => p.size.toUpperCase() == _selectedSize!.toUpperCase()).toList();
-      }
-    }
+    // NOTE: Size filtering is now handled by backend via loadProducts(size: ...)
+    // Backend accepts range labels and filters by ML range server-side
+    // No client-side size filtering needed
 
     // Apply "In Stock Only" toggle filter (show only products with stock > 0)
     if (_showInStockOnly) {
@@ -984,6 +1024,20 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
   Widget build(BuildContext context) {
     return Consumer<ProductProvider>(
       builder: (context, provider, _) {
+        // Auto-reload sizes if they got cleared by another screen (e.g. brand onboarding)
+        if (provider.availableSizesWithCounts.isEmpty &&
+            !provider.isSizesLoading &&
+            _selectedCategoryId != null &&
+            _hasSetDefaultCategory &&
+            provider.hasInitializedProducts) {
+          final shopId = context.read<ShopSelectionProvider>().selectedShopId;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              provider.loadAvailableSizes(categoryId: _selectedCategoryId, shopId: shopId);
+            }
+          });
+        }
+
         // Modern skeleton loader - show during loading OR before first load completes
         if (provider.isLoading || !provider.hasInitializedProducts) {
           return const ProductGridSkeleton(itemCount: 8);
@@ -1009,7 +1063,7 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
               final result = await Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (context) => const BrandCatalogModernScreen(),
+                  builder: (context) => const BrandOnboardingSetupScreen(),
                 ),
               );
 
@@ -1062,7 +1116,72 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
           child: CustomScrollView(
             controller: _scrollController,
             slivers: [
-              // Combined Navbar - Shop Selector & View Toggle (like Daily Sales Entry)
+              // Header — setup flow gets clean daily-sales-entry style; normal gets full toolbar
+              if (_isSetupFlowMode)
+                SliverAppBar(
+                  pinned: true,
+                  elevation: 0,
+                  backgroundColor: Colors.white,
+                  surfaceTintColor: Colors.transparent,
+                  toolbarHeight: 48,
+                  automaticallyImplyLeading: false,
+                  titleSpacing: 0,
+                  bottom: PreferredSize(
+                    preferredSize: const Size.fromHeight(1),
+                    child: Container(height: 1, color: const Color(0xFFEAEDF1)),
+                  ),
+                  title: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      children: [
+                        // Back button — blue circle with chevron (matches daily sales entry)
+                        GestureDetector(
+                          onTap: () => Navigator.of(context).pop(),
+                          child: Container(
+                            width: 38,
+                            height: 38,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF1349B8),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.chevron_left, color: Colors.white, size: 22),
+                          ),
+                        ),
+                        // Centered title
+                        Expanded(
+                          child: Text(
+                            'Inventory',
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.montserratAlternates(
+                              fontSize: 19,
+                              fontWeight: FontWeight.w600,
+                              color: const Color(0xFF18181B),
+                              letterSpacing: -0.3,
+                            ),
+                          ),
+                        ),
+                        // Search icon (right side)
+                        GestureDetector(
+                          onTap: () => setState(() => _isSearchExpanded = !_isSearchExpanded),
+                          child: Container(
+                            width: 38,
+                            height: 38,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFEBF1FA),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              _isSearchExpanded ? Icons.close : Icons.search,
+                              size: 18,
+                              color: const Color(0xFF18181B),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else
               SliverAppBar(
                 pinned: true,
                 floating: false,
@@ -1266,9 +1385,8 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
                 ),
               ),
 
-              // Inline Category Filter Chips - LOADED FROM API (Industrial Best Practice)
-              // Categories are loaded upfront from /api/inventory/categories, not extracted from paginated products
-              if (provider.categories.isNotEmpty || provider.isCategoriesLoading)
+              // Inline Category Filter Chips — hidden in setup flow mode (setup already selected category)
+              if (!_isSetupFlowMode && (provider.categories.isNotEmpty || provider.isCategoriesLoading))
                 SliverToBoxAdapter(
                   child: Container(
                     color: Theme.of(context).colorScheme.surface,
@@ -1562,10 +1680,123 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
                   ),
                 ),
 
-              // Inline Size Filter Chips (DYNAMIC from backend - Industrial Best Practice)
-              // Sizes are loaded from /api/inventory/products/sizes with stock totals
-              // Shows inline stock: "180ML 📦 999+" with color-coded background
-              if (provider.availableSizesWithCounts.isNotEmpty || provider.isSizesLoading)
+              // Setup flow: search bar (when expanded) + compact filter bar + sort/stock/view controls
+              if (_isSetupFlowMode) ...[
+                // Expandable search bar
+                if (_isSearchExpanded)
+                  SliverToBoxAdapter(
+                    child: Container(
+                      color: Colors.white,
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                      child: Container(
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF1F5F9),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: TextField(
+                          controller: _searchController,
+                          autofocus: true,
+                          style: const TextStyle(fontSize: 14),
+                          decoration: InputDecoration(
+                            hintText: 'Search products...',
+                            hintStyle: const TextStyle(fontSize: 14, color: Color(0xFF94A3B8)),
+                            prefixIcon: const Icon(Icons.search, size: 18, color: Color(0xFF94A3B8)),
+                            suffixIcon: IconButton(
+                              icon: const Icon(Icons.close, size: 18, color: Color(0xFF94A3B8)),
+                              onPressed: () {
+                                _searchController.clear();
+                                setState(() { _searchQuery = ''; _isSearchExpanded = false; });
+                              },
+                            ),
+                            border: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                          ),
+                          onChanged: _onSearchChanged,
+                        ),
+                      ),
+                    ),
+                  ),
+                // Filter badge + sort/stock/view row
+                SliverToBoxAdapter(
+                  child: Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.fromLTRB(16, 6, 12, 8),
+                    child: Row(
+                      children: [
+                        // Category + size filter badge
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF3855B3),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            [
+                              widget.initialCategory == 'English' ? 'Whisky & Spirits' : widget.initialCategory,
+                              if (widget.initialSize != null && widget.initialSize!.isNotEmpty) widget.initialSize,
+                            ].join(' · '),
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.white),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text('${provider.products.length} products', style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8))),
+                        const Spacer(),
+                        // Sort
+                        SortMenu(
+                          currentSort: _currentSort,
+                          onSortChanged: (sort) => setState(() => _currentSort = sort),
+                        ),
+                        // In Stock toggle
+                        GestureDetector(
+                          onTap: () => setState(() => _showInStockOnly = !_showInStockOnly),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: _showInStockOnly ? const Color(0xFF1349B8).withOpacity(0.1) : const Color(0xFFF1F5F9),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: _showInStockOnly ? const Color(0xFF1349B8) : const Color(0xFFE2E8F0),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _showInStockOnly ? Icons.inventory_2 : Icons.inventory_2_outlined,
+                                  size: 14,
+                                  color: _showInStockOnly ? const Color(0xFF1349B8) : const Color(0xFF94A3B8),
+                                ),
+                                const SizedBox(width: 4),
+                                Text('Stock', style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: _showInStockOnly ? FontWeight.w600 : FontWeight.w500,
+                                  color: _showInStockOnly ? const Color(0xFF1349B8) : const Color(0xFF94A3B8),
+                                )),
+                              ],
+                            ),
+                          ),
+                        ),
+                        // View toggle
+                        if (widget.onToggleView != null)
+                          IconButton(
+                            icon: Icon(
+                              widget.isGridView ? Icons.view_list : Icons.grid_view,
+                              color: const Color(0xFF1349B8),
+                              size: 20,
+                            ),
+                            onPressed: widget.onToggleView,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+
+              // Inline Size Filter Chips — hidden in setup flow mode
+              if (!_isSetupFlowMode && (provider.availableSizesWithCounts.isNotEmpty || provider.isSizesLoading))
                 SliverToBoxAdapter(
                   child: Container(
                     color: Theme.of(context).colorScheme.surface,
@@ -1634,11 +1865,12 @@ class _ProductsGridScreenState extends State<ProductsGridScreen> {
                                             // Immediately scroll to the selected size (before products load)
                                             _scrollToSelectedSize(selectedIndex, totalSizes);
 
-                                            // Load products (this triggers rebuild)
+                                            // Load products with category + size filter
                                             await provider.loadProducts(
                                               shopId: shopProvider.selectedShopId,
-                                              categoryId: _selectedCategoryId,
-                                              size: sizeWithCount.size, // Backend filters by size!
+                                              categoryId: _isEnglishFilterSelected ? null : _selectedCategoryId,
+                                              categoryIds: _isEnglishFilterSelected ? _selectedCategoryIds : null,
+                                              size: sizeWithCount.size,
                                             );
 
                                             // Scroll again AFTER products load to ensure position is maintained

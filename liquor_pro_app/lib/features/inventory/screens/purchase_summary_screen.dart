@@ -7,8 +7,10 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../../../core/providers/shop_selection_provider.dart';
+import '../../../core/models/ai_feedback_model.dart';
 import '../../../core/utils/haptic_feedback.dart';
 import '../../../core/utils/snackbar_helper.dart';
+import '../../../core/widgets/ai_feedback_bottom_sheet.dart';
 import '../../../shared/widgets/bottom_action_bar.dart';
 import '../models/stock_purchase.dart';
 import '../providers/stock_purchase_provider.dart';
@@ -31,6 +33,7 @@ class PurchaseSummaryItem {
   final String size;
   final double costPrice;
   final double sellingPrice;
+  final double dutyFee;
   int quantity;
   final int stock;
 
@@ -41,6 +44,7 @@ class PurchaseSummaryItem {
     required this.size,
     required this.costPrice,
     required this.sellingPrice,
+    this.dutyFee = 0.0,
     required this.quantity,
     required this.stock,
   });
@@ -49,15 +53,17 @@ class PurchaseSummaryItem {
 }
 
 /// Full-screen Purchase Summary — mirrors SalesSummaryScreen.
-/// Shows item list, vendor selection, receipt upload, TDS, and submit.
+/// Shows item list, vendor selection, receipt upload, TCS, and submit.
 class PurchaseSummaryScreen extends StatefulWidget {
   final List<PurchaseSummaryItem> items;
   final DateTime selectedDate;
+  final bool readOnly;
 
   const PurchaseSummaryScreen({
     super.key,
     required this.items,
     required this.selectedDate,
+    this.readOnly = false,
   });
 
   @override
@@ -91,12 +97,12 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
   }
 
   double get _subtotal => _items.fold(0.0, (s, i) => s + i.totalAmount);
-  double get _tds => _subtotal * 0.01;
+  double get _tcs => _subtotal * 0.02; // TCS 2% (Tax Collected at Source)
   double get _roundOff {
-    final afterTds = _subtotal + _tds;
-    return afterTds.round().toDouble() - afterTds;
+    final afterTcs = _subtotal + _tcs;
+    return afterTcs.round().toDouble() - afterTcs;
   }
-  double get _total => _subtotal + _tds + _roundOff;
+  double get _total => _subtotal + _tcs + _roundOff;
   int get _totalQty => _items.fold(0, (s, i) => s + i.quantity);
 
   String _fmt(double v) {
@@ -338,6 +344,7 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
       size: e.size,
       quantity: e.quantity,
       costPrice: e.costPrice,
+      dutyFee: e.dutyFee,
     )).toList();
 
     final provider = context.read<StockPurchaseProvider>();
@@ -356,6 +363,12 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
     if (success) {
       HapticFeedbackUtil.success();
       SnackbarHelper.showSuccess(context, 'Purchase submitted for approval');
+      await AIFeedbackBottomSheet.show(
+        context,
+        flowType: AIFlowType.purchaseEntry,
+        successMessage: 'Purchase submitted for approval',
+      );
+      if (!mounted) return;
       Navigator.pop(context, 'submitted');
     } else {
       SnackbarHelper.showError(context, provider.errorMessage ?? 'Failed to submit');
@@ -460,8 +473,8 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
                   ),
           ),
 
-          // Submit button
-          if (_items.isNotEmpty)
+          // Submit button — hidden in read-only mode
+          if (_items.isNotEmpty && !widget.readOnly)
             BottomActionBar(
               label: _isSubmitting ? 'Submitting...' : 'Submit for Approval',
               onPressed: _isSubmitting ? null : _submit,
@@ -619,7 +632,7 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
       child: Column(
         children: [
           _totalRow('Subtotal', _subtotal),
-          _totalRow('TDS (1%)', _tds),
+          _totalRow('TCS (2%)', _tcs),
           if (_roundOff.abs() > 0.001) _totalRow('Round Off', _roundOff),
           const Divider(height: 16),
           Row(

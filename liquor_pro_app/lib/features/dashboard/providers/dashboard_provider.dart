@@ -22,25 +22,23 @@ class DashboardProvider with ChangeNotifier {
   double? _localUpiAmount;
   double? _localExpenseAmount;
 
-  // Full breakdown data for sending to backend
+  // Full breakdown data for sending to backend AND populating sheets on reopen
   Map<int, int>? _lastCashDenominations;
   Map<String, double>? _lastUpiBreakdown;
   Map<String, double>? _lastExpenses;
 
-  /// Effective cash = total sales - UPI - expenses
-  /// When user enters UPI or expenses, those reduce the cash in hand
+  // Public getters for populating sheets with saved data
+  Map<int, int>? get lastCashDenominations => _lastCashDenominations;
+  Map<String, double>? get lastUpiBreakdown => _lastUpiBreakdown;
+  Map<String, double>? get lastExpenses => _lastExpenses;
+
+  /// Cash in hand = totalSales - UPI - expenses (auto-calculated)
   double get effectiveCashAmount {
     final totalSales = _summary?.totalRevenue ?? 0;
     final upi = _localUpiAmount ?? _summary?.upiAmount ?? 0;
     final expense = _localExpenseAmount ?? _summary?.expenseAmount ?? 0;
-    // If user manually counted cash, use that minus expenses
-    if (_localCashTotal != null) {
-      final cash = _localCashTotal!;
-      if (_localExpenseAmount != null) return cash - _localExpenseAmount!;
-      return cash;
-    }
-    // Otherwise derive: cash = totalSales - upi - expenses
-    return totalSales - upi - expense;
+    final cash = totalSales - upi - expense;
+    return cash < 0 ? 0 : cash;
   }
   double get effectiveUpiAmount => _localUpiAmount ?? _summary?.upiAmount ?? 0;
   double get effectiveExpenseAmount => _localExpenseAmount ?? _summary?.expenseAmount ?? 0;
@@ -92,14 +90,20 @@ class DashboardProvider with ChangeNotifier {
         _summary = response.data;
         _errorMessage = null;
         _metricsError = null;
-        // Clear local overrides — will be populated from day-closing fetch
+        // Clear local overrides and breakdowns — will be populated from day-closing fetch
         _localCashTotal = null;
         _localUpiAmount = null;
         _localExpenseAmount = null;
+        _lastCashDenominations = null;
+        _lastUpiBreakdown = null;
+        _lastExpenses = null;
         debugPrint('[Dashboard] Loaded: '
+            'filter=$_dateFilter, '
+            'totalRevenue=${_summary!.totalRevenue}, '
+            'purchaseAmount=${_summary!.purchaseAmount}, '
+            'todaySales.totalAmount=${_summary!.todaysSales.totalAmount}, '
+            'todaySales.totalSales=${_summary!.todaysSales.totalSales}, '
             'shops=${_summary!.shopSummaries.length}, '
-            'teamStatus=${_summary!.teamStatus != null ? '${_summary!.teamStatus!.totalSalesmen} salesmen' : 'null'}, '
-            'pending=${_summary!.pendingSales}, '
             'shopFilter=$_selectedShopId');
         // Load day-closing data for this date (UPI, Cash, Expenses)
         _loadDayClosingData();
@@ -254,7 +258,9 @@ class DashboardProvider with ChangeNotifier {
     _saveDayClosingToBackend(expenses: expenses, expenseTotal: total);
   }
 
-  /// Save day-closing data to backend, then refresh dashboard
+  /// Save day-closing data to backend, then refresh dashboard.
+  /// Always sends ALL breakdowns to prevent the backend from overwriting
+  /// previously saved sections with empty data.
   Future<void> _saveDayClosingToBackend({
     Map<int, int>? cashDenominations,
     double? cashTotal,
@@ -265,18 +271,25 @@ class DashboardProvider with ChangeNotifier {
   }) async {
     if (_dayClosingService == null || _selectedShopId == null) return;
     try {
-      // Use the date matching the current filter, not always today
       final targetDate = _getSelectedDate();
       final date = '${targetDate.year}-${targetDate.month.toString().padLeft(2, '0')}-${targetDate.day.toString().padLeft(2, '0')}';
+      // Merge: use new values if provided, otherwise use last saved values
+      final effectiveCashDenom = cashDenominations ?? _lastCashDenominations;
+      final effectiveCashTotal = cashTotal ?? _localCashTotal;
+      final effectiveUpi = upiBreakdown ?? _lastUpiBreakdown;
+      final effectiveUpiTotal = upiTotal ?? _localUpiAmount;
+      final effectiveExpenses = expenses ?? _lastExpenses;
+      final effectiveExpenseTotal = expenseTotal ?? _localExpenseAmount;
+
       final response = await _dayClosingService!.saveDayClosing(
         shopId: _selectedShopId!,
         date: date,
-        cashDenominations: cashDenominations,
-        cashTotal: cashTotal,
-        upiBreakdown: upiBreakdown,
-        upiTotal: upiTotal,
-        expenses: expenses,
-        expenseTotal: expenseTotal,
+        cashDenominations: effectiveCashDenom,
+        cashTotal: effectiveCashTotal,
+        upiBreakdown: effectiveUpi,
+        upiTotal: effectiveUpiTotal,
+        expenses: effectiveExpenses,
+        expenseTotal: effectiveExpenseTotal,
       );
       debugPrint('[DayClosing] Saved: success=${response.success}');
       // Refresh dashboard to get backend-calculated values
@@ -309,12 +322,45 @@ class DashboardProvider with ChangeNotifier {
         final upiTotal = (data['upi_total'] ?? 0).toDouble();
         final expenseTotal = (data['expense_total'] ?? 0).toDouble();
 
-        // Only set local values if backend has non-zero data
-        if (cashTotal > 0) _localCashTotal = cashTotal;
-        if (upiTotal > 0) _localUpiAmount = upiTotal;
-        if (expenseTotal > 0) _localExpenseAmount = expenseTotal;
+        // Restore breakdown data so sheets show previously entered values
+        final upiBreakdown = data['upi_breakdown'];
+        if (upiBreakdown != null && upiBreakdown is Map && upiBreakdown.isNotEmpty) {
+          _lastUpiBreakdown = Map<String, double>.from(
+            upiBreakdown.map((k, v) => MapEntry(k.toString(), (v ?? 0).toDouble())),
+          );
+          // Recompute UPI total from breakdown (more reliable than upi_total field)
+          final breakdownSum = _lastUpiBreakdown!.values.fold(0.0, (s, v) => s + v);
+          if (breakdownSum > 0) _localUpiAmount = breakdownSum;
+        } else if (upiTotal > 0) {
+          _localUpiAmount = upiTotal;
+        }
+
+        final cashDenoms = data['cash_denominations'];
+        if (cashDenoms != null && cashDenoms is Map && cashDenoms.isNotEmpty) {
+          _lastCashDenominations = Map<int, int>.from(
+            cashDenoms.map((k, v) => MapEntry(int.tryParse(k.toString()) ?? 0, v is int ? v : (v ?? 0).toInt())),
+          );
+          // Recompute cash total from denominations
+          final denomSum = _lastCashDenominations!.entries.fold(0.0, (s, e) => s + e.key * e.value);
+          if (denomSum > 0) _localCashTotal = denomSum;
+        } else if (cashTotal > 0) {
+          _localCashTotal = cashTotal;
+        }
+
+        final expenses = data['expenses'];
+        if (expenses != null && expenses is Map && expenses.isNotEmpty) {
+          _lastExpenses = Map<String, double>.from(
+            expenses.map((k, v) => MapEntry(k.toString(), (v ?? 0).toDouble())),
+          );
+          // Recompute expense total from breakdown
+          final expSum = _lastExpenses!.values.fold(0.0, (s, v) => s + v);
+          if (expSum > 0) _localExpenseAmount = expSum;
+        } else if (expenseTotal > 0) {
+          _localExpenseAmount = expenseTotal;
+        }
 
         debugPrint('[DayClosing] Loaded for $date: cash=$cashTotal, upi=$upiTotal, expense=$expenseTotal');
+        debugPrint('[DayClosing] Breakdowns: upi_breakdown=${data['upi_breakdown']}, cash_denominations=${data['cash_denominations']}, expenses=${data['expenses']}');
         notifyListeners();
       }
     } catch (e) {

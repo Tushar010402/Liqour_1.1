@@ -328,6 +328,10 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
                             return ValidationResult(
                               isAvailable: validationResponse.available,
                               message: validationResponse.message,
+                              needsTransfer: validationResponse.needsTransfer,
+                              existingName: validationResponse.existingName,
+                              existingRole: validationResponse.existingRole,
+                              existingTenant: validationResponse.existingTenant,
                             );
                           } catch (e) {
                             debugPrint('❌ [UserManagement] Validation error: $e');
@@ -796,41 +800,44 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
                             certificateImage: certificateImagePath,
                           );
 
-                          final success = await _userProvider!.createUser(request);
+                          try {
+                            final success = await _userProvider!.createUser(request);
 
-                          dialogSetState(() => isCreating = false);
+                            dialogSetState(() => isCreating = false);
 
-                          if (success) {
-                            Navigator.pop(context);
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('User created successfully'),
-                                  backgroundColor: AppColors.success,
-                                ),
-                              );
-                            }
-                          } else {
-                            if (mounted) {
-                              // Best Practice: Capture ScaffoldMessenger BEFORE showing snackbar
-                              // to avoid "deactivated widget's ancestor" error in action callback
-                              final messenger = ScaffoldMessenger.of(context);
-                              messenger.showSnackBar(
-                                SnackBar(
-                                  content: Text(_userProvider?.errorMessage ?? 'Failed to create user'),
-                                  backgroundColor: AppColors.error,
-                                  duration: const Duration(seconds: 5),
-                                  behavior: SnackBarBehavior.floating,
-                                  action: SnackBarAction(
-                                    label: 'OK',
-                                    textColor: Colors.white,
-                                    onPressed: () {
-                                      messenger.hideCurrentSnackBar();
-                                    },
+                            if (success) {
+                              Navigator.pop(context);
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('User created successfully'),
+                                    backgroundColor: AppColors.success,
                                   ),
-                                ),
-                              );
+                                );
+                              }
+                            } else {
+                              if (mounted) {
+                                final messenger = ScaffoldMessenger.of(context);
+                                messenger.showSnackBar(
+                                  SnackBar(
+                                    content: Text(_userProvider?.errorMessage ?? 'Failed to create user'),
+                                    backgroundColor: AppColors.error,
+                                    duration: const Duration(seconds: 5),
+                                    behavior: SnackBarBehavior.floating,
+                                    action: SnackBarAction(
+                                      label: 'OK',
+                                      textColor: Colors.white,
+                                      onPressed: () => messenger.hideCurrentSnackBar(),
+                                    ),
+                                  ),
+                                );
+                              }
                             }
+                          } on PhoneConflictException catch (conflict) {
+                            dialogSetState(() => isCreating = false);
+                            if (!context.mounted) return;
+                            // Show OTP transfer dialog
+                            _showPhoneTransferDialog(context, request, conflict);
                           }
                         },
                         style: ElevatedButton.styleFrom(
@@ -1869,6 +1876,10 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
                                   return ValidationResult(
                                     isAvailable: validationResponse.available,
                                     message: validationResponse.message,
+                                    needsTransfer: validationResponse.needsTransfer,
+                                    existingName: validationResponse.existingName,
+                                    existingRole: validationResponse.existingRole,
+                                    existingTenant: validationResponse.existingTenant,
                                   );
                                 } catch (e) {
                                   return ValidationResult(
@@ -2733,5 +2744,166 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
         );
       }
     }
+  }
+
+  /// Shows OTP dialog for phone transfer when creating a user with an existing phone
+  void _showPhoneTransferDialog(
+    BuildContext parentContext,
+    CreateUserRequest originalRequest,
+    PhoneConflictException conflict,
+  ) {
+    final otpController = TextEditingController();
+    String? sessionId;
+    bool isSending = false;
+    bool isVerifying = false;
+    bool otpSent = false;
+    String? errorText;
+
+    showDialog(
+      context: parentContext,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: Colors.orange.shade700, size: 28),
+                  const SizedBox(width: 10),
+                  const Expanded(child: Text('Phone Already Registered', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700))),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Existing user info
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.orange.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('This phone is registered to:', style: TextStyle(fontSize: 12, color: Colors.orange.shade800)),
+                        const SizedBox(height: 6),
+                        if (conflict.existingUserName != null)
+                          Text(conflict.existingUserName!, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                        if (conflict.existingUserRole != null)
+                          Text('Role: ${conflict.existingUserRole}', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                        if (conflict.existingTenant != null)
+                          Text('Tenant: ${conflict.existingTenant}', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    otpSent
+                      ? 'Enter the OTP sent to ${conflict.phone} to transfer this number to the new user.'
+                      : 'Send an OTP to verify and transfer this phone number to your new user. The existing user will be deactivated.',
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                  ),
+                  if (otpSent) ...[
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: otpController,
+                      keyboardType: TextInputType.number,
+                      maxLength: 6,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: 'Enter 6-digit OTP',
+                        counterText: '',
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                        prefixIcon: const Icon(Icons.lock_outline),
+                        errorText: errorText,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                if (!otpSent)
+                  ElevatedButton.icon(
+                    onPressed: isSending ? null : () async {
+                      setState(() { isSending = true; errorText = null; });
+                      try {
+                        sessionId = await _userProvider!.sendPhoneTransferOTP(conflict.phone);
+                        setState(() { otpSent = true; isSending = false; });
+                      } catch (e) {
+                        setState(() { isSending = false; errorText = e.toString(); });
+                      }
+                    },
+                    icon: isSending
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.sms_outlined, size: 18),
+                    label: Text(isSending ? 'Sending...' : 'Send OTP'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange.shade700,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                if (otpSent)
+                  ElevatedButton.icon(
+                    onPressed: isVerifying ? null : () async {
+                      final otp = otpController.text.trim();
+                      if (otp.length != 6) {
+                        setState(() => errorText = 'Enter 6-digit OTP');
+                        return;
+                      }
+                      setState(() { isVerifying = true; errorText = null; });
+                      try {
+                        final requestWithOtp = originalRequest.copyWithTransfer(
+                          otp: otp,
+                          sessionId: sessionId ?? '',
+                        );
+                        final success = await _userProvider!.createUser(requestWithOtp);
+                        if (success && ctx.mounted) {
+                          Navigator.pop(ctx); // close OTP dialog
+                          Navigator.pop(parentContext); // close create user dialog
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('User created successfully (phone transferred)'),
+                                backgroundColor: AppColors.success,
+                              ),
+                            );
+                          }
+                        } else {
+                          setState(() {
+                            isVerifying = false;
+                            errorText = _userProvider?.errorMessage ?? 'Failed to create user';
+                          });
+                        }
+                      } on PhoneConflictException {
+                        setState(() { isVerifying = false; errorText = 'Transfer failed. Try again.'; });
+                      } catch (e) {
+                        setState(() { isVerifying = false; errorText = e.toString(); });
+                      }
+                    },
+                    icon: isVerifying
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.check_circle_outline, size: 18),
+                    label: Text(isVerifying ? 'Verifying...' : 'Verify & Transfer'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 }

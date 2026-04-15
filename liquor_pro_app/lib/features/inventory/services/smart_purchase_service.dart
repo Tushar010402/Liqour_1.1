@@ -26,6 +26,7 @@ class SmartPurchaseService {
     required String shopId,
     String? vendorId,
     DateTime? invoiceDate,
+    List<File>? gatePassImages, // Optional gate pass images for duty extraction
     Function(int current, int total, String status)? onProgress,
   }) async {
     try {
@@ -92,12 +93,34 @@ class SmartPurchaseService {
         );
       }
 
+      // Add gate pass images if provided
+      if (gatePassImages != null && gatePassImages.isNotEmpty) {
+        final compressedGP = await ImageCompressor.compressImages(
+          gatePassImages,
+          quality: 90,
+          maxWidth: 2048,
+          maxHeight: 2048,
+        );
+        for (int i = 0; i < compressedGP.length; i++) {
+          request.files.add(
+            await http.MultipartFile.fromPath(
+              'gate_pass_images',
+              compressedGP[i].path,
+              filename: 'gate_pass_${i + 1}.jpg',
+              contentType: http_parser.MediaType.parse('image/jpeg'),
+            ),
+          );
+        }
+      }
+
       if (kDebugMode) {
-        Logger.debug('SmartPurchaseService: Sending to $url');
+        Logger.debug('SmartPurchaseService: Sending to $url (bill: ${compressedImages.length}, gate_pass: ${gatePassImages?.length ?? 0})');
       }
 
       // Phase 3: Wait for AI processing
-      onProgress?.call(2, 3, 'AI is reading your invoice...');
+      onProgress?.call(2, 3, gatePassImages != null && gatePassImages.isNotEmpty
+          ? 'AI is reading invoice & gate pass...'
+          : 'AI is reading your invoice...');
 
       final streamedResponse = await request.send().timeout(
         const Duration(seconds: 120),

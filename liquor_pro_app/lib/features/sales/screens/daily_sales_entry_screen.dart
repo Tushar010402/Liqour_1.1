@@ -22,6 +22,9 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/product_constants.dart';
+import '../../../core/constants/size_range_constants.dart';
+import '../../../core/models/ai_feedback_model.dart';
+import '../../../core/widgets/ai_feedback_bottom_sheet.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../core/utils/snackbar_helper.dart';
 import '../../../core/utils/haptic_feedback.dart';
@@ -916,8 +919,8 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
       await provider.loadProducts(
         shopId: null,  // DON'T filter products by shop - products are tenant-wide!
         limit: kDailySalesProductLimit,
-        categoryId: null,  // Explicitly clear - don't inherit from previous screen
-        size: null,        // Explicitly clear - don't inherit from previous screen
+        categoryId: null,  // Explicitly clear - load ALL categories
+        size: null,        // Explicitly clear - load ALL sizes (filter client-side)
       );
 
       // Now load stock for this specific shop (stock IS shop-specific)
@@ -2334,11 +2337,10 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
                 children: [
                   // Size chips with counts (deduplicated and normalized)
                   ...sizesWithCounts.map((sizeWithCount) {
-                    // BEST PRACTICE: Compare normalized sizes for selection
-                    final normalizedSelected = _selectedSize != null
-                        ? ProductConstants.normalizeSize(_selectedSize!)
-                        : null;
-                    final isSelected = normalizedSelected == sizeWithCount.size;
+                    // Compare sizes for selection — case-insensitive for range labels
+                    final isSelected = _selectedSize != null &&
+                        (_selectedSize == sizeWithCount.size ||
+                         _selectedSize!.toLowerCase() == sizeWithCount.size.toLowerCase());
                     return Padding(
                       padding: const EdgeInsets.only(right: 6),
                       child: GestureDetector(
@@ -2653,6 +2655,8 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
                       ? CachedNetworkImage(
                           imageUrl: product.imageUrl,
                           fit: BoxFit.cover,
+                          memCacheWidth: 200,
+                          memCacheHeight: 200,
                           placeholder: (context, url) => const SizedBox(),
                           errorWidget: (context, url, error) => Center(
                             child: Icon(Icons.liquor, size: 30, color: Colors.white.withValues(alpha: 0.3)),
@@ -2663,7 +2667,7 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
                         ),
                 ),
                 // MRP badge — top-left dark overlay (JSX: bg-[#0A1736]/90 rounded-br)
-                if (product.sellingPrice > 0)
+                if (product.mrp > 0 || product.sellingPrice > 0)
                   Positioned(
                     top: 0,
                     left: 0,
@@ -2678,7 +2682,7 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           const Text('MRP', style: TextStyle(fontSize: 7, color: Color(0xDDFFFFFF), fontWeight: FontWeight.w700, letterSpacing: 0.5)),
-                          Text('₹ ${product.sellingPrice.toStringAsFixed(0)}',
+                          Text('₹ ${product.mrp > 0 ? product.mrp.toStringAsFixed(0) : product.sellingPrice.toStringAsFixed(0)}',
                             style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.w900)),
                         ],
                       ),
@@ -2701,10 +2705,8 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
                   children: [
                     Expanded(
                       child: Text(
-                        _cleanProductName(product.name),
-                        style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: Color(0xFF141F39), height: 1.2),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        product.cleanName,
+                        style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: Color(0xFF141F39), height: 1.25),
                       ),
                     ),
                   ],
@@ -2754,7 +2756,7 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            '₹ ${product.sellingPrice > 0 ? product.sellingPrice.toStringAsFixed(0) : "--"}',
+                            '₹ ${product.mrp > 0 ? product.mrp.toStringAsFixed(0) : product.sellingPrice > 0 ? product.sellingPrice.toStringAsFixed(0) : "--"}',
                             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: Color(0xFF0B1536)),
                           ),
                           const SizedBox(height: 3),
@@ -3200,11 +3202,46 @@ class _DailySalesEntryScreenState extends State<DailySalesEntryScreen> {
       return;
     }
 
+    // Build available products list for "Add Missing Item" feature
+    final availableForMissing = <SalesSummaryItem>[];
+    final addedIds = items.map((i) => i.productId).toSet();
+    for (final product in _cachedProducts) {
+      if (addedIds.contains(product.id)) continue;
+
+      // Match category — same logic as product display filter
+      final catName = (product.category?.name ?? '').toLowerCase();
+      if (_isEnglishFilterSelected) {
+        if (catName.contains('beer')) continue; // English = non-beer
+      } else if (_selectedCategoryName != null) {
+        if (product.category?.name != _selectedCategoryName) continue;
+      }
+
+      // Match size range
+      if (_selectedSize != null) {
+        if (!SizeRangeConstants.sizeMatchesRange(product.size, _selectedSize!, _selectedCategoryName ?? 'Whisky')) continue;
+      }
+
+      final stock = _cachedStockMap[product.id];
+      availableForMissing.add(SalesSummaryItem(
+        productId: product.id,
+        name: product.cleanName,
+        price: product.mrp > 0 ? product.mrp : product.sellingPrice,
+        quantity: 0,
+        mrp: product.mrp > 0 ? product.mrp : product.sellingPrice,
+        stock: stock?.quantity ?? 0,
+        closingStock: stock?.quantity ?? 0,
+      ));
+    }
+
     Navigator.push<void>(
       context,
       MaterialPageRoute(
         builder: (_) => SalesSummaryScreen(
           items: items,
+          availableProducts: availableForMissing,
+          isAIMode: true, // Enable "Add Missing" feature
+          saleCategory: _selectedCategoryName,
+          saleSize: _selectedSize,
           onSubmitItems: (finalItems) {
             Navigator.pop(context); // Pop summary screen
             _submitFromSummaryItems(provider, finalItems);
@@ -6999,13 +7036,18 @@ showCupertinoDialog(
         return false;
       }
 
-      // Size filter (single selection)
-      // BEST PRACTICE: Use normalized comparison to handle any case differences
+      // Size filter — supports range labels and exact sizes
       if (_selectedSize != null) {
-        final productSize = ProductConstants.normalizeSize(product.size);
-        final filterSize = ProductConstants.normalizeSize(_selectedSize!);
-        if (productSize != filterSize) {
-          return false;
+        final isRange = _selectedSize!.contains('(') || _selectedSize!.contains('Below') || _selectedSize!.contains('Bulk');
+        if (isRange) {
+          final category = _selectedCategoryName ?? '';
+          if (!SizeRangeConstants.sizeMatchesRange(product.size, _selectedSize!, category)) {
+            return false;
+          }
+        } else {
+          final productSize = ProductConstants.normalizeSize(product.size);
+          final filterSize = ProductConstants.normalizeSize(_selectedSize!);
+          if (productSize != filterSize) return false;
         }
       }
 
@@ -7550,6 +7592,12 @@ showCupertinoDialog(
           // CRITICAL: Release the lock before navigating back
           if (mounted) {
             setState(() => _isSubmitInProgress = false);
+            await AIFeedbackBottomSheet.show(
+              context,
+              flowType: AIFlowType.dailySales,
+              successMessage: successMessage,
+            );
+            if (!mounted) return;
             Navigator.pop(context, 'submitted'); // Signal success to setup screen
           }
           return;
@@ -7796,21 +7844,20 @@ showCupertinoDialog(
   /// Get unique sizes from products, normalized to uppercase ML format
   /// BEST PRACTICE: Deduplicates "180ML" and "180ml" to single "180ML" entry
   List<String> _getAvailableSizes(List<models.Product> products) {
-    final sizes = <String>{};
+    // Group individual sizes into ranges
+    final category = _selectedCategoryName ?? '';
+    final ranges = SizeRangeConstants.rangesFor(category);
+    final rangesWithProducts = <String>{};
     for (var product in products) {
-      if (product.size.isNotEmpty) {
-        // BEST PRACTICE: Normalize to uppercase ML format to prevent duplicates
-        // Backend may return both "180ML" and "180ml" for different products
-        sizes.add(ProductConstants.normalizeSize(product.size));
-      }
+      if (product.size.isEmpty) continue;
+      final rangeLabel = SizeRangeConstants.getRangeLabel(product.size, category);
+      if (rangeLabel != null) rangesWithProducts.add(rangeLabel);
     }
-    // Sort numerically by extracting the number (90ML, 180ML, 375ML, 750ML)
-    final sortedSizes = sizes.toList()..sort((a, b) {
-      final aNum = int.tryParse(a.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-      final bNum = int.tryParse(b.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-      return aNum.compareTo(bNum);
-    });
-    return sortedSizes;
+    // Return ranges in sort order, only those with products
+    return ranges
+        .where((r) => rangesWithProducts.contains(r.label))
+        .map((r) => r.label)
+        .toList();
   }
 
   // ========== EXPENSE TABLE METHODS (NEW - Expense Table Feature) ==========

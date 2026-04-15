@@ -48,8 +48,20 @@ class ProductConstants {
   /// Normalize a size string to uppercase ML format
   /// Examples: '180ml' -> '180ML', '750 ml' -> '750ML', '90' -> '90ML'
   static String normalizeSize(String size) {
+    // Range labels (contain parentheses or keywords) — return as-is
+    if (size.contains('(') || size.contains('Below') || size.contains('Bulk') || size.contains('Large')) {
+      return size.trim();
+    }
+
     // Remove spaces and convert to uppercase
     String normalized = size.trim().toUpperCase().replaceAll(' ', '');
+
+    // Convert liter values to ML (e.g., "1L" → "1000ML", "1.5LTR" → "1500ML")
+    final literMatch = RegExp(r'^(\d+(?:\.\d+)?)\s*(?:LTR|L)$').firstMatch(normalized);
+    if (literMatch != null) {
+      final liters = double.tryParse(literMatch.group(1)!) ?? 0;
+      return '${(liters * 1000).toInt()}ML';
+    }
 
     // If it doesn't end with 'ML', add it
     if (!normalized.endsWith('ML')) {

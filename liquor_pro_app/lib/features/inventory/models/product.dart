@@ -4,6 +4,7 @@ import 'brand.dart';
 class Product {
   final String id;
   final String name;
+  final String displayName;
   final String categoryId;
   final Category? category;
   final String? subcategoryId;
@@ -22,6 +23,7 @@ class Product {
   final double dutyFee;
   final double totalCost;
   final double sellingPrice;
+  final double mrp;
   final int? stockQuantity;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -29,6 +31,7 @@ class Product {
   Product({
     required this.id,
     required this.name,
+    this.displayName = '',
     required this.categoryId,
     this.category,
     this.subcategoryId,
@@ -47,6 +50,7 @@ class Product {
     required this.dutyFee,
     required this.totalCost,
     required this.sellingPrice,
+    required this.mrp,
     this.stockQuantity,
     required this.createdAt,
     required this.updatedAt,
@@ -89,6 +93,7 @@ class Product {
     return Product(
       id: json['id'] ?? '',
       name: json['name'] ?? '',
+      displayName: json['display_name'] ?? '',
       categoryId: json['category_id'] ?? '',
       category: category,
       subcategoryId: json['subcategory_id'],
@@ -109,6 +114,7 @@ class Product {
       dutyFee: (json['duty_fee'] ?? 0).toDouble(),
       totalCost: (json['total_cost'] ?? 0).toDouble(),
       sellingPrice: (json['selling_price'] ?? 0).toDouble(),
+      mrp: (json['mrp'] ?? 0).toDouble(),
       stockQuantity: finalStock,
       createdAt: DateTime.parse(json['created_at']),
       updatedAt: DateTime.parse(json['updated_at']),
@@ -134,10 +140,22 @@ class Product {
       'duty_fee': dutyFee,
       'total_cost': totalCost,
       'selling_price': sellingPrice,
+      'mrp': mrp,
     };
   }
 
   // ==================== Backward-Compatible Getters ====================
+
+  /// Get clean display name — uses display_name if set, otherwise strips size from name
+  String get cleanName {
+    if (displayName.isNotEmpty) return displayName;
+    // Strip " - XXXML" suffix from name
+    return name
+        .replaceAll(RegExp(r'\s*-\s*\d+(?:\.\d+)?\s*(?:ml|ML|ltr|LTR|L)\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s*\d+(?:\.\d+)?\s*(?:ml|ML|ltr|LTR|L)\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s*-\s*$'), '')
+        .trim();
+  }
 
   /// Get brand name (backward compatible)
   String? get brandName => brand?.name;
@@ -171,10 +189,17 @@ class SizeWithCount {
 
   factory SizeWithCount.fromJson(Map<String, dynamic> json) {
     return SizeWithCount(
-      size: (json['SIZE'] ?? json['size'] ?? '').toString().toUpperCase(),
+      size: _normalizeSize((json['SIZE'] ?? json['size'] ?? '').toString()),
       productCount: _parseInt(json['PRODUCT_COUNT'] ?? json['product_count'] ?? json['count']) ?? 0,
       totalStockQuantity: _parseInt(json['TOTAL_STOCK'] ?? json['total_stock'] ?? json['stock_total']) ?? 0,
     );
+  }
+
+  /// Normalize size — keep range labels as-is, uppercase raw sizes
+  static String _normalizeSize(String size) {
+    size = size.trim();
+    if (size.contains('(') || size.contains('Below') || size.contains('Bulk') || size.contains('Large')) return size;
+    return size.toUpperCase();
   }
 
   static int? _parseInt(dynamic value) {

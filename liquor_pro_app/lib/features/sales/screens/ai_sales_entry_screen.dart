@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -11,6 +12,7 @@ import '../../../core/services/auth_service.dart';
 import '../../../core/utils/haptic_feedback.dart';
 import '../../../core/utils/snackbar_helper.dart';
 import '../../inventory/providers/product_provider.dart';
+import '../../../core/constants/size_range_constants.dart';
 import '../models/smart_sale_models.dart';
 import '../services/smart_sale_service.dart';
 import 'sales_summary_screen.dart';
@@ -287,6 +289,9 @@ class _AISalesEntryScreenState extends State<AISalesEntryScreen> with TickerProv
       _cancelled = false;
     });
 
+    // Keep screen awake during AI processing (prevents phone lock killing the request)
+    try { await WakelockPlus.enable(); } catch (_) {}
+
     try {
       final service = SmartSaleService(authService);
 
@@ -308,6 +313,9 @@ class _AISalesEntryScreenState extends State<AISalesEntryScreen> with TickerProv
         },
       );
 
+      // Release WakeLock after processing
+      try { await WakelockPlus.disable(); } catch (_) {}
+
       if (_cancelled || !mounted) return;
 
       if (response.success && response.data != null) {
@@ -320,6 +328,7 @@ class _AISalesEntryScreenState extends State<AISalesEntryScreen> with TickerProv
         });
       }
     } catch (e) {
+      try { await WakelockPlus.disable(); } catch (_) {}
       if (_cancelled || !mounted) return;
       setState(() {
         _phase = _Phase.error;
@@ -330,12 +339,13 @@ class _AISalesEntryScreenState extends State<AISalesEntryScreen> with TickerProv
 
   void _cancelProcessing() {
     _cancelled = true;
+    try { WakelockPlus.disable(); } catch (_) {}
     setState(() => _phase = _Phase.upload);
   }
 
   // ── Navigate to Summary ──
 
-  void _navigateToSummary() {
+  Future<void> _navigateToSummary() async {
     final result = _result;
     if (result == null) return;
 
@@ -379,29 +389,38 @@ class _AISalesEntryScreenState extends State<AISalesEntryScreen> with TickerProv
       return;
     }
 
-    // Build available products from ProductProvider — filtered by same size
+    // Build available products — reload ALL products for this tenant, filter by category + size range
     final matchedIds = items.map((i) => i.productId).toSet();
     final availableProducts = <SalesSummaryItem>[];
     try {
       final productProvider = context.read<ProductProvider>();
+      // Reload all products without size filter to get full catalog
+      await productProvider.loadProducts(shopId: null, limit: 500, categoryId: null, size: null);
+      final shopProvider = context.read<ShopSelectionProvider>();
+      await productProvider.loadStock(shopId: shopProvider.selectedShopId);
+
       final allProducts = productProvider.products;
       final stockMap = productProvider.stockByProductId;
-      final sizeFilter = widget.size?.toUpperCase().replaceAll(' ', '');
+      final category = widget.category ?? '';
+
       for (final p in allProducts) {
         if (matchedIds.contains(p.id)) continue;
-        // Filter by size if specified (e.g., only 750ML products for a 750ML sale)
-        if (sizeFilter != null && sizeFilter.isNotEmpty) {
-          final productSize = p.size.toUpperCase().replaceAll(' ', '');
-          if (productSize != sizeFilter) continue;
+        // Filter by category
+        final catName = (p.category?.name ?? '').toLowerCase();
+        if (category == 'Beer' && !catName.contains('beer')) continue;
+        if (category != 'Beer' && catName.contains('beer')) continue;
+        // Filter by size range
+        if (widget.size != null && widget.size!.isNotEmpty) {
+          if (!SizeRangeConstants.sizeMatchesRange(p.size, widget.size!, category)) continue;
         }
         final stockEntry = stockMap[p.id];
         final stockQty = stockEntry?.quantity ?? p.stockQuantity ?? 0;
         availableProducts.add(SalesSummaryItem(
           productId: p.id,
-          name: p.name,
-          price: p.sellingPrice,
+          name: p.cleanName,
+          price: p.mrp > 0 ? p.mrp : p.sellingPrice,
           quantity: 1,
-          mrp: p.sellingPrice,
+          mrp: p.mrp > 0 ? p.mrp : p.sellingPrice,
           stock: stockQty,
           closingStock: stockQty,
         ));

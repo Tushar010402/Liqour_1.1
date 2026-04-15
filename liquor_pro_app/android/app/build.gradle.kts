@@ -8,6 +8,10 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
     // Firebase Google Services plugin
     id("com.google.gms.google-services")
+    // Firebase Crashlytics plugin
+    id("com.google.firebase.crashlytics")
+    // Firebase Performance plugin
+    id("com.google.firebase.firebase-perf")
 }
 
 val keystoreProperties = Properties()
@@ -61,6 +65,9 @@ android {
 dependencies {
     // Core library desugaring for Java 8+ APIs on older Android versions
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    // Firebase BOM + Auth for native phone auth test mode setup in MainActivity
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-auth")
 }
 
 flutter {

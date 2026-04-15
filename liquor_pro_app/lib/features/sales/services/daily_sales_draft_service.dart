@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import '../../../core/config/debug_performance_config.dart';
 import '../../../core/utils/logger.dart';
 import '../models/daily_sales_draft.dart';
 import 'draft_api_service.dart';
@@ -518,14 +519,16 @@ class DailySalesDraftService {
     }
   }
 
-  /// Start periodic background sync (every 30 seconds)
+  /// Start periodic background sync.
+  /// Interval is relaxed in debug mode to reduce simulator CPU load.
   void startBackgroundSync() {
     _syncTimer?.cancel();
-    _syncTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
+    final interval = DebugPerformanceConfig.draftSyncInterval;
+    _syncTimer = Timer.periodic(interval, (timer) async {
       await _performBackgroundSync();
     });
     if (kDebugMode) {
-      Logger.info('[DraftService] Background sync started (every 30s)');
+      Logger.info('[DraftService] Background sync started (every ${interval.inSeconds}s)');
     }
   }
 

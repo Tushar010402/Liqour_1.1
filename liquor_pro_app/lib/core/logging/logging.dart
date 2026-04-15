@@ -28,4 +28,5 @@ export 'log_sync_service.dart';
 export 'session_manager.dart';
 export 'privacy_filter.dart';
 export 'interceptors/dio_logging_interceptor.dart';
+export 'interceptors/firebase_performance_interceptor.dart';
 export 'interceptors/navigation_observer.dart';

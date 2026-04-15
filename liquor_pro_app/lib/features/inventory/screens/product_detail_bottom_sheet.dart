@@ -364,17 +364,26 @@ class _ProductDetailBottomSheetState extends State<ProductDetailBottomSheet>
         _buildInfoCard(
           icon: Icons.sell,
           label: 'Selling Price',
-          value: '₹${widget.product.sellingPrice.toStringAsFixed(2)}',
+          value: '₹${(widget.product.sellingPrice > 0 ? widget.product.sellingPrice : widget.product.mrp).toStringAsFixed(2)}',
           color: AppColors.success,
           subtitle: 'Your selling price',
         ),
         const SizedBox(height: 8),
 
         _buildInfoCard(
+          icon: Icons.local_offer,
+          label: 'MRP',
+          value: '₹${widget.product.mrp.toStringAsFixed(2)}',
+          color: const Color(0xFF3855B3),
+          subtitle: 'Maximum retail price',
+        ),
+        const SizedBox(height: 8),
+
+        _buildInfoCard(
           icon: Icons.trending_up,
           label: 'Profit Margin',
-          value: '₹${(widget.product.sellingPrice - widget.product.costPrice).toStringAsFixed(2)}',
-          color: widget.product.sellingPrice > widget.product.costPrice
+          value: '₹${((widget.product.sellingPrice > 0 ? widget.product.sellingPrice : widget.product.mrp) - widget.product.costPrice).toStringAsFixed(2)}',
+          color: (widget.product.sellingPrice > 0 ? widget.product.sellingPrice : widget.product.mrp) > widget.product.costPrice
               ? AppColors.success
               : AppColors.error,
           subtitle: '${_calculateProfitPercentage(widget.product)}% margin',
@@ -1183,7 +1192,8 @@ class _ProductDetailBottomSheetState extends State<ProductDetailBottomSheet>
   String _calculateProfitPercentage(ProductWithStock product) {
     final totalCost = product.costPrice;
     if (totalCost == 0) return '0.0';
-    final profit = product.sellingPrice - totalCost;
+    final effectivePrice = product.sellingPrice > 0 ? product.sellingPrice : product.mrp;
+    final profit = effectivePrice - totalCost;
     final percentage = (profit / totalCost) * 100;
     return percentage.toStringAsFixed(1);
   }

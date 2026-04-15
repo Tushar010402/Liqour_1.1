@@ -41,16 +41,18 @@ class DenseProductListTile extends StatelessWidget {
       label: '${product.name}, ${product.size}, Stock: ${product.currentStock}, Price: \u20B9${product.sellingPrice.toStringAsFixed(0)}',
       hint: 'Tap to select, plus to add stock, info to view details',
       button: true,
-      child: Card(
-        elevation: isSelected ? 4 : 1,
-        shadowColor: isSelected ? cs.primary.withOpacity(0.3) : Colors.black12,
+      child: Container(
         margin: EdgeInsets.zero,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: BorderSide(
-            color: isSelected ? cs.primary : cs.outlineVariant,
-            width: isSelected ? 2.5 : 1,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: isSelected ? cs.primary.withValues(alpha: 0.4) : const Color(0xFFF0F0F2),
+            width: isSelected ? 1.5 : 0.5,
           ),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 14, offset: const Offset(0, 4)),
+          ],
         ),
         child: InkWell(
           // TAP CARD -> SELECT PRODUCT
@@ -86,7 +88,7 @@ class DenseProductListTile extends StatelessWidget {
                             // Product Name (cleaned - same logic as Daily Sales Entry)
                             Expanded(
                               child: Text(
-                                _cleanProductName(product.name),
+                                product.cleanName,
                                 style: AppTextStyles.bodyLarge.copyWith(
                                   fontWeight: FontWeight.w700,
                                   fontSize: 14,
@@ -126,54 +128,28 @@ class DenseProductListTile extends StatelessWidget {
                           ],
                         ),
 
-                        // Row 2: Category + Size chips
+                        // Row 2: Category pill + Size (same as daily sales entry)
                         Row(
                           children: [
-                            // Category chip
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                               decoration: BoxDecoration(
-                                color: cs.surfaceContainerHighest,
-                                borderRadius: BorderRadius.circular(5),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.local_bar,
-                                    size: 11,
-                                    color: cs.onSurfaceVariant,
-                                  ),
-                                  const SizedBox(width: 3),
-                                  Text(
-                                    product.category?.name ?? 'Custom',
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      color: cs.onSurfaceVariant,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-
-                            const SizedBox(width: 6),
-
-                            // Size badge
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: cs.secondary.withOpacity(0.15),
-                                borderRadius: BorderRadius.circular(5),
+                                color: const Color(0xFFF1F5F9),
+                                borderRadius: BorderRadius.circular(3),
                               ),
                               child: Text(
-                                product.size.toUpperCase(),
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: cs.secondary,
-                                  fontWeight: FontWeight.w700,
-                                ),
+                                '${(product.category?.name ?? 'Custom').toUpperCase()} \u2022 ${product.size}',
+                                style: const TextStyle(fontSize: 8.5, color: Color(0xFF6B7280), fontWeight: FontWeight.w700, letterSpacing: 0.3),
                               ),
+                            ),
+                            const SizedBox(width: 6),
+                            // Stock badge
+                            Icon(Icons.inventory_2_rounded, size: 11, color: product.currentStock > 0 ? const Color(0xFF10B981) : const Color(0xFF6B7280)),
+                            const SizedBox(width: 3),
+                            Text(
+                              '${product.currentStock} in stock',
+                              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                                color: product.currentStock > 0 ? const Color(0xFF10B981) : const Color(0xFF6B7280)),
                             ),
                           ],
                         ),
@@ -183,7 +159,7 @@ class DenseProductListTile extends StatelessWidget {
                           children: [
                             // Price
                             Text(
-                              '\u20B9${product.sellingPrice.toStringAsFixed(0)}',
+                              '\u20B9${product.mrp > 0 ? product.mrp.toStringAsFixed(0) : product.sellingPrice.toStringAsFixed(0)}',
                               style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.w800,
@@ -286,6 +262,8 @@ class DenseProductListTile extends StatelessWidget {
                 ? CachedNetworkImage(
                     imageUrl: product.imageUrl,
                     fit: BoxFit.cover,
+                    memCacheWidth: 150,
+                    memCacheHeight: 150,
                     placeholder: (context, url) => Container(
                       color: cs.surfaceContainerHighest,
                       child: Center(
@@ -433,11 +411,38 @@ class DenseProductListTile extends StatelessWidget {
 
   Widget _buildPlaceholderImage(ColorScheme cs) {
     return Container(
-      color: cs.surfaceContainerHighest,
-      child: Icon(
-        Icons.liquor,
-        size: 48,
-        color: cs.onSurfaceVariant,
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+          colors: [Color(0xFF0D1A30), Color(0xFF1A1030), Color(0xFF3A1A10), Color(0xFFD4700A)],
+          stops: [0.0, 0.4, 0.7, 1.0],
+        ),
+      ),
+      child: Stack(
+        children: [
+          Center(child: Icon(Icons.liquor, size: 36, color: Colors.white.withValues(alpha: 0.3))),
+          // MRP badge
+          if (product.mrp > 0 || product.sellingPrice > 0)
+            Positioned(
+              top: 0, left: 0,
+              child: Container(
+                padding: const EdgeInsets.only(left: 5, right: 6, top: 2, bottom: 3),
+                decoration: const BoxDecoration(
+                  color: Color(0xE60A1736),
+                  borderRadius: BorderRadius.only(bottomRight: Radius.circular(12)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('MRP', style: TextStyle(fontSize: 7, color: Color(0xDDFFFFFF), fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+                    Text('\u20B9${product.mrp > 0 ? product.mrp.toStringAsFixed(0) : product.sellingPrice.toStringAsFixed(0)}',
+                      style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.w900)),
+                  ],
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

@@ -6,15 +6,19 @@ import '../../../core/constants/app_text_styles.dart';
 /// Allows salesman to enter UPI collection amounts by app/source.
 class UpiDetailsSheet extends StatefulWidget {
   final void Function(Map<String, double> upiEntries, double total)? onAdd;
+  final Map<String, double>? initialEntries;
 
-  const UpiDetailsSheet({super.key, this.onAdd});
+  const UpiDetailsSheet({super.key, this.onAdd, this.initialEntries});
 
-  static Future<void> show(BuildContext context, {void Function(Map<String, double>, double)? onAdd}) {
+  static Future<void> show(BuildContext context, {
+    void Function(Map<String, double>, double)? onAdd,
+    Map<String, double>? initialEntries,
+  }) {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => UpiDetailsSheet(onAdd: onAdd),
+      builder: (_) => UpiDetailsSheet(onAdd: onAdd, initialEntries: initialEntries),
     );
   }
 
@@ -30,7 +34,10 @@ class _UpiDetailsSheetState extends State<UpiDetailsSheet> {
   void initState() {
     super.initState();
     for (final s in _upiSources) {
-      _controllers[s] = TextEditingController();
+      final initial = widget.initialEntries?[s];
+      _controllers[s] = TextEditingController(
+        text: initial != null && initial > 0 ? initial.toStringAsFixed(0) : '',
+      );
     }
   }
 

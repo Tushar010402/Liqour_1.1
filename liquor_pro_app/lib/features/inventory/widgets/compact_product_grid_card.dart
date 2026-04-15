@@ -83,6 +83,8 @@ class CompactProductGridCard extends StatelessWidget {
                               fit: BoxFit.cover,
                               width: double.infinity,
                               height: double.infinity,
+                              memCacheWidth: 300,
+                              memCacheHeight: 300,
                               placeholder: (context, url) => Container(
                                 color: cs.surfaceContainerHighest,
                                 child: Center(
@@ -296,7 +298,7 @@ class CompactProductGridCard extends StatelessWidget {
                         flex: 2,
                         fit: FlexFit.loose,
                         child: Text(
-                          _cleanProductName(product.name),
+                          product.cleanName,
                           style: TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 13,
@@ -351,7 +353,7 @@ class CompactProductGridCard extends StatelessWidget {
                         children: [
                           // Price
                           Text(
-                            '\u20B9${product.sellingPrice.toStringAsFixed(0)}',
+                            '\u20B9${product.mrp > 0 ? product.mrp.toStringAsFixed(0) : product.sellingPrice.toStringAsFixed(0)}',
                             style: TextStyle(
                               fontWeight: FontWeight.bold,
                               color: cs.primary,

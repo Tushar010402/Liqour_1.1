@@ -54,7 +54,7 @@ class StockPurchaseService {
       );
 
       debugPrint('   - Subtotal: ₹${request.subtotal.toStringAsFixed(2)}');
-      debugPrint('   - TDS (1%): ₹${request.tdsAmount.toStringAsFixed(2)}');
+      debugPrint('   - TCS (2%): ₹${request.tcsAmount.toStringAsFixed(2)}');
       debugPrint('   - Round Off: ₹${request.effectiveRoundOff.toStringAsFixed(2)}');
       debugPrint('   - Total: ₹${request.totalAmount.toStringAsFixed(2)}');
 

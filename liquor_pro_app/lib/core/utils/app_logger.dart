@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
+import '../config/debug_performance_config.dart';
 
 /// App Logger - Best Practice Logging
 /// Centralized logging utility for debugging and monitoring
@@ -35,17 +36,18 @@ class AppLogger {
 
   /// Debug log - For detailed debugging information
   /// Use this for: Trace variable values, function calls, debugging info
+  /// Gated behind [verboseDebugPrints] to silence during normal dev.
   static void debug(dynamic message, [dynamic error, StackTrace? stackTrace]) {
-    if (kDebugMode) {
+    if (isVerbose) {
       _currentLogger.d(message, error: error, stackTrace: stackTrace);
     }
   }
 
   /// Info log - For general informational messages
   /// Use this for: App lifecycle events, user actions, API calls
-  /// OPTIMIZED: Only logs in debug mode to reduce production noise
+  /// Gated behind [verboseDebugPrints] to reduce console noise.
   static void info(dynamic message, [dynamic error, StackTrace? stackTrace]) {
-    if (kDebugMode) {
+    if (isVerbose) {
       _currentLogger.i(message, error: error, stackTrace: stackTrace);
     }
   }
@@ -391,8 +393,10 @@ class AppLogger {
   /// Check if logging is enabled
   static bool get isEnabled => kDebugMode;
 
-  /// Check if verbose logging is enabled
-  static bool get isVerbose => kDebugMode;
+  /// Check if verbose logging is enabled.
+  /// Controlled by [DebugPerformanceConfig.verboseDebugPrints].
+  /// Set to false during normal development to silence the 1200+ prints.
+  static bool get isVerbose => kDebugMode && DebugPerformanceConfig.verboseDebugPrints;
 }
 
 /// JSON Encoder for pretty printing

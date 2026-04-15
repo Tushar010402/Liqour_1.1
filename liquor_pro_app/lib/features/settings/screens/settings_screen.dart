@@ -1,27 +1,21 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/theme/ios_design_tokens.dart';
 import '../../../core/providers/theme_provider.dart';
 import '../../../shared/widgets/custom_app_bar.dart';
-import '../../../core/providers/shop_selection_provider.dart';
-import '../../../core/services/fcm_service.dart';
+import '../../../core/services/logout_service.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../admin/screens/shops_screen.dart';
 import '../../admin/screens/user_management_screen.dart';
 import '../../admin/models/user_management_models.dart';
-import '../../admin/providers/shop_provider.dart';
-import '../../inventory/screens/category_selection_screen.dart';
-import '../../inventory/providers/product_provider.dart';
+import '../../inventory/screens/brand_onboarding_setup_screen.dart';
+import '../../inventory/screens/ai_stock_setup_screen.dart';
 import '../../finance/screens/vendors_screen.dart';
 import '../../finance/screens/bank_accounts_modern_screen.dart';
 import '../../finance/screens/expenses_screen.dart';
-import '../../sales/providers/daily_sales_provider.dart';
-import '../../dashboard/providers/dashboard_provider.dart';
 import 'security_screen.dart';
 import 'linked_devices_screen.dart';
 import 'help_support_screen.dart';
@@ -42,8 +36,6 @@ class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   void _handleLogout(BuildContext context) async {
-    final authProvider = context.read<AuthProvider>();
-
     // Show confirmation dialog
     final confirmed = await showDialog<bool>(
       context: context,
@@ -67,66 +59,8 @@ class SettingsScreen extends StatelessWidget {
     );
 
     if (confirmed == true && context.mounted) {
-      // CRITICAL FIX: Reset all providers BEFORE logout to ensure new user starts fresh
-      // This prevents stale data from previous user showing up after login
-      debugPrint('🔄 [SettingsScreen] Resetting all providers before logout...');
-
-      // Reset shop-related providers
-      try {
-        context.read<ShopSelectionProvider>().reset();
-      } catch (e) {
-        debugPrint('⚠️ ShopSelectionProvider reset failed: $e');
-      }
-
-      try {
-        context.read<ShopProvider>().reset();
-      } catch (e) {
-        debugPrint('⚠️ ShopProvider reset failed: $e');
-      }
-
-      // Reset inventory providers
-      try {
-        context.read<ProductProvider>().reset();
-      } catch (e) {
-        debugPrint('⚠️ ProductProvider reset failed: $e');
-      }
-
-      // Reset sales providers
-      try {
-        context.read<DailySalesProvider>().reset();
-      } catch (e) {
-        debugPrint('⚠️ DailySalesProvider reset failed: $e');
-      }
-
-      // Reset dashboard provider
-      try {
-        context.read<DashboardProvider>().reset();
-      } catch (e) {
-        debugPrint('⚠️ DashboardProvider reset failed: $e');
-      }
-
-      if (kDebugMode) {
-        debugPrint('✅ [SettingsScreen] All providers reset successfully');
-      }
-
-      // ====== FCM CLEANUP (Best Practice) ======
-      // Unregister FCM device BEFORE logout to prevent stale push notifications
-      try {
-        final container = riverpod.ProviderScope.containerOf(context);
-        final fcmService = container.read(fcmServiceProvider);
-        await fcmService.unregisterDevice();
-        if (kDebugMode) {
-          debugPrint('✅ [SettingsScreen] FCM device unregistered');
-        }
-      } catch (e) {
-        if (kDebugMode) {
-          debugPrint('⚠️ [SettingsScreen] FCM unregister error (non-critical): $e');
-        }
-        // Continue with logout even if FCM unregister fails
-      }
-
-      // Now perform the actual logout
-      await authProvider.logout();
+      // Centralized logout: resets ALL providers, clears caches, unregisters FCM, logs out
+      await LogoutService.resetAllState(context);
       if (context.mounted) {
         context.go('/phone-login');
       }
@@ -300,25 +234,32 @@ class SettingsScreen extends StatelessWidget {
             },
           ),
 
-          // Brand Onboarding - Hidden for salesman
-          Consumer<AuthProvider>(
-            builder: (context, authProvider, _) {
-              final userRole = (authProvider.currentUser?.role ?? '').toLowerCase();
-              if (userRole == 'salesman') {
-                return const SizedBox.shrink();
-              }
-              return _buildSettingTile(
-                icon: Icons.local_bar_outlined,
-                title: 'Brand Onboarding',
-                subtitle: 'Add brands and products to your inventory',
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const CategorySelectionScreen(),
-                    ),
-                  );
-                },
+          // Brand Onboarding - Available for all roles
+          _buildSettingTile(
+            icon: Icons.local_bar_outlined,
+            title: 'Brand Onboarding',
+            subtitle: 'Add brands and products to your shop inventory',
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const BrandOnboardingSetupScreen(),
+                ),
+              );
+            },
+          ),
+
+          // AI Stock Setup
+          _buildSettingTile(
+            icon: Icons.auto_awesome,
+            title: 'AI Stock Setup',
+            subtitle: 'Set opening stock from register photo using AI',
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const AiStockSetupScreen(),
+                ),
               );
             },
           ),
@@ -440,13 +381,12 @@ class SettingsScreen extends StatelessWidget {
             },
           ),
 
-          // Advanced Features section - Hidden for salesman
+          // Advanced Features section
           Consumer<AuthProvider>(
             builder: (context, authProvider, _) {
               final userRole = (authProvider.currentUser?.role ?? '').toLowerCase();
-              if (userRole == 'salesman') {
-                return const SizedBox.shrink();
-              }
+              final isSalesman = userRole == 'salesman';
+
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -454,37 +394,39 @@ class SettingsScreen extends StatelessWidget {
                   _buildSectionHeader('Advanced Features'),
                   SizedBox(height: iOSDesignTokens.space8),
 
-                  // Finance Matrix
-                  _buildSettingTile(
-                    icon: Icons.dashboard_customize_outlined,
-                    title: 'Finance Matrix',
-                    subtitle: 'Unified financial dashboard',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const FinanceMatrixScreen(),
-                        ),
-                      );
-                    },
-                  ),
+                  // Finance Matrix - Hidden for salesman
+                  if (!isSalesman)
+                    _buildSettingTile(
+                      icon: Icons.dashboard_customize_outlined,
+                      title: 'Finance Matrix',
+                      subtitle: 'Unified financial dashboard',
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const FinanceMatrixScreen(),
+                          ),
+                        );
+                      },
+                    ),
 
-                  // Tips Management
-                  _buildSettingTile(
-                    icon: Icons.volunteer_activism_outlined,
-                    title: 'Tips Management',
-                    subtitle: 'Manage tips and payouts',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const TipsScreen(),
-                        ),
-                      );
-                    },
-                  ),
+                  // Tips Management - Hidden for salesman
+                  if (!isSalesman)
+                    _buildSettingTile(
+                      icon: Icons.volunteer_activism_outlined,
+                      title: 'Tips Management',
+                      subtitle: 'Manage tips and payouts',
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const TipsScreen(),
+                          ),
+                        );
+                      },
+                    ),
 
-                  // Purcha Report
+                  // Purcha Report - Available for all roles
                   _buildSettingTile(
                     icon: Icons.assessment_rounded,
                     title: 'Purcha Report',

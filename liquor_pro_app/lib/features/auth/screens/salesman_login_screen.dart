@@ -1,15 +1,21 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:clarity_flutter/clarity_flutter.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/services/firebase_phone_auth_service.dart';
+import '../../../core/utils/logger.dart';
 import '../models/device_session_models.dart';
 import '../providers/auth_provider.dart';
 import '../widgets/device_limit_modal.dart';
 
 /// Combined Phone + OTP Login Screen — pixel-matched to JSX Screen_Login.
 /// Hero shrinks smoothly when OTP fields appear, auto-scrolls to show OTP.
+///
+/// Uses Firebase Phone Auth for OTP delivery (instead of Dr. Dang SMS).
 class SalesmanLoginScreen extends StatefulWidget {
   const SalesmanLoginScreen({super.key});
 
@@ -17,7 +23,7 @@ class SalesmanLoginScreen extends StatefulWidget {
   State<SalesmanLoginScreen> createState() => _SalesmanLoginScreenState();
 }
 
-enum _LoginState { idle, otpSent, verifying }
+enum _LoginState { idle, sendingOtp, otpSent, verifying, autoVerifying }
 
 class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
     with TickerProviderStateMixin {
@@ -28,9 +34,21 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
   final List<FocusNode> _otpFocusNodes = List.generate(6, (_) => FocusNode());
 
   _LoginState _state = _LoginState.idle;
-  String? _sessionId;
   String? _errorMessage;
   bool _isLoading = false;
+
+  // Firebase Phone Auth (primary)
+  final FirebasePhoneAuthService _firebaseAuth = FirebasePhoneAuthService();
+  String? _verificationId;
+  String? _phoneForVerification;
+
+  // Dual-mode: Firebase (primary) vs Dr. Dang SMS (fallback)
+  bool _useFirebaseVerification = true;
+  String? _sessionId; // Dr. Dang session ID
+
+  // Countdown timer for resend
+  Timer? _resendTimer;
+  int _resendCountdown = 0;
 
   late AnimationController _otpAnimController;
   late Animation<double> _otpRevealAnimation;
@@ -66,6 +84,7 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
     for (final n in _otpFocusNodes) { n.dispose(); }
     _otpAnimController.dispose();
     _heroAnimController.dispose();
+    _resendTimer?.cancel();
     super.dispose();
   }
 
@@ -79,17 +98,31 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
     return '+91$digitsOnly';
   }
 
+  void _startResendCountdown() {
+    _resendCountdown = 60;
+    _resendTimer?.cancel();
+    _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) { timer.cancel(); return; }
+      setState(() {
+        _resendCountdown--;
+        if (_resendCountdown <= 0) {
+          timer.cancel();
+        }
+      });
+    });
+  }
+
   void _showOtpSection() {
     setState(() {
       _state = _LoginState.otpSent;
       _isLoading = false;
     });
+    _startResendCountdown();
     // Animate: shrink hero + reveal OTP + scroll down
     _heroAnimController.forward();
     _otpAnimController.forward();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      // Smooth scroll to show OTP fields
       Future.delayed(const Duration(milliseconds: 200), () {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -99,13 +132,40 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
           );
         }
       });
-      // Focus first OTP box
       Future.delayed(const Duration(milliseconds: 350), () {
         if (mounted) _otpFocusNodes[0].requestFocus();
       });
     });
   }
 
+  /// Reset to phone input state so user can change their number
+  void _handleChangeNumber() {
+    HapticFeedback.lightImpact();
+    _otpAnimController.reverse();
+    _heroAnimController.reverse();
+    for (final c in _otpControllers) { c.clear(); }
+    _resendTimer?.cancel();
+    _firebaseAuth.reset();
+    setState(() {
+      _state = _LoginState.idle;
+      _verificationId = null;
+      _sessionId = null;
+      _useFirebaseVerification = true;
+      _errorMessage = null;
+      _isLoading = false;
+      _resendCountdown = 0;
+    });
+    Future.delayed(const Duration(milliseconds: 350), () {
+      if (mounted) {
+        _phoneController.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _phoneController.text.length,
+        );
+      }
+    });
+  }
+
+  /// Send OTP — tries Firebase first, falls back to Dr. Dang SMS if Firebase fails
   Future<void> _handleSendOtp() async {
     final rawPhone = _phoneController.text.trim();
     if (rawPhone.length < 10) {
@@ -113,49 +173,128 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
       return;
     }
     final phone = _formatPhone(rawPhone);
+    _phoneForVerification = phone;
 
-    setState(() { _isLoading = true; _errorMessage = null; });
+    setState(() { _isLoading = true; _errorMessage = null; _state = _LoginState.sendingOtp; });
 
-    final authProvider = context.read<AuthProvider>();
-    final checkResult = await authProvider.checkUser(phone);
-    if (!mounted) return;
+    // ── Try Firebase first ──
+    try {
+      final result = await _firebaseAuth.verifyPhoneNumber(phone);
+      if (!mounted) return;
 
-    if (checkResult == null) {
-      setState(() { _isLoading = false; _errorMessage = authProvider.errorMessage ?? 'Failed to check user'; });
-      return;
+      switch (result.status) {
+        case FirebasePhoneAuthStatus.codeSent:
+          _useFirebaseVerification = true;
+          _verificationId = result.verificationId;
+          Logger.info('[Login] OTP sent via Firebase');
+          _showOtpSection();
+          return; // Success — don't fall through
+
+        case FirebasePhoneAuthStatus.autoVerified:
+          _useFirebaseVerification = true;
+          Logger.info('[Login] Auto-verified via Firebase');
+          setState(() { _state = _LoginState.autoVerifying; });
+          await _handleFirebaseTokenVerification(result.idToken!);
+          return; // Success — don't fall through
+
+        case FirebasePhoneAuthStatus.error:
+          Logger.warning('[Login] Firebase failed: ${result.errorMessage} — falling back to SMS');
+          // Fall through to Dr. Dang fallback below
+          break;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      Logger.warning('[Login] Firebase error: $e — falling back to SMS');
+      // Fall through to Dr. Dang fallback below
     }
 
-    // Security: don't use exists field — always proceed to OTP.
-    // Login vs registration is determined after verify-otp.
-    if (checkResult.sessionId != null) {
-      _sessionId = checkResult.sessionId;
-      _showOtpSection();
-      return;
-    }
-
-    final otpResult = await authProvider.sendOtp(phone);
+    // ── Fallback: Dr. Dang SMS via backend ──
     if (!mounted) return;
+    try {
+      final authProvider = context.read<AuthProvider>();
+      final checkResult = await authProvider.checkUser(phone);
+      if (!mounted) return;
 
-    if (otpResult != null) {
-      _sessionId = otpResult.sessionId;
-      _showOtpSection();
-    } else {
-      setState(() { _isLoading = false; _errorMessage = authProvider.errorMessage ?? 'Failed to send OTP'; });
+      if (checkResult != null && checkResult.hasOtpSession) {
+        _useFirebaseVerification = false;
+        _sessionId = checkResult.sessionId;
+        Logger.info('[Login] OTP sent via SMS fallback');
+        _showOtpSection();
+      } else {
+        // checkUser failed too — show error
+        setState(() {
+          _state = _LoginState.idle;
+          _isLoading = false;
+          _errorMessage = authProvider.errorMessage ?? 'Failed to send OTP. Please try again.';
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      Logger.error('[Login] Both Firebase and SMS fallback failed: $e');
+      setState(() {
+        _state = _LoginState.idle;
+        _isLoading = false;
+        _errorMessage = 'Failed to send OTP. Please try again.';
+      });
     }
   }
 
+  /// Verify OTP — uses Firebase or Dr. Dang path based on how OTP was sent
   Future<void> _handleVerifyOtp() async {
     final otp = _fullOtp;
     if (otp.length != 6) {
       setState(() => _errorMessage = 'Enter the complete 6-digit OTP');
       return;
     }
+
     setState(() { _state = _LoginState.verifying; _isLoading = true; _errorMessage = null; });
 
+    if (_useFirebaseVerification) {
+      await _verifyViaFirebase(otp);
+    } else {
+      await _verifyViaDrDang(otp);
+    }
+  }
+
+  /// Firebase verification path
+  Future<void> _verifyViaFirebase(String otp) async {
+    if (_verificationId == null) {
+      setState(() { _state = _LoginState.otpSent; _isLoading = false; _errorMessage = 'Session expired. Please resend OTP.'; });
+      return;
+    }
+
+    try {
+      final idToken = await _firebaseAuth.signInWithSmsCode(_verificationId!, otp);
+      if (!mounted) return;
+      await _handleFirebaseTokenVerification(idToken);
+    } catch (e) {
+      if (!mounted) return;
+      Logger.error('[Login] Firebase OTP verification error: $e');
+
+      String errorMsg;
+      final errStr = e.toString().toLowerCase();
+      if (errStr.contains('invalid-verification-code') || errStr.contains('invalid-credential')) {
+        errorMsg = 'Invalid OTP. Please check and try again.';
+      } else if (errStr.contains('session-expired') || errStr.contains('code-expired')) {
+        errorMsg = 'OTP expired. Please request a new one.';
+      } else if (errStr.contains('invalid-verification-id')) {
+        errorMsg = 'Session expired. Please request a new OTP.';
+      } else if (errStr.contains('network')) {
+        errorMsg = 'Network error. Check your connection.';
+      } else {
+        errorMsg = 'Verification failed. Please try again.';
+      }
+
+      setState(() { _state = _LoginState.otpSent; _isLoading = false; _errorMessage = errorMsg; });
+    }
+  }
+
+  /// Dr. Dang SMS verification path (fallback)
+  Future<void> _verifyViaDrDang(String otp) async {
     final authProvider = context.read<AuthProvider>();
     try {
       final result = await authProvider.verifyOtp(
-        mobile: _formatPhone(_phoneController.text.trim()),
+        mobile: _phoneForVerification ?? _formatPhone(_phoneController.text.trim()),
         otp: otp,
         sessionId: _sessionId,
       );
@@ -165,9 +304,8 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
         if (result.isLogin) {
           context.go('/home');
         } else if (result.needsRegistration) {
-          // New user — redirect to registration
           context.go('/pre-registration', extra: {
-            'phone': _formatPhone(_phoneController.text.trim()),
+            'phone': _phoneForVerification ?? _formatPhone(_phoneController.text.trim()),
             'registrationToken': result.registrationToken,
           });
         } else {
@@ -179,15 +317,67 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
     } on DeviceLimitException catch (e) {
       if (!mounted) return;
       setState(() { _state = _LoginState.otpSent; _isLoading = false; });
-      _showDeviceLimitModal(e.error);
+      _showDeviceLimitModal(e.error, '');
     } catch (e) {
       if (!mounted) return;
       setState(() { _state = _LoginState.otpSent; _isLoading = false; _errorMessage = e.toString(); });
     }
   }
 
-  /// Show device limit modal — lets user pick which device to log out
-  void _showDeviceLimitModal(DeviceLimitError error) {
+  /// Common handler: verify Firebase ID token with our backend
+  Future<void> _handleFirebaseTokenVerification(String idToken) async {
+    final authProvider = context.read<AuthProvider>();
+
+    try {
+      final result = await authProvider.verifyFirebaseToken(
+        firebaseIdToken: idToken,
+      );
+
+      // Sign out of Firebase immediately — we use our own JWT
+      await _firebaseAuth.signOut();
+
+      if (!mounted) return;
+
+      if (result != null) {
+        if (result.isLogin) {
+          context.go('/home');
+        } else if (result.needsRegistration) {
+          context.go('/pre-registration', extra: {
+            'phone': _phoneForVerification ?? _formatPhone(_phoneController.text.trim()),
+            'registrationToken': result.registrationToken,
+          });
+        } else {
+          setState(() {
+            _state = _LoginState.otpSent;
+            _isLoading = false;
+            _errorMessage = 'Unexpected response. Please try again.';
+          });
+        }
+      } else {
+        setState(() {
+          _state = _LoginState.otpSent;
+          _isLoading = false;
+          _errorMessage = authProvider.errorMessage ?? 'Verification failed';
+        });
+      }
+    } on DeviceLimitException catch (e) {
+      await _firebaseAuth.signOut();
+      if (!mounted) return;
+      setState(() { _state = _LoginState.otpSent; _isLoading = false; });
+      _showDeviceLimitModal(e.error, idToken);
+    } catch (e) {
+      await _firebaseAuth.signOut();
+      if (!mounted) return;
+      setState(() {
+        _state = _LoginState.otpSent;
+        _isLoading = false;
+        _errorMessage = e.toString();
+      });
+    }
+  }
+
+  /// Show device limit modal
+  void _showDeviceLimitModal(DeviceLimitError error, String idToken) {
     DeviceLimitModal.show(
       context: context,
       error: error,
@@ -218,37 +408,86 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
 
     final authProvider = context.read<AuthProvider>();
     try {
-      final result = await authProvider.forceLoginOtp(
-        mobile: _formatPhone(_phoneController.text.trim()),
-        otp: otp,
-        sessionIdToRemove: sessionIdToRemove,
-        sessionId: _sessionId,
-      );
-      if (!mounted) return;
-
-      if (result != null) {
-        context.go('/home');
+      if (_useFirebaseVerification && _verificationId != null) {
+        final idToken = await _firebaseAuth.signInWithSmsCode(_verificationId!, otp);
+        final result = await authProvider.verifyFirebaseToken(firebaseIdToken: idToken);
+        await _firebaseAuth.signOut();
+        if (!mounted) return;
+        if (result != null && result.isLogin) { context.go('/home'); return; }
       } else {
-        setState(() { _isLoading = false; _errorMessage = authProvider.errorMessage ?? 'Login failed. Please try again.'; });
+        // Dr. Dang force login
+        final result = await authProvider.forceLoginOtp(
+          mobile: _phoneForVerification ?? _formatPhone(_phoneController.text.trim()),
+          otp: otp,
+          sessionIdToRemove: sessionIdToRemove,
+          sessionId: _sessionId,
+        );
+        if (!mounted) return;
+        if (result != null && result.isLogin) { context.go('/home'); return; }
       }
+      setState(() { _isLoading = false; _errorMessage = authProvider.errorMessage ?? 'Login failed. Please try again.'; });
     } catch (e) {
+      await _firebaseAuth.signOut();
       if (!mounted) return;
-      setState(() { _isLoading = false; _errorMessage = 'Login failed: ${e.toString()}'; });
+      setState(() { _isLoading = false; _errorMessage = 'Login failed. Please try again.'; });
     }
   }
 
+  /// Resend OTP via Firebase
+  /// Resend OTP — uses same path (Firebase or Dr. Dang) as original send
   Future<void> _handleResendOtp() async {
+    if (_resendCountdown > 0) return;
+
     setState(() { _isLoading = true; _errorMessage = null; });
-    final authProvider = context.read<AuthProvider>();
-    final otpResult = await authProvider.sendOtp(_formatPhone(_phoneController.text.trim()));
-    if (!mounted) return;
-    if (otpResult != null) {
-      _sessionId = otpResult.sessionId;
-      for (final c in _otpControllers) { c.clear(); }
-      setState(() => _isLoading = false);
-      _otpFocusNodes[0].requestFocus();
+
+    final phone = _phoneForVerification ?? _formatPhone(_phoneController.text.trim());
+
+    if (_useFirebaseVerification) {
+      // Resend via Firebase
+      try {
+        final result = await _firebaseAuth.verifyPhoneNumber(phone);
+        if (!mounted) return;
+
+        switch (result.status) {
+          case FirebasePhoneAuthStatus.codeSent:
+            _verificationId = result.verificationId;
+            for (final c in _otpControllers) { c.clear(); }
+            _startResendCountdown();
+            setState(() => _isLoading = false);
+            _otpFocusNodes[0].requestFocus();
+            break;
+          case FirebasePhoneAuthStatus.autoVerified:
+            setState(() { _state = _LoginState.autoVerifying; });
+            await _handleFirebaseTokenVerification(result.idToken!);
+            break;
+          case FirebasePhoneAuthStatus.error:
+            setState(() { _isLoading = false; _errorMessage = result.errorMessage ?? 'Failed to resend OTP'; });
+            break;
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setState(() { _isLoading = false; _errorMessage = 'Failed to resend OTP'; });
+      }
     } else {
-      setState(() { _isLoading = false; _errorMessage = authProvider.errorMessage ?? 'Failed to resend OTP'; });
+      // Resend via Dr. Dang SMS
+      try {
+        final authProvider = context.read<AuthProvider>();
+        final otpResult = await authProvider.sendOtp(phone);
+        if (!mounted) return;
+
+        if (otpResult != null) {
+          _sessionId = otpResult.sessionId;
+          for (final c in _otpControllers) { c.clear(); }
+          _startResendCountdown();
+          setState(() => _isLoading = false);
+          _otpFocusNodes[0].requestFocus();
+        } else {
+          setState(() { _isLoading = false; _errorMessage = authProvider.errorMessage ?? 'Failed to resend OTP'; });
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setState(() { _isLoading = false; _errorMessage = 'Failed to resend OTP'; });
+      }
     }
   }
 
@@ -279,7 +518,6 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
     return AnimatedBuilder(
       animation: _heroShrinkAnimation,
       builder: (context, child) {
-        // Lerp from 360 -> 180 as OTP animates in
         final height = 360.0 - (180.0 * _heroShrinkAnimation.value);
         return Container(
           width: double.infinity,
@@ -300,7 +538,6 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
           child: Stack(
             children: [
               Positioned.fill(child: CustomPaint(painter: _GridPatternPainter())),
-              // Content fades as hero shrinks
               SafeArea(
                 child: Opacity(
                   opacity: 1.0 - (_heroShrinkAnimation.value * 0.7),
@@ -398,82 +635,152 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
           ),
           const SizedBox(height: 16),
 
-          // Phone input
-          TextField(
-            controller: _phoneController,
-            keyboardType: TextInputType.phone,
-            maxLength: 10,
-            enabled: _state == _LoginState.idle,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            style: AppTextStyles.bodyLarge.copyWith(fontSize: 16),
-            decoration: InputDecoration(
-              hintText: 'Enter',
-              hintStyle: AppTextStyles.bodyLarge.copyWith(color: const Color(0xFFAAAAAA), fontWeight: FontWeight.w500),
-              counterText: '',
-              filled: true,
-              fillColor: const Color(0xFFECEEF3),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            ),
-          ),
-
-          // OTP section (animated reveal)
-          SizeTransition(
-            sizeFactor: _otpRevealAnimation,
-            axisAlignment: -1.0,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 28),
-                Text(
-                  'OTP sent to your email and mobile. Enter it to continue.',
-                  style: AppTextStyles.bodyMedium.copyWith(color: const Color(0xFF0D47A1), fontWeight: FontWeight.w600, fontSize: 18, height: 1.45),
+          // Phone input with change button (masked from Clarity session replay)
+          ClarityMask(child: Stack(
+            alignment: Alignment.centerRight,
+            children: [
+              TextField(
+                controller: _phoneController,
+                keyboardType: TextInputType.phone,
+                maxLength: 10,
+                enabled: _state == _LoginState.idle,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                style: AppTextStyles.bodyLarge.copyWith(fontSize: 16),
+                decoration: InputDecoration(
+                  hintText: 'Enter',
+                  hintStyle: AppTextStyles.bodyLarge.copyWith(color: const Color(0xFFAAAAAA), fontWeight: FontWeight.w500),
+                  counterText: '',
+                  filled: true,
+                  fillColor: const Color(0xFFECEEF3),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                  contentPadding: const EdgeInsets.fromLTRB(20, 16, 90, 16),
                 ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: List.generate(6, (i) {
-                    return SizedBox(
-                      width: 48, height: 48,
-                      child: TextField(
-                        controller: _otpControllers[i],
-                        focusNode: _otpFocusNodes[i],
-                        keyboardType: TextInputType.number,
-                        textAlign: TextAlign.center,
-                        maxLength: 1,
-                        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                        style: AppTextStyles.h5.copyWith(fontWeight: FontWeight.w700, fontSize: 22),
-                        decoration: InputDecoration(
-                          counterText: '',
-                          filled: true,
-                          fillColor: const Color(0xFFF8FAFF),
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFC5D4EB), width: 2)),
-                          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFC5D4EB), width: 2)),
-                          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF0D47A1), width: 2)),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                        onChanged: (v) => _onOtpChanged(i, v),
-                      ),
-                    );
-                  }),
-                ),
-                const SizedBox(height: 22),
-                Center(
+              ),
+              // Change number button — visible only after OTP is sent
+              if (_state != _LoginState.idle && _state != _LoginState.sendingOtp)
+                Positioned(
+                  right: 8,
                   child: GestureDetector(
-                    onTap: _isLoading ? null : _handleResendOtp,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('Resend', style: AppTextStyles.bodyMedium.copyWith(color: const Color(0xFF1565C0), fontWeight: FontWeight.w600, fontSize: 18)),
-                        const SizedBox(width: 8),
-                        const Icon(Icons.refresh_rounded, color: Color(0xFF1565C0), size: 20),
-                      ],
+                    onTap: _isLoading ? null : _handleChangeNumber,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1565C0).withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.edit_rounded, size: 13, color: Color(0xFF1565C0)),
+                          const SizedBox(width: 4),
+                          Text('Change',
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: const Color(0xFF1565C0),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ],
+            ],
+          )),
+
+          // Auto-verifying state (Android auto-read)
+          if (_state == _LoginState.autoVerifying)
+            Padding(
+              padding: const EdgeInsets.only(top: 28),
+              child: Column(
+                children: [
+                  const SizedBox(
+                    width: 40, height: 40,
+                    child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF0D47A1)),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Auto-verifying...',
+                    style: AppTextStyles.bodyMedium.copyWith(color: const Color(0xFF0D47A1), fontWeight: FontWeight.w600, fontSize: 16),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'OTP detected automatically',
+                    style: AppTextStyles.bodySmall.copyWith(color: const Color(0xFF6B7280)),
+                  ),
+                ],
+              ),
             ),
-          ),
+
+          // OTP section (animated reveal)
+          if (_state != _LoginState.autoVerifying)
+            SizeTransition(
+              sizeFactor: _otpRevealAnimation,
+              axisAlignment: -1.0,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 28),
+                  Text(
+                    'OTP sent to your mobile. Enter it to continue.',
+                    style: AppTextStyles.bodyMedium.copyWith(color: const Color(0xFF0D47A1), fontWeight: FontWeight.w600, fontSize: 18, height: 1.45),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: List.generate(6, (i) {
+                      return SizedBox(
+                        width: 48, height: 48,
+                        child: TextField(
+                          controller: _otpControllers[i],
+                          focusNode: _otpFocusNodes[i],
+                          keyboardType: TextInputType.number,
+                          textAlign: TextAlign.center,
+                          maxLength: 1,
+                          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                          style: AppTextStyles.h5.copyWith(fontWeight: FontWeight.w700, fontSize: 22),
+                          decoration: InputDecoration(
+                            counterText: '',
+                            filled: true,
+                            fillColor: const Color(0xFFF8FAFF),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFC5D4EB), width: 2)),
+                            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFC5D4EB), width: 2)),
+                            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF0D47A1), width: 2)),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                          onChanged: (v) => _onOtpChanged(i, v),
+                        ),
+                      );
+                    }),
+                  ),
+                  const SizedBox(height: 22),
+                  Center(
+                    child: GestureDetector(
+                      onTap: (_isLoading || _resendCountdown > 0) ? null : _handleResendOtp,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _resendCountdown > 0 ? 'Resend in ${_resendCountdown}s' : 'Resend',
+                            style: AppTextStyles.bodyMedium.copyWith(
+                              color: _resendCountdown > 0 ? const Color(0xFF9CA3AF) : const Color(0xFF1565C0),
+                              fontWeight: FontWeight.w600,
+                              fontSize: 18,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Icon(
+                            Icons.refresh_rounded,
+                            color: _resendCountdown > 0 ? const Color(0xFF9CA3AF) : const Color(0xFF1565C0),
+                            size: 20,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
 
           // Error
           if (_errorMessage != null) ...[
@@ -484,26 +791,33 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
           const SizedBox(height: 32),
 
           // Login button
-          SizedBox(
-            width: double.infinity,
-            height: 56,
-            child: ElevatedButton(
-              onPressed: _isLoading ? null : (_state == _LoginState.idle ? _handleSendOtp : _handleVerifyOtp),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0B2F6B),
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: const Color(0xFF0B2F6B).withValues(alpha: 0.6),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                elevation: 0,
+          if (_state != _LoginState.autoVerifying)
+            SizedBox(
+              width: double.infinity,
+              height: 56,
+              child: ElevatedButton(
+                onPressed: _isLoading
+                    ? null
+                    : (_state == _LoginState.idle
+                        ? _handleSendOtp
+                        : _state == _LoginState.otpSent
+                            ? _handleVerifyOtp
+                            : null),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0B2F6B),
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: const Color(0xFF0B2F6B).withValues(alpha: 0.6),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  elevation: 0,
+                ),
+                child: _isLoading
+                    ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+                    : Text(
+                        _state == _LoginState.idle ? 'Send OTP' : 'Login',
+                        style: AppTextStyles.h5.copyWith(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20),
+                      ),
               ),
-              child: _isLoading
-                  ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
-                  : Text(
-                      _state == _LoginState.idle ? 'Send OTP' : 'Login',
-                      style: AppTextStyles.h5.copyWith(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20),
-                    ),
             ),
-          ),
         ],
       ),
     );

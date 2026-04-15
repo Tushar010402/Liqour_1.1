@@ -25,6 +25,9 @@ class ProductWithStock {
   /// Product name (pass-through)
   String get name => product.name;
 
+  /// Clean display name
+  String get cleanName => product.cleanName;
+
   /// Product size (pass-through)
   String get size => product.size;
 
@@ -58,8 +61,8 @@ class ProductWithStock {
   /// HSN Code (barcode serves as HSN code for now)
   String get hsnCode => product.sku; // Use SKU as HSN code
 
-  /// MRP (use selling price + markup)
-  double get mrp => product.sellingPrice * 1.1; // 10% markup for display
+  /// MRP (from backend, fallback to selling price)
+  double get mrp => product.mrp > 0 ? product.mrp : product.sellingPrice;
 
   /// Buying Price (pass-through)
   double get buyingPrice => product.costPrice; // costPrice is buying price

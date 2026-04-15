@@ -131,6 +131,8 @@ class UserManagementProvider extends ChangeNotifier {
   }
 
   // Create user
+  /// Creates a user. Throws [PhoneConflictException] if phone already taken
+  /// so the UI can show the OTP transfer dialog.
   Future<bool> createUser(CreateUserRequest request) async {
     _errorMessage = null;
 
@@ -138,13 +140,9 @@ class UserManagementProvider extends ChangeNotifier {
       final user = await _service.createUser(request);
 
       if (user != null) {
-        // Insert at beginning of list
         _users.insert(0, user);
         _totalCount++;
-
-        // Reload stats
         await loadStats();
-
         notifyListeners();
         return true;
       } else {
@@ -152,34 +150,34 @@ class UserManagementProvider extends ChangeNotifier {
         notifyListeners();
         return false;
       }
+    } on PhoneConflictException {
+      // Let the UI handle this — don't set errorMessage
+      rethrow;
     } on ApiException catch (e) {
-      // Industrial-grade error message parsing for better UX
       String friendlyMessage = e.displayMessage;
-
       final lower = friendlyMessage.toLowerCase();
       if (lower.contains('uq_users_phone') || (lower.contains('phone') && lower.contains('duplicate'))) {
-        friendlyMessage = 'This phone number is already registered. Delete the existing user first or use a different number.';
+        friendlyMessage = 'This phone number is already registered.';
       } else if (lower.contains('users_username_key') || (lower.contains('username') && lower.contains('duplicate'))) {
         friendlyMessage = 'Username already exists. Please try again.';
       } else if (lower.contains('duplicate key') || lower.contains('constraint')) {
-        friendlyMessage = 'A user with these details already exists. Please check and try again.';
-      } else if (lower.contains('phone') && lower.contains('already')) {
-        friendlyMessage = 'This phone number is already registered to another user';
-      } else if (lower.contains('email') && lower.contains('already')) {
-        friendlyMessage = 'This email address is already in use';
+        friendlyMessage = 'A user with these details already exists.';
       } else if (lower.contains('shop') && lower.contains('not found')) {
         friendlyMessage = 'Selected shop not found - please refresh and try again';
       }
-
       _errorMessage = friendlyMessage;
       notifyListeners();
       return false;
     } catch (e) {
-      // Fallback for unexpected errors
       _errorMessage = 'Unexpected error: ${e.toString()}';
       notifyListeners();
       return false;
     }
+  }
+
+  /// Send phone transfer OTP
+  Future<String?> sendPhoneTransferOTP(String phone) async {
+    return _service.sendPhoneTransferOTP(phone);
   }
 
   // Update user

@@ -296,17 +296,22 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
     }
     HapticFeedbackUtil.medium();
 
-    // Build summary items
-    final summaryItems = items.map((e) => PurchaseSummaryItem(
-      productId: e.product.id,
-      name: e.product.name,
-      brandName: e.product.brand?.name,
-      size: e.product.size,
-      costPrice: e.product.costPrice,
-      sellingPrice: e.product.sellingPrice,
-      quantity: e.quantity,
-      stock: widget.stockMap[e.product.id]?.quantity ?? 0,
-    )).toList();
+    // Build summary items — use AI duty fee if available (more accurate from gate pass)
+    final summaryItems = items.map((e) {
+      final aiMeta = widget.aiItemMeta?[e.product.id];
+      final dutyFee = (aiMeta != null && aiMeta.dutyFee > 0) ? aiMeta.dutyFee : e.product.dutyFee;
+      return PurchaseSummaryItem(
+        productId: e.product.id,
+        name: e.product.name,
+        brandName: e.product.brand?.name,
+        size: e.product.size,
+        costPrice: e.product.costPrice,
+        sellingPrice: e.product.sellingPrice,
+        dutyFee: dutyFee,
+        quantity: e.quantity,
+        stock: widget.stockMap[e.product.id]?.quantity ?? 0,
+      );
+    }).toList();
 
     // Navigate to full-screen summary (like Sales Summary)
     Navigator.push<String>(
@@ -743,6 +748,8 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
                       ? CachedNetworkImage(
                           imageUrl: product.imageUrl,
                           fit: BoxFit.cover,
+                          memCacheWidth: 200,
+                          memCacheHeight: 200,
                           placeholder: (context, url) => const SizedBox(),
                           errorWidget: (context, url, error) => Center(
                             child: Icon(Icons.liquor, size: 30, color: Colors.white.withValues(alpha: 0.3)),

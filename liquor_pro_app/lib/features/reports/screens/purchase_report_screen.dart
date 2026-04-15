@@ -997,8 +997,8 @@ class _PurchaseReportScreenState extends State<PurchaseReportScreen> {
                           [
                             _buildDetailRow('Subtotal',
                                 Formatters.currency(purchase.subtotal)),
-                            _buildDetailRow('TDS (1%)',
-                                Formatters.currency(purchase.tdsAmount)),
+                            _buildDetailRow('TCS (2%)',
+                                Formatters.currency(purchase.tcsAmount)),
                             if (purchase.roundOff != 0)
                               _buildDetailRow(
                                 'Round Off',

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:clarity_flutter/clarity_flutter.dart';
 // Pinput removed — using native TextField for reliable keyboard handling
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
@@ -707,27 +708,68 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen>
 
         const SizedBox(height: 12),
 
-        // Subtitle with phone number
-        RichText(
-          textAlign: TextAlign.center,
-          text: TextSpan(
-            style: TextStyle(
-              fontSize: 15,
-              color: cs.onSurfaceVariant,
-              height: 1.5,
-            ),
-            children: [
-              const TextSpan(text: 'We sent a 6-digit code to\n'),
-              TextSpan(
-                text: widget.phoneNumber,
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  color: AppTheme.primaryColor,
-                  fontSize: 17,
-                ),
+        // Subtitle with phone number and change button
+        Column(
+          children: [
+            Text(
+              'We sent a 6-digit code to',
+              style: TextStyle(
+                fontSize: 15,
+                color: cs.onSurfaceVariant,
+                height: 1.5,
               ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  widget.phoneNumber,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.primaryColor,
+                    fontSize: 17,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () {
+                    HapticFeedback.lightImpact();
+                    Navigator.pop(context);
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: cs.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: cs.outlineVariant.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.edit_rounded,
+                          size: 13,
+                          color: cs.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Change',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
         )
             .animate()
             .fadeIn(delay: 200.ms, duration: 400.ms)
@@ -828,7 +870,8 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen>
     );
 
     // Stack: hidden TextField underneath, digit boxes on top
-    final inputWidget = Container(
+    // Wrapped with ClarityMask to hide OTP input from session replay
+    final inputWidget = ClarityMask(child: Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 16),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
@@ -906,7 +949,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen>
           ],
         ),
       ),
-    );
+    ));
 
     // AnimatedBuilder for shake — preserves child across animation frames
     return AnimatedBuilder(

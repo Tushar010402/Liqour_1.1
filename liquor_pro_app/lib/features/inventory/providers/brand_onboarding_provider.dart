@@ -555,4 +555,27 @@ class BrandOnboardingProvider with ChangeNotifier {
       shopName: shopName,
     );
   }
+
+  /// Reset all state — called on logout to prevent stale data
+  void reset() {
+    _availableBrands = [];
+    _isLoadingBrands = false;
+    _errorMessage = null;
+    _categories = [];
+    _subcategories = [];
+    _isLoadingCategories = false;
+    _isLoadingSubcategories = false;
+    _selectedBrandIds.clear();
+    _selectedVariantIds.clear();
+    _packages = [];
+    _isLoadingPackages = false;
+    _isOnboarding = false;
+    _lastOnboardingResult = null;
+    _categoryFilter = null;
+    _subcategoryFilter = null;
+    _searchQuery = null;
+    _hideOnboarded = false;
+    _variantStockQuantities.clear();
+    notifyListeners();
+  }
 }

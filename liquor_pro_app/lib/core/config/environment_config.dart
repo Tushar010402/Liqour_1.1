@@ -99,6 +99,19 @@ class EnvironmentConfig {
   /// Enable crash reporting in staging/production
   static bool get enableCrashReporting => isStaging || isProduction;
 
+  /// Microsoft Clarity project ID for session replay & heatmaps
+  /// Get from clarity.microsoft.com > Settings
+  static String get clarityProjectId {
+    switch (_currentEnvironment) {
+      case Environment.development:
+        return ''; // Disabled in dev
+      case Environment.staging:
+        return const String.fromEnvironment('CLARITY_PROJECT_ID', defaultValue: 'w4oicet2o0');
+      case Environment.production:
+        return const String.fromEnvironment('CLARITY_PROJECT_ID', defaultValue: 'w4oicet2o0');
+    }
+  }
+
   /// Get WebSocket URL based on environment
   static String get websocketUrl {
     switch (_currentEnvironment) {

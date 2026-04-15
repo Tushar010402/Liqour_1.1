@@ -135,19 +135,23 @@ class ValidationResult {
   final bool isAvailable;
 
   /// User-friendly message describing the validation result.
-  ///
-  /// Examples:
-  /// - "Phone number available"
-  /// - "Phone number already registered to another user"
-  /// - "Network error - please try again"
   final String message;
 
-  /// Creates a validation result.
-  ///
-  /// Both [isAvailable] and [message] are required for clear user feedback.
+  /// Whether the phone needs a transfer (exists in another tenant)
+  final bool needsTransfer;
+
+  /// Existing user info (when needsTransfer is true)
+  final String? existingName;
+  final String? existingRole;
+  final String? existingTenant;
+
   const ValidationResult({
     required this.isAvailable,
     required this.message,
+    this.needsTransfer = false,
+    this.existingName,
+    this.existingRole,
+    this.existingTenant,
   });
 
   static const ValidationResult checking = ValidationResult(
@@ -459,6 +463,9 @@ class _SmartPhoneInputState extends State<SmartPhoneInput> {
       }
 
       if (_validationResult != null) {
+        if (_validationResult!.needsTransfer) {
+          return const Icon(Icons.swap_horiz, color: Color(0xFFFF8F00), size: 20);
+        }
         return Icon(
           _validationResult!.isAvailable ? Icons.check_circle : Icons.error,
           color: _validationResult!.isAvailable
@@ -486,6 +493,13 @@ class _SmartPhoneInputState extends State<SmartPhoneInput> {
     // Show external error first
     if (widget.errorText != null) {
       return widget.errorText;
+    }
+
+    // Show transfer info
+    if (_validationResult != null && _validationResult!.needsTransfer) {
+      final name = _validationResult!.existingName ?? 'another user';
+      final tenant = _validationResult!.existingTenant ?? 'another organization';
+      return 'Registered to $name in $tenant — OTP required to transfer';
     }
 
     // Show validation message

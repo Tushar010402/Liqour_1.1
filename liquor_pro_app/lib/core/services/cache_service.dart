@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:hive_flutter/hive_flutter.dart';
+import '../config/debug_performance_config.dart';
 import '../utils/app_logger.dart';
 
 /// Cache Entry Model
@@ -48,6 +49,7 @@ class CacheService {
   // Disk cache (L2) - Persistent
   Box? _diskCache;
   bool _isInitialized = false;
+  Timer? _cleanupTimer;
 
   // Default TTL values
   static const Duration defaultTTL = Duration(minutes: 5);
@@ -199,7 +201,8 @@ class CacheService {
 
   /// Start periodic cache cleanup
   void _startCacheCleanup() {
-    Timer.periodic(const Duration(minutes: 5), (_) async {
+    _cleanupTimer?.cancel();
+    _cleanupTimer = Timer.periodic(DebugPerformanceConfig.cacheCleanupInterval, (_) async {
       await _cleanupExpiredEntries();
     });
   }
@@ -252,10 +255,12 @@ class CacheService {
 
   /// Close cache (cleanup)
   Future<void> close() async {
+    _cleanupTimer?.cancel();
+    _cleanupTimer = null;
     _memoryCache.clear();
     await _diskCache?.close();
     _isInitialized = false;
-    AppLogger.info('[CacheService] ♦️ Closed');
+    AppLogger.info('[CacheService] Closed');
   }
 }
 

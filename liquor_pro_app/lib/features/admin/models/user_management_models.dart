@@ -6,20 +6,22 @@ import '../../../core/utils/date_time_helper.dart';
 /// Create User Request
 class CreateUserRequest {
   final String username;
-  final String? email;            // ✅ NOW OPTIONAL
+  final String? email;
   final String password;
   final String firstName;
   final String lastName;
   final String? phone;
   final String role;
   final bool isActive;
-  final double? salary;          // Optional salary for all roles
-  final String? shopId;           // Required for salesman role
-  final String? certificateImage; // Optional certificate for salesman
+  final double? salary;
+  final String? shopId;
+  final String? certificateImage;
+  final String? transferOtp;
+  final String? transferSessionId;
 
   CreateUserRequest({
     required this.username,
-    this.email,                   // ✅ NOW OPTIONAL
+    this.email,
     required this.password,
     required this.firstName,
     required this.lastName,
@@ -29,12 +31,14 @@ class CreateUserRequest {
     this.salary,
     this.shopId,
     this.certificateImage,
+    this.transferOtp,
+    this.transferSessionId,
   });
 
   Map<String, dynamic> toJson() {
     return {
       'username': username,
-      if (email != null && email!.isNotEmpty) 'email': email,  // ✅ Only send if provided
+      if (email != null && email!.isNotEmpty) 'email': email,
       'password': password,
       'first_name': firstName,
       'last_name': lastName,
@@ -44,8 +48,38 @@ class CreateUserRequest {
       if (salary != null) 'salary': salary,
       if (shopId != null) 'shop_id': shopId,
       if (certificateImage != null) 'certificate_image': certificateImage,
+      if (transferOtp != null) 'transfer_otp': transferOtp,
+      if (transferSessionId != null) 'transfer_session_id': transferSessionId,
     };
   }
+
+  /// Create a copy with transfer OTP fields added
+  CreateUserRequest copyWithTransfer({required String otp, required String sessionId}) {
+    return CreateUserRequest(
+      username: username, email: email, password: password,
+      firstName: firstName, lastName: lastName, phone: phone,
+      role: role, isActive: isActive, salary: salary,
+      shopId: shopId, certificateImage: certificateImage,
+      transferOtp: otp, transferSessionId: sessionId,
+    );
+  }
+}
+
+/// Exception for phone already registered — carries existing user info
+class PhoneConflictException implements Exception {
+  final String message;
+  final String? existingUserName;
+  final String? existingUserRole;
+  final String? existingTenant;
+  final String phone;
+
+  PhoneConflictException({
+    required this.message,
+    required this.phone,
+    this.existingUserName,
+    this.existingUserRole,
+    this.existingTenant,
+  });
 }
 
 /// Update User Request - Comprehensive update with all editable fields
@@ -254,16 +288,28 @@ class UserRole {
 class ValidationResponse {
   final bool available;
   final String message;
+  final bool needsTransfer;
+  final String? existingName;
+  final String? existingRole;
+  final String? existingTenant;
 
   ValidationResponse({
     required this.available,
     required this.message,
+    this.needsTransfer = false,
+    this.existingName,
+    this.existingRole,
+    this.existingTenant,
   });
 
   factory ValidationResponse.fromJson(Map<String, dynamic> json) {
     return ValidationResponse(
       available: json['available'] as bool? ?? false,
       message: json['message'] as String? ?? '',
+      needsTransfer: json['needs_transfer'] as bool? ?? false,
+      existingName: json['existing_name'] as String?,
+      existingRole: json['existing_role'] as String?,
+      existingTenant: json['existing_tenant'] as String?,
     );
   }
 
@@ -271,6 +317,7 @@ class ValidationResponse {
     return {
       'available': available,
       'message': message,
+      'needs_transfer': needsTransfer,
     };
   }
 }

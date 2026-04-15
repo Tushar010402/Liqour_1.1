@@ -113,6 +113,7 @@ class _StockScreenState extends State<StockScreen> {
             dutyFee: 0,
             totalCost: 0,
             sellingPrice: 0,
+            mrp: 0,
             createdAt: DateTime.now(),
             updatedAt: DateTime.now(),
           ),
@@ -314,7 +315,8 @@ class _StockScreenState extends State<StockScreen> {
                                 dutyFee: 0,
                                 totalCost: 0,
                                 sellingPrice: 0,
-                                                    createdAt: DateTime.now(),
+                                mrp: 0,
+                                createdAt: DateTime.now(),
                                 updatedAt: DateTime.now(),
                               ),
                             );

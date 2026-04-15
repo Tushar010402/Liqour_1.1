@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" stroke="#5F6368" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Wallet body (rounded rect, gap at top-right for arrow) -->
+  <path d="M8,10 L28,10 M8,10 Q4,10 4,14 L4,40 Q4,44 8,44 L40,44 Q44,44 44,40 L44,24 Q44,20 40,20 L36,20"/>
+  <!-- Clasp/button dot -->
+  <circle cx="38" cy="34" r="2.5" fill="#5F6368" stroke="none"/>
+  <!-- Down arrow entering wallet -->
+  <line x1="36" y1="2" x2="36" y2="18"/>
+  <polyline points="30,12 36,18 42,12"/>
+</svg>

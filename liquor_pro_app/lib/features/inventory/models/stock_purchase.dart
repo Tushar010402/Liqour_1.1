@@ -53,6 +53,7 @@ class StockPurchaseItem {
   final int quantity;
   final double costPrice;
   final double totalAmount;
+  final double dutyFee; // Excise duty from gate pass (included in buying price)
 
   StockPurchaseItem({
     required this.productId,
@@ -62,6 +63,7 @@ class StockPurchaseItem {
     required this.quantity,
     required this.costPrice,
     required this.totalAmount,
+    this.dutyFee = 0.0,
   });
 
   factory StockPurchaseItem.fromJson(Map<String, dynamic> json) {
@@ -145,6 +147,7 @@ class StockPurchaseItem {
       quantity: quantity,
       costPrice: costPrice,
       totalAmount: totalAmount,
+      dutyFee: (json['duty_fee'] ?? json['dutyFee'] ?? 0).toDouble(),
     );
   }
 
@@ -157,6 +160,7 @@ class StockPurchaseItem {
       'quantity': quantity,
       'cost_price': costPrice,
       'total_amount': totalAmount,
+      if (dutyFee > 0) 'duty_fee': dutyFee,
     };
   }
 
@@ -168,6 +172,7 @@ class StockPurchaseItem {
     required String size,
     required int quantity,
     required double costPrice,
+    double dutyFee = 0.0,
   }) {
     return StockPurchaseItem(
       productId: productId,
@@ -177,6 +182,7 @@ class StockPurchaseItem {
       quantity: quantity,
       costPrice: costPrice,
       totalAmount: quantity * costPrice,
+      dutyFee: dutyFee,
     );
   }
 }
@@ -190,7 +196,7 @@ class StockPurchase {
   final String vendorName;
   final List<StockPurchaseItem> items;
   final double subtotal;
-  final double tdsAmount; // Tax Deducted at Source (1%)
+  final double tcsAmount; // Tax Collected at Source (2%)
   final double roundOff; // Round-off adjustment to make total a whole number
   final double totalAmount;
   final StockPurchaseStatus status;
@@ -216,6 +222,7 @@ class StockPurchase {
   final String? receiptNumber;
   final DateTime? receiptDate;
   final String? receiptImageUrl;
+  final List<String>? receiptImages;
   final String? receiptNotes;
 
   StockPurchase({
@@ -226,7 +233,7 @@ class StockPurchase {
     required this.vendorName,
     required this.items,
     required this.subtotal,
-    required this.tdsAmount,
+    required this.tcsAmount,
     this.roundOff = 0.0,
     required this.totalAmount,
     required this.status,
@@ -244,6 +251,7 @@ class StockPurchase {
     this.receiptNumber,
     this.receiptDate,
     this.receiptImageUrl,
+    this.receiptImages,
     this.receiptNotes,
   });
 
@@ -263,23 +271,23 @@ class StockPurchase {
         ? (rawSubtotal as num).toDouble()
         : calculatedSubtotal;
 
-    // Calculate TDS (1% of subtotal)
-    final calculatedTds = subtotal * 0.01;
+    // Calculate TCS (2% of subtotal) - Tax Collected at Source
+    final calculatedTcs = subtotal * 0.02;
 
-    // Backend sends tax_amount, frontend expects tds_amount - handle both
-    final rawTds = json['tds_amount'] ?? json['tdsAmount'] ?? json['tax_amount'] ?? json['taxAmount'];
-    final tdsAmount = (rawTds != null && rawTds != 0)
-        ? (rawTds as num).toDouble()
-        : calculatedTds;
+    // Backend sends tax_amount - handle all variations for backward compat
+    final rawTcs = json['tax_amount'] ?? json['taxAmount'] ?? json['tcs_amount'] ?? json['tcsAmount'] ?? json['tds_amount'] ?? json['tdsAmount'];
+    final tcsAmount = (rawTcs != null && rawTcs != 0)
+        ? (rawTcs as num).toDouble()
+        : calculatedTcs;
 
     // Parse round_off from backend
     final rawRoundOff = json['round_off'] ?? json['roundOff'];
     final roundOff = (rawRoundOff != null) ? (rawRoundOff as num).toDouble() : 0.0;
 
     // Always calculate total from components to ensure accuracy
-    // Formula: Subtotal + TDS (1%) + Round Off = Total
+    // Formula: Subtotal + TCS (2%) + Round Off = Total
     // Don't trust backend total as it may be incorrect
-    final totalAmount = subtotal + tdsAmount + roundOff;
+    final totalAmount = subtotal + tcsAmount + roundOff;
 
     // Extract shop info - handle nested object or flat fields
     String shopId = '';
@@ -346,7 +354,7 @@ class StockPurchase {
       vendorName: vendorName,
       items: items,
       subtotal: subtotal,
-      tdsAmount: tdsAmount,
+      tcsAmount: tcsAmount,
       roundOff: roundOff,
       totalAmount: totalAmount,
       status: StockPurchaseStatus.fromString(json['status'] ?? 'pending'),
@@ -376,6 +384,7 @@ class StockPurchase {
           ? DateTime.parse(json['receipt_date'].toString()).toLocal()
           : (json['receiptDate'] != null ? DateTime.parse(json['receiptDate'].toString()).toLocal() : null),
       receiptImageUrl: json['receipt_image_url']?.toString() ?? json['receiptImageUrl']?.toString(),
+      receiptImages: (json['receipt_images'] as List?)?.map((e) => e.toString()).toList(),
       receiptNotes: json['receipt_notes']?.toString() ?? json['receiptNotes']?.toString(),
     );
   }
@@ -389,7 +398,7 @@ class StockPurchase {
       'vendor_name': vendorName,
       'items': items.map((item) => item.toJson()).toList(),
       'subtotal': subtotal,
-      'tds_amount': tdsAmount,
+      'tax_amount': tcsAmount,
       'round_off': roundOff,
       'total_amount': totalAmount,
       'status': status.name,
@@ -408,6 +417,7 @@ class StockPurchase {
       if (receiptNumber != null) 'receipt_number': receiptNumber,
       if (receiptDate != null) 'receipt_date': receiptDate!.toUtc().toIso8601String(),
       if (receiptImageUrl != null) 'receipt_image_url': receiptImageUrl,
+      if (receiptImages != null && receiptImages!.isNotEmpty) 'receipt_images': receiptImages,
       if (receiptNotes != null) 'receipt_notes': receiptNotes,
     };
   }
@@ -495,6 +505,7 @@ class CreateStockPurchaseRequest {
   final String? receiptNumber;
   final DateTime? receiptDate;
   final String? receiptImageUrl;
+  final List<String>? receiptImages;
   final String? receiptNotes;
 
   CreateStockPurchaseRequest({
@@ -506,6 +517,7 @@ class CreateStockPurchaseRequest {
     this.receiptNumber,
     this.receiptDate,
     this.receiptImageUrl,
+    this.receiptImages,
     this.receiptNotes,
   });
 
@@ -519,24 +531,27 @@ class CreateStockPurchaseRequest {
           'quantity': item.quantity,
           'unit_price': item.costPrice,  // Backend expects unit_price
           'total_price': item.totalAmount,
+          if (item.dutyFee > 0) 'duty_fee': item.dutyFee,
         };
       }).toList(),
+      'total_amount': totalAmount, // Send total (subtotal + TCS + round-off) to backend
       if (notes != null) 'notes': notes,
       'round_off': roundOff ?? calculatedRoundOff, // Send round-off to backend
-      // Receipt Information
-      if (receiptNumber != null) 'receipt_number': receiptNumber,
+      // Receipt Information - backend expects 'receipt_no'
+      if (receiptNumber != null) 'receipt_no': receiptNumber,
       if (receiptDate != null) 'receipt_date': receiptDate!.toUtc().toIso8601String(),
       if (receiptImageUrl != null) 'receipt_image_url': receiptImageUrl,
+      if (receiptImages != null && receiptImages!.isNotEmpty) 'receipt_images': receiptImages,
       if (receiptNotes != null) 'receipt_notes': receiptNotes,
     };
   }
 
   double get subtotal => items.fold(0.0, (sum, item) => sum + item.totalAmount);
-  double get tdsAmount => subtotal * 0.01; // 1% TDS
+  double get tcsAmount => subtotal * 0.02; // 2% TCS (Tax Collected at Source)
 
   /// Auto-calculate round-off to make total a whole number
   double get calculatedRoundOff {
-    final afterTds = subtotal + tdsAmount;
+    final afterTds = subtotal + tcsAmount;
     final rounded = afterTds.round().toDouble();
     return rounded - afterTds;
   }
@@ -544,7 +559,7 @@ class CreateStockPurchaseRequest {
   /// Get effective round-off (use provided or calculate)
   double get effectiveRoundOff => roundOff ?? calculatedRoundOff;
 
-  double get totalAmount => subtotal + tdsAmount + effectiveRoundOff;
+  double get totalAmount => subtotal + tcsAmount + effectiveRoundOff;
 }
 
 /// Response wrapper for paginated purchase list

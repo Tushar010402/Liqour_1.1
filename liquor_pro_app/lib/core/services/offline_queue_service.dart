@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:uuid/uuid.dart';
+import '../config/debug_performance_config.dart';
 import '../utils/app_logger.dart';
 import 'dio_api_service.dart';
 
@@ -118,7 +119,7 @@ class OfflineQueueService {
   static const int maxRetries = 5;
   static const Duration initialRetryDelay = Duration(seconds: 5);
   static const Duration maxRetryDelay = Duration(minutes: 5);
-  static const Duration queueProcessInterval = Duration(seconds: 10);
+  static final Duration queueProcessInterval = DebugPerformanceConfig.offlineQueueProcessInterval;
 
   /// Initialize offline queue
   Future<void> initialize(DioApiService apiService) async {

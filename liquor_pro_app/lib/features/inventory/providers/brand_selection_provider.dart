@@ -322,6 +322,15 @@ class BrandSelectionProvider extends ChangeNotifier {
       'variant_ids': variantIds,
     };
   }
+
+  /// Reset all state — called on logout to prevent stale data
+  void reset() {
+    _selectedVariants.clear();
+    _allBrands = [];
+    _selectedCategoryId = null;
+    _searchQuery = '';
+    notifyListeners();
+  }
 }
 
 /// Represents a selected product for display in cart

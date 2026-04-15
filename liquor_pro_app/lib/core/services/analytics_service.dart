@@ -1,4 +1,7 @@
 import 'package:flutter/foundation.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
+import '../config/environment_config.dart';
 import '../utils/logger.dart';
 import 'preferences_service.dart';
 
@@ -66,22 +69,59 @@ class AnalyticsService {
     if (kDebugMode) return;
 
     if (!_isEnabled) return;
+    if (!EnvironmentConfig.enableAnalytics) return;
 
     try {
-      // In production, integrate with:
-      // - Firebase Analytics: FirebaseAnalytics.instance.logEvent(...)
-      // - Mixpanel: Mixpanel.track(eventName, parameters)
-      // - Amplitude: Amplitude.getInstance().logEvent(eventName, parameters)
-      // - Custom backend analytics
+      // Sanitize event name: Firebase limits to 40 chars, alphanumeric + underscore
+      final safeName = _sanitizeEventName(eventName);
 
-      // OPTIMIZED: Removed Logger.info() call that was adding overhead
-      // Only log analytics errors in production
+      // Sanitize parameters: name ≤40 chars, value ≤100 chars, only String/int/double/bool
+      final sanitized = _sanitizeParameters(parameters);
+
+      FirebaseAnalytics.instance.logEvent(
+        name: safeName,
+        parameters: sanitized,
+      );
     } catch (e) {
       // Only log errors - don't spam logs for successful events
       if (kReleaseMode) {
         Logger.error('Failed to track event: $eventName', e);
       }
     }
+  }
+
+  /// Sanitize event name for Firebase (≤40 chars, alphanumeric + underscore, must start with letter)
+  static String _sanitizeEventName(String name) {
+    final sanitized = name
+        .replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')
+        .replaceAll(RegExp(r'_+'), '_');
+    final trimmed = sanitized.length > 40 ? sanitized.substring(0, 40) : sanitized;
+    // Must start with a letter
+    if (trimmed.isNotEmpty && !RegExp(r'^[a-zA-Z]').hasMatch(trimmed)) {
+      return 'e_$trimmed'.substring(0, trimmed.length > 38 ? 40 : trimmed.length + 2);
+    }
+    return trimmed;
+  }
+
+  /// Sanitize parameters for Firebase (name ≤40 chars, value ≤100 chars)
+  static Map<String, Object>? _sanitizeParameters(Map<String, dynamic>? params) {
+    if (params == null || params.isEmpty) return null;
+
+    final sanitized = <String, Object>{};
+    for (final entry in params.entries) {
+      final key = entry.key.length > 40 ? entry.key.substring(0, 40) : entry.key;
+      final value = entry.value;
+
+      if (value is String) {
+        sanitized[key] = value.length > 100 ? value.substring(0, 100) : value;
+      } else if (value is int || value is double || value is bool) {
+        sanitized[key] = value;
+      } else if (value != null) {
+        final str = value.toString();
+        sanitized[key] = str.length > 100 ? str.substring(0, 100) : str;
+      }
+    }
+    return sanitized.isEmpty ? null : sanitized;
   }
 
   /// Track screen view
@@ -332,9 +372,14 @@ class AnalyticsService {
   static void setUserId(String userId) {
     if (kDebugMode) return; // Skip in debug mode
     if (!_isEnabled) return;
-    // In production:
-    // FirebaseAnalytics.instance.setUserId(id: userId);
-    // Mixpanel.identify(userId);
+    try {
+      FirebaseAnalytics.instance.setUserId(id: userId);
+      if (EnvironmentConfig.enableCrashReporting) {
+        FirebaseCrashlytics.instance.setUserIdentifier(userId);
+      }
+    } catch (e) {
+      Logger.error('Failed to set user ID', e);
+    }
   }
 
   /// Set user property
@@ -342,9 +387,13 @@ class AnalyticsService {
   static void setUserProperty(String name, String value) {
     if (kDebugMode) return; // Skip in debug mode
     if (!_isEnabled) return;
-    // In production:
-    // FirebaseAnalytics.instance.setUserProperty(name: name, value: value);
-    // Mixpanel.getPeople().set(name, value);
+    try {
+      final safeName = name.length > 24 ? name.substring(0, 24) : name;
+      final safeValue = value.length > 36 ? value.substring(0, 36) : value;
+      FirebaseAnalytics.instance.setUserProperty(name: safeName, value: safeValue);
+    } catch (e) {
+      Logger.error('Failed to set user property: $name', e);
+    }
   }
 
   /// Set user properties

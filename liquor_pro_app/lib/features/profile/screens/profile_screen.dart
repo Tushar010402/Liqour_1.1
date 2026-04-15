@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/constants/tagline_constants.dart';
 import '../../../core/providers/shop_selection_provider.dart';
+import '../../../core/providers/tagline_provider.dart';
 import '../../auth/providers/auth_provider.dart';
+import '../../navigation/screens/main_navigation_screen.dart';
 import 'delete_account_screen.dart';
 
 /// Profile Screen — pixel-matched to JSX Screen_Profile.
@@ -22,6 +25,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _lastNameController = TextEditingController();
   final _emailController = TextEditingController();
   final _phoneController = TextEditingController();
+  final _addressController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
 
   @override
@@ -36,6 +40,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _lastNameController.text = user?.lastName ?? '';
     _emailController.text = user?.email ?? '';
     _phoneController.text = user?.phone ?? '';
+    _addressController.text = '';
   }
 
   @override
@@ -44,12 +49,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _lastNameController.dispose();
     _emailController.dispose();
     _phoneController.dispose();
+    _addressController.dispose();
     super.dispose();
   }
 
-  void _handleSave() {
+  void _handleSave() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isEditing = false);
+
+    // Save tagline to backend via provider (already handles API call)
+    // Other fields (name, phone, email) can be added to the API call later
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Profile updated successfully'), backgroundColor: AppColors.success),
@@ -85,7 +94,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
         child: Row(
           children: [
             GestureDetector(
-              onTap: () => Navigator.maybePop(context),
+              onTap: () {
+                // Profile is a bottom nav tab — switch to Home tab instead of popping
+                final navState = context.findAncestorStateOfType<MainNavigationScreenState>();
+                if (navState != null) {
+                  navState.switchToTab(0);
+                } else {
+                  Navigator.maybePop(context);
+                }
+              },
               child: Container(
                 width: 38, height: 38,
                 decoration: const BoxDecoration(
@@ -304,13 +321,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   _buildEditField('Email', _emailController, enabled: false),
                   const SizedBox(height: 12),
                   _buildEditField('Phone', _phoneController),
+                  const SizedBox(height: 12),
+                  _buildTagLineSelector(),
+                  const SizedBox(height: 12),
+                  _buildEditField('Address', _addressController, maxLines: 3),
                 ] else ...[
-                  // JSX: each row has bold label fontSize 15 fontWeight 900, value #555 fontSize 14
                   _buildInfoRow('Email', user?.email ?? '-'),
                   _buildInfoRow('Mobile', user?.phone ?? '-'),
                   _buildInfoRow('Shop Name', shop.selectedShopName ?? '-'),
-                  _buildInfoRow('Tag Line', 'Om Namah Shivaya'),
-                  _buildInfoRow('Address', '-'),
+                  _buildTagLineInfoRow(),
+                  _buildInfoRow('Address', _addressController.text.isEmpty ? '-' : _addressController.text),
                 ],
               ],
             ),
@@ -345,7 +365,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildEditField(String label, TextEditingController controller, {bool enabled = true}) {
+  Widget _buildEditField(String label, TextEditingController controller, {bool enabled = true, int maxLines = 1}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -354,6 +374,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         TextFormField(
           controller: controller,
           enabled: enabled,
+          maxLines: maxLines,
           decoration: InputDecoration(
             filled: true,
             fillColor: const Color(0xFFECEEF3),
@@ -364,6 +385,185 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  /// Tagline row in view mode — shows icon + colored text
+  Widget _buildTagLineInfoRow() {
+    return Consumer<TagLineProvider>(
+      builder: (context, tagProv, _) {
+        final info = tagProv.selectedInfo;
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 110,
+                child: Text('Tag Line', style: AppTextStyles.bodySmall.copyWith(
+                  fontWeight: FontWeight.w500, fontSize: 13, color: const Color(0xFF888888),
+                )),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: info.bgColor,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(info.icon, style: const TextStyle(fontSize: 14)),
+                    const SizedBox(width: 6),
+                    Text(info.text, style: AppTextStyles.bodyMedium.copyWith(
+                      fontWeight: FontWeight.w700, fontSize: 13, color: info.color,
+                    )),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTagLineSelector() {
+    return Consumer<TagLineProvider>(
+      builder: (context, tagProv, _) {
+        final info = tagProv.selectedInfo;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Tag Line', style: AppTextStyles.bodySmall.copyWith(fontWeight: FontWeight.w800, color: const Color(0xFF1A1A2E))),
+            const SizedBox(height: 6),
+            GestureDetector(
+              onTap: () => _showTagLineSheet(),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: info.bgColor,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: info.color.withValues(alpha: 0.2)),
+                ),
+                child: Row(
+                  children: [
+                    Text(info.icon, style: const TextStyle(fontSize: 18)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        tagProv.selectedTagLine,
+                        style: AppTextStyles.bodyMedium.copyWith(
+                          fontSize: 14, fontWeight: FontWeight.w700, color: info.color,
+                        ),
+                      ),
+                    ),
+                    Icon(Icons.keyboard_arrow_down_rounded, color: info.color.withValues(alpha: 0.5), size: 22),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showTagLineSheet() {
+    final tagProv = context.read<TagLineProvider>();
+    final options = TagLineConstants.options;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: DraggableScrollableSheet(
+          initialChildSize: 0.7,
+          maxChildSize: 0.9,
+          minChildSize: 0.4,
+          expand: false,
+          builder: (_, scrollController) => Column(
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 36, height: 4,
+                decoration: BoxDecoration(color: const Color(0xFFD0D5DD), borderRadius: BorderRadius.circular(2)),
+              ),
+              const SizedBox(height: 16),
+              Text('Choose Your Tag Line',
+                style: AppTextStyles.h5.copyWith(fontWeight: FontWeight.w800, fontSize: 17, color: const Color(0xFF1A1A2E)),
+              ),
+              const SizedBox(height: 4),
+              Text('Pick a greeting that feels like you',
+                style: AppTextStyles.bodySmall.copyWith(fontSize: 12, color: const Color(0xFF888888)),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: ListView.builder(
+                  controller: scrollController,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: options.length,
+                  itemBuilder: (_, i) {
+                    final info = options[i];
+                    final isSelected = info.text == tagProv.selectedTagLine;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: GestureDetector(
+                        onTap: () {
+                          tagProv.setTagLine(info.text);
+                          Navigator.pop(ctx);
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                          decoration: BoxDecoration(
+                            color: isSelected ? info.bgColor : Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: isSelected ? info.color.withValues(alpha: 0.5) : const Color(0xFFE0E3EA),
+                              width: isSelected ? 1.8 : 1,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 40, height: 40,
+                                decoration: BoxDecoration(
+                                  color: info.bgColor,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Center(
+                                  child: Text(info.icon, style: const TextStyle(fontSize: 20)),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Text(
+                                  info.text,
+                                  style: AppTextStyles.bodyMedium.copyWith(
+                                    fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                                    color: isSelected ? info.color : const Color(0xFF333333),
+                                    fontSize: 15,
+                                  ),
+                                ),
+                              ),
+                              if (isSelected)
+                                Icon(Icons.check_circle_rounded, color: info.color, size: 22),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 

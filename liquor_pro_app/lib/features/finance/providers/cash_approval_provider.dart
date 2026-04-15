@@ -117,6 +117,16 @@ class CashApprovalProvider with ChangeNotifier {
     }
   }
 
+  /// Reset all state — called on logout to prevent stale data
+  void reset() {
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    _pendingCollections = [];
+    _isLoading = false;
+    _error = null;
+    notifyListeners();
+  }
+
   @override
   void dispose() {
     _refreshTimer?.cancel();

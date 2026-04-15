@@ -1,11 +1,15 @@
 import 'package:flutter/foundation.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import '../../../core/services/dio_api_service.dart';
 import '../../../core/services/auth_service.dart';
 import '../../../core/services/device_info_service.dart';
 import '../../../core/config/api_config.dart';
+import '../../../core/config/environment_config.dart';
 import '../../../core/utils/jwt_utils.dart';
 import '../../../core/utils/logger.dart';
 import '../../../core/utils/safe_casting.dart';
+import '../../../core/services/analytics_service.dart';
+import 'package:clarity_flutter/clarity_flutter.dart';
 import '../models/user_model.dart';
 import '../models/otp_models.dart';
 import '../models/device_session_models.dart';
@@ -24,6 +28,24 @@ class AuthProvider extends ChangeNotifier {
     required AuthService authService,
   })  : _apiService = apiService,
         _authService = authService;
+
+  /// Set Crashlytics user context for crash triage
+  void _setCrashlyticsUserContext(String userId, String role, String? tenantId) {
+    if (!EnvironmentConfig.enableCrashReporting) return;
+    try {
+      final crashlytics = FirebaseCrashlytics.instance;
+      crashlytics.setUserIdentifier(userId);
+      crashlytics.setCustomKey('user_role', role);
+      crashlytics.setCustomKey('tenant_id', tenantId ?? 'none');
+    } catch (_) {}
+  }
+
+  /// Force-clear user state when session expires (called from DioApiService).
+  /// Unlike [logout], this skips the network call since the session is already invalid.
+  void clearSessionState() {
+    _currentUser = null;
+    notifyListeners();
+  }
 
   // Getters
   UserModel? get currentUser => _currentUser;
@@ -85,6 +107,23 @@ class AuthProvider extends ChangeNotifier {
         Logger.info('[AuthProvider] Login complete - Token saved and cache refreshed');
 
         _currentUser = loginResponse.user;
+
+        // Wire analytics user context
+        AnalyticsService.setUserId(loginResponse.user.id);
+        AnalyticsService.setUserProperties({
+          'role': loginResponse.user.role,
+          'tenant_id': loginResponse.user.tenantId ?? 'none',
+        });
+        AnalyticsService.trackLogin(method: 'email');
+        _setCrashlyticsUserContext(
+          loginResponse.user.id,
+          loginResponse.user.role,
+          loginResponse.user.tenantId,
+        );
+        if (!kDebugMode) {
+          Clarity.setCustomUserId(loginResponse.user.id);
+        }
+
         _setLoading(false);
         return true;
       } else {
@@ -131,6 +170,7 @@ class AuthProvider extends ChangeNotifier {
       final userName = await _authService.getUserName();
       final userEmail = await _authService.getUserEmail();
       final userRole = await _authService.getUserRole();
+      final userPhone = await _authService.getUserPhone();
 
       if (userId != null &&
           userName != null &&
@@ -149,7 +189,13 @@ class AuthProvider extends ChangeNotifier {
           lastName: lastName,
           role: userRole,
           tenantId: tenantId,
+          phone: userPhone,
         );
+
+        // Re-set monitoring context on session restore
+        AnalyticsService.setUserId(userId);
+        _setCrashlyticsUserContext(userId, userRole, tenantId);
+
         notifyListeners();
       } else {
         // Missing required user data - clear auth state
@@ -188,10 +234,15 @@ class AuthProvider extends ChangeNotifier {
       if (kDebugMode) {
         Logger.error('[AuthProvider] Error during logout: $e');
       }
-      // Continue with logout even if there's an error
     }
 
+    // Clear DioApiService in-memory token cache immediately
+    _apiService.resetSessionExpired();
+    _apiService.clearHttpCache();
+
     _currentUser = null;
+    _currentSessionId = null;
+    AnalyticsService.trackLogout();
 
     // Add a small delay before notifyListeners to allow any pending navigation to complete
     // This prevents navigation race conditions when logout is triggered during session expiration
@@ -218,7 +269,108 @@ class AuthProvider extends ChangeNotifier {
     _setError(null);
   }
 
-  // ==================== OTP AUTHENTICATION ====================
+  // ==================== FIREBASE PHONE AUTH ====================
+
+  /// Verify Firebase ID token with backend
+  /// Returns VerifyOtpResponse (same structure — login or registration)
+  Future<VerifyOtpResponse?> verifyFirebaseToken({
+    required String firebaseIdToken,
+  }) async {
+    _setLoading(true);
+    _setError(null);
+
+    try {
+      // Get device info for device management
+      final deviceInfo = await DeviceInfoService.getDeviceInfo();
+
+      final requestBody = {
+        'firebase_id_token': firebaseIdToken,
+        ...deviceInfo.toJson(),
+      };
+
+      final response = await _apiService.post<Map<String, dynamic>>(
+        ApiConfig.verifyFirebaseToken,
+        body: requestBody,
+        fromJson: (data) => SafeCast.toMap<String, dynamic>(data),
+      );
+
+      // Handle 409 Conflict - Device Limit Reached
+      if (response.statusCode == 409) {
+        _setLoading(false);
+        final errorData = response.data ?? {};
+        final deviceLimitError = DeviceLimitError.fromJson(errorData);
+        throw DeviceLimitException(deviceLimitError);
+      }
+
+      if (response.isSuccess && response.data != null) {
+        Logger.debug('[AuthProvider] Firebase token verified: ${response.data}');
+        final verifyResponse = VerifyOtpResponse.fromJson(response.data!);
+
+        // If this is a login (has token and user), save auth data
+        if (verifyResponse.isLogin) {
+          final userData = verifyResponse.user!;
+          final tenantData = verifyResponse.tenant;
+
+          if (tenantData != null && tenantData['id'] != null) {
+            userData['tenant_id'] = SafeCast.toStringValue(tenantData['id']);
+            userData['tenant_name'] = SafeCast.toStringOrNull(tenantData['name']);
+          }
+
+          final user = UserModel.fromJson(userData);
+          final phone = userData['phone'] as String? ?? '';
+
+          await _authService.saveAuthData(
+            token: verifyResponse.token!,
+            refreshToken: verifyResponse.refreshToken,
+            userId: user.id,
+            tenantId: user.tenantId,
+            userName: user.displayName,
+            email: user.email,
+            role: user.role,
+            phone: phone,
+          );
+
+          if (verifyResponse.sessionId != null) {
+            await _authService.saveSessionId(verifyResponse.sessionId!);
+          }
+
+          await Future.delayed(const Duration(milliseconds: 300));
+          await _apiService.forceRefreshToken();
+
+          Logger.info('[AuthProvider] Firebase auth complete - Token saved');
+
+          _currentUser = user.copyWith(phone: phone);
+
+          AnalyticsService.setUserId(user.id);
+          AnalyticsService.setUserProperties({
+            'role': user.role,
+            'tenant_id': user.tenantId ?? 'none',
+          });
+          AnalyticsService.trackLogin(method: 'firebase_phone');
+          _setCrashlyticsUserContext(user.id, user.role, user.tenantId);
+          if (!kDebugMode) {
+            Clarity.setCustomUserId(user.id);
+          }
+        }
+
+        _setLoading(false);
+        return verifyResponse;
+      } else {
+        _setError(response.message ?? 'Verification failed');
+        _setLoading(false);
+        return null;
+      }
+    } on DeviceLimitException {
+      _setLoading(false);
+      rethrow;
+    } catch (e) {
+      _setError(e.toString());
+      _setLoading(false);
+      return null;
+    }
+  }
+
+  // ==================== OTP AUTHENTICATION (Legacy - Dr. Dang SMS) ====================
 
   /// Check if user exists by phone number
   Future<CheckUserResponse?> checkUser(String mobile) async {
@@ -419,6 +571,7 @@ class AuthProvider extends ChangeNotifier {
             userName: user.displayName,
             email: user.email,
             role: user.role,
+            phone: mobile,
           );
 
           // Save session ID for device management
@@ -438,7 +591,19 @@ class AuthProvider extends ChangeNotifier {
 
           Logger.info('[AuthProvider] OTP verified - Token saved and cache refreshed');
 
-          _currentUser = user;
+          _currentUser = user.copyWith(phone: mobile);
+
+          // Wire analytics user context
+          AnalyticsService.setUserId(user.id);
+          AnalyticsService.setUserProperties({
+            'role': user.role,
+            'tenant_id': user.tenantId ?? 'none',
+          });
+          AnalyticsService.trackLogin(method: 'phone_otp');
+          _setCrashlyticsUserContext(user.id, user.role, user.tenantId);
+          if (!kDebugMode) {
+            Clarity.setCustomUserId(user.id);
+          }
         }
 
         _setLoading(false);

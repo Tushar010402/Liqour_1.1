@@ -3,10 +3,12 @@ import 'package:dio_cache_interceptor/dio_cache_interceptor.dart';
 import 'package:flutter/foundation.dart';
 import '../config/api_config.dart';
 import '../logging/interceptors/dio_logging_interceptor.dart';
+import '../logging/interceptors/firebase_performance_interceptor.dart';
 import '../models/api_response.dart' as app_models;
 import '../utils/app_logger.dart';
 import '../utils/logger.dart';
 import '../utils/connectivity_helper.dart';
+import 'app_version_service.dart';
 import 'auth_service.dart';
 import 'notification_navigation_service.dart';
 import 'offline_queue_service.dart';
@@ -45,9 +47,11 @@ class DioApiService {
     '/api/auth/register',
     '/api/auth/login',
     '/api/auth/force-login-otp',
+    '/api/auth/verify-firebase-token',
     '/api/admin/validate/email',
     '/api/admin/validate/phone',
     '/api/admin/validate/tenant',
+    '/api/app/version-check',
   ];
 
   DioApiService({
@@ -129,6 +133,9 @@ class DioApiService {
     // 1. Logging interceptor - only sees requests that pass auth guard
     _dio.interceptors.add(DioLoggingInterceptor());
 
+    // 1b. Firebase Performance interceptor - API latency tracing
+    _dio.interceptors.add(FirebasePerformanceInterceptor());
+
     // 2. Request/Response/Error interceptor
     _dio.interceptors.add(
       InterceptorsWrapper(
@@ -137,6 +144,12 @@ class DioApiService {
         },
 
         onResponse: (response, handler) {
+          // Check version headers on every response
+          final minVersion = response.headers.value('X-Min-App-Version');
+          final latestVersion = response.headers.value('X-Latest-App-Version');
+          if (minVersion != null) {
+            AppVersionService.instance.handleVersionHeaders(minVersion, latestVersion);
+          }
           handler.next(response);
         },
 
@@ -274,6 +287,13 @@ class DioApiService {
     _cachedToken = null;
     _cachedTenantId = null;
     _tokenCacheTime = null;
+  }
+
+  /// Clear HTTP response cache — call on logout to prevent stale responses
+  void clearHttpCache() {
+    try {
+      _cacheOptions?.store?.clean();
+    } catch (_) {}
   }
 
   /// Refresh token cache

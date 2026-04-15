@@ -12,6 +12,7 @@ class DashboardSummary {
   final double upiAmount;
   final double creditAmount;
   final double expenseAmount;
+  final double purchaseAmount;
   final List<ShopSummary> shopSummaries;
   final List<TopProductSummary> topProducts;
   final List<RecentSaleActivity> recentSales;
@@ -32,6 +33,7 @@ class DashboardSummary {
     required this.upiAmount,
     required this.creditAmount,
     required this.expenseAmount,
+    required this.purchaseAmount,
     required this.shopSummaries,
     required this.topProducts,
     required this.recentSales,
@@ -54,6 +56,7 @@ class DashboardSummary {
       upiAmount: (json['upi_amount'] ?? 0).toDouble(),
       creditAmount: (json['credit_amount'] ?? 0).toDouble(),
       expenseAmount: (json['expense_amount'] ?? 0).toDouble(),
+      purchaseAmount: (json['purchase_amount'] ?? 0).toDouble(),
       shopSummaries: (json['shop_summaries'] as List<dynamic>?)
               ?.map((e) => ShopSummary.fromJson(e as Map<String, dynamic>))
               .toList() ??

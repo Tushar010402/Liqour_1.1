@@ -234,7 +234,7 @@ class VendorTransaction {
 
   // Calculated totals
   final double? subtotal;
-  final double? tdsAmount;
+  final double? tcsAmount;
   final String? status;
 
   VendorTransaction({
@@ -258,7 +258,7 @@ class VendorTransaction {
     this.shopName,
     this.items = const [],
     this.subtotal,
-    this.tdsAmount,
+    this.tcsAmount,
     this.status,
   });
 
@@ -297,7 +297,10 @@ class VendorTransaction {
       // Items and totals
       items: items,
       subtotal: json['subtotal'] != null ? (json['subtotal']).toDouble() : null,
-      tdsAmount: json['tds_amount'] != null ? (json['tds_amount']).toDouble() : null,
+      tcsAmount: json['tax_amount'] != null ? (json['tax_amount']).toDouble()
+               : json['tcs_amount'] != null ? (json['tcs_amount']).toDouble()
+               : json['tds_amount'] != null ? (json['tds_amount']).toDouble()
+               : null,
       status: json['status'] as String?,
     );
   }
@@ -338,11 +341,11 @@ class VendorTransaction {
     return createdBy.isNotEmpty ? createdBy : 'User';
   }
 
-  /// Calculated subtotal (amount before TDS)
+  /// Calculated subtotal (amount before TCS)
   double get calculatedSubtotal => subtotal ?? amount;
 
-  /// Calculated TDS
-  double get calculatedTds => tdsAmount ?? (calculatedSubtotal * 0.01);
+  /// Calculated TCS (2% Tax Collected at Source)
+  double get calculatedTcs => tcsAmount ?? (calculatedSubtotal * 0.02);
 
   /// Get status color-friendly status
   String get displayStatus => status?.toUpperCase() ?? (isPurchase ? 'APPROVED' : 'COMPLETED');

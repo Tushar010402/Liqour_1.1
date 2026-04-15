@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 // Platform-specific WebSocket implementations to fix port 0 bug
 import 'package:web_socket_channel/io.dart' show IOWebSocketChannel;
 import '../config/environment_config.dart';
+import '../config/debug_performance_config.dart';
 import '../utils/app_logger.dart';
 import '../utils/jwt_utils.dart';
 import 'auth_service.dart';
@@ -119,8 +120,7 @@ class WebSocketService {
   void _startTokenMonitoring() {
     _stopTokenMonitoring();
 
-    // Check token every 30 seconds
-    _tokenRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+    _tokenRefreshTimer = Timer.periodic(DebugPerformanceConfig.websocketTokenCheckInterval, (_) async {
       if (!_isConnected) return;
 
       final token = await _authService?.getToken();
@@ -464,7 +464,7 @@ class WebSocketService {
   /// Start ping timer to keep connection alive
   void _startPingTimer() {
     _stopPingTimer();
-    _pingTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+    _pingTimer = Timer.periodic(DebugPerformanceConfig.websocketPingInterval, (timer) {
       if (_isConnected) {
         _channel?.sink.add(jsonEncode({'action': 'ping'}));
       }

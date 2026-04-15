@@ -190,6 +190,36 @@ class BrandEditService {
     }
   }
 
+  /// Fetch all SaaS category sizes as raw JSON objects.
+  /// Returns list of maps with keys: category_id, size_name, display_name, etc.
+  /// Used by AI Stock Setup to show predefined sizes when tenant has no products.
+  Future<List<Map<String, dynamic>>> getCategorySizesRaw() async {
+    try {
+      final token = await _authService.getToken();
+      if (token == null) return [];
+
+      final url = Uri.parse('${ApiConfig.baseUrl}/api/inventory/category-sizes');
+      final response = await http.get(
+        url,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+      ).timeout(ApiConfig.connectionTimeout);
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true && data['data'] != null) {
+          return (data['data'] as List).cast<Map<String, dynamic>>();
+        }
+      }
+      return [];
+    } catch (e) {
+      print('⚠️ Error loading raw category sizes: $e');
+      return [];
+    }
+  }
+
   /// Get default sizes if API fails or no sizes defined
   List<String> _getDefaultSizes(String categoryId) {
     // Common default sizes

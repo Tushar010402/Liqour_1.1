@@ -191,9 +191,14 @@ class NotificationNavigationService {
       case 'audit':
         return '/notifications';
 
+      // App update — just go to home
+      case 'app_update':
+      case 'update_app':
+        return '/home';
+
       default:
         debugPrint('🔔 Unknown notification type: $type');
-        return '/notifications';
+        return '/home';
     }
   }
 

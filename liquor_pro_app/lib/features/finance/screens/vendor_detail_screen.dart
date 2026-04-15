@@ -1059,7 +1059,7 @@ class _VendorDetailScreenState extends State<VendorDetailScreen>
                         children: [
                           _buildPriceRow('Subtotal', transaction.calculatedSubtotal, currencyFormat),
                           const SizedBox(height: 8),
-                          _buildPriceRow('TDS (1%)', transaction.calculatedTds, currencyFormat),
+                          _buildPriceRow('TCS (2%)', transaction.calculatedTcs, currencyFormat),
                           const Divider(height: 20),
                           _buildPriceRow('Total Amount', transaction.amount, currencyFormat, isBold: true),
                         ],

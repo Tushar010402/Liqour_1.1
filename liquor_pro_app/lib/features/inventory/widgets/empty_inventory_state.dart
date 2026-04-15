@@ -120,11 +120,11 @@ class EmptyInventoryState extends StatelessWidget {
           // Action Cards
           _buildActionCard(
             context: context,
-            icon: Icons.store,
-            title: 'Browse Brand Catalog',
+            icon: Icons.storefront,
+            title: 'Brand Onboarding',
             description: type == EmptyStateType.brandsReadyToOnboard
                 ? 'Onboard $availableBrandsCount brands from catalog'
-                : 'Import from 1000+ brands in our catalog',
+                : 'Browse 1600+ brands and add to your shop',
             gradient: const LinearGradient(
               colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
               begin: Alignment.topLeft,
@@ -148,21 +148,6 @@ class EmptyInventoryState extends StatelessWidget {
             ),
             onTap: onCreateCustom,
           ).animate().fadeIn(delay: 500.ms).slideY(begin: 0.3, end: 0),
-
-          const SizedBox(height: 16),
-
-          _buildActionCard(
-            context: context,
-            icon: Icons.document_scanner,
-            title: 'Scan Invoice (OCR)',
-            description: 'Quick import from supplier invoices',
-            gradient: const LinearGradient(
-              colors: [Color(0xFFF59E0B), Color(0xFFEF4444)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            onTap: onScanInvoice,
-          ).animate().fadeIn(delay: 600.ms).slideY(begin: 0.3, end: 0),
 
           const SizedBox(height: 16),
 

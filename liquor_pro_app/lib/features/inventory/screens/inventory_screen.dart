@@ -5,7 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/constants/size_range_constants.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/providers/shop_selection_provider.dart';
 import '../../../core/services/dio_api_service.dart';
@@ -27,6 +29,7 @@ import 'custom_brand_form_screen.dart';
 import 'invoice_ocr_screen.dart';
 import 'stock_management_screen.dart';
 import 'ai_stock_setup_screen.dart';
+import 'brand_onboarding_setup_screen.dart';
 
 /// Inventory Screen - Modern Grid View
 ///
@@ -48,6 +51,8 @@ class InventoryScreen extends StatefulWidget {
 
 class _InventoryScreenState extends State<InventoryScreen> {
   bool _isGridView = false;
+  String? _selectedCategory;
+  String? _selectedSizeRange;
 
   // === MULTI-SELECT STATE FOR STOCK PURCHASE ===
   final Set<String> _selectedProductIds = {};
@@ -76,10 +81,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
   @override
   void initState() {
     super.initState();
-    print('🎯 ═══════════════════════════════════════════════════════════');
-    print('🎯 SCREEN OPENED: InventoryScreen (Wrapper with FAB)');
-    print('🎯 FILE: inventory_screen.dart');
-    print('🎯 ═══════════════════════════════════════════════════════════');
+    // Pre-load categories so size setup has them ready
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final productProvider = context.read<ProductProvider>();
+      final shopProvider = context.read<ShopSelectionProvider>();
+      if (productProvider.categories.isEmpty) {
+        productProvider.loadCategories(shopId: shopProvider.selectedShopId);
+      }
+    });
   }
 
   @override
@@ -88,20 +97,11 @@ class _InventoryScreenState extends State<InventoryScreen> {
     final authProvider = Provider.of<AuthProvider>(context, listen: false);
     final isSalesman = (authProvider.currentUser?.role ?? '').toLowerCase() == 'salesman';
 
-    // No AppBar - ProductsGridScreen has its own SliverAppBar (like Daily Sales Entry)
+    // Setup flow on the inventory tab — product grid opens as full-screen route (hides bottom bar)
     return Scaffold(
-      body: ProductsGridScreen(
-        isGridView: _isGridView,
-        onToggleView: () => setState(() => _isGridView = !_isGridView),
-        // Pass selection state and callbacks (disabled for salesman)
-        selectedProductIds: isSalesman ? null : _selectedProductIds,
-        onProductSelectionToggle: isSalesman ? null : _toggleProductSelection,
-      ),
-      // Show FAB: full actions for non-salesman, AI Stock Setup only for salesman
-      floatingActionButton: _isSelectionMode ? null : (isSalesman ? _buildSalesmanStockFAB() : _buildInventoryFAB()),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-      // Show selection footer when in selection mode (not for salesman)
-      bottomNavigationBar: !isSalesman && _isSelectionMode ? _buildSelectionFooter() : null,
+      body: _selectedCategory == null
+          ? _buildCategorySetup()
+          : _buildSizeSetup(),
     );
   }
 
@@ -340,7 +340,348 @@ class _InventoryScreenState extends State<InventoryScreen> {
   }
 
   // Floating Action Button with Speed Dial
-  /// FAB for salesman role — directly opens AI Stock Setup
+  /// Get English category IDs (Whisky + Vodka + Rum + Gin etc. — all non-beer)
+  List<String> _getEnglishCategoryIds(List categories) {
+    return categories
+        .where((c) => !c.name.toLowerCase().contains('beer'))
+        .map<String>((c) => c.id as String)
+        .toList();
+  }
+
+  /// Push product grid as full-screen route (hides bottom bar like daily sales entry)
+  void _pushProductGrid(String category, String sizeRange) {
+    final authProvider = Provider.of<AuthProvider>(context, listen: false);
+    final isSalesman = (authProvider.currentUser?.role ?? '').toLowerCase() == 'salesman';
+
+    Navigator.push(context, MaterialPageRoute(
+      builder: (_) => Scaffold(
+        body: ProductsGridScreen(
+          key: ValueKey('${category}_$sizeRange'),
+          isGridView: _isGridView,
+          onToggleView: () => setState(() => _isGridView = !_isGridView),
+          selectedProductIds: isSalesman ? null : _selectedProductIds,
+          onProductSelectionToggle: isSalesman ? null : _toggleProductSelection,
+          initialCategory: category,
+          initialSize: sizeRange.isNotEmpty ? sizeRange : null,
+        ),
+        floatingActionButton: isSalesman ? _buildSalesmanStockFAB() : _buildInventoryFAB(),
+        floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+      ),
+    )).then((_) {
+      // Reset to category setup when returning
+      setState(() {
+        _selectedCategory = null;
+        _selectedSizeRange = null;
+      });
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // Category & Size Setup Screens (same flow as Sales Entry)
+  // ══════════════════════════════════════════════════════════
+
+  Widget _buildCategorySetup() {
+    final categories = [
+      {'name': 'English', 'title': 'Whisky & Spirits', 'subtitle': 'Whisky, Vodka, Rum, Gin & more', 'image': 'assets/images/sales/whisky_card.png', 'icon': Icons.liquor},
+      {'name': 'Beer', 'title': 'Beer', 'subtitle': 'Beer brands & variants', 'image': 'assets/images/sales/beer_card.png', 'icon': Icons.sports_bar},
+    ];
+
+    return SafeArea(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Row(
+              children: [
+                const SizedBox(width: 8),
+                Text('Inventory', style: GoogleFonts.montserratAlternates(fontSize: 18, fontWeight: FontWeight.w700)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Column(
+                children: [
+                  ...categories.map((cat) => Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: GestureDetector(
+                    onTap: () {
+                      HapticFeedback.mediumImpact();
+                      final catName = cat['name'] as String;
+                      if (catName == 'Beer') {
+                        _pushProductGrid(catName, '');
+                      } else {
+                        // Load sizes for this category immediately
+                        final productProvider = context.read<ProductProvider>();
+                        final shopId = context.read<ShopSelectionProvider>().selectedShopId;
+                        if (catName == 'English') {
+                          final englishIds = _getEnglishCategoryIds(productProvider.categories);
+                          if (englishIds.isNotEmpty) {
+                            productProvider.loadAvailableSizes(categoryIds: englishIds, shopId: shopId);
+                          }
+                        }
+                        setState(() => _selectedCategory = catName);
+                      }
+                    },
+                    child: Container(
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        color: Colors.white,
+                        border: Border.all(color: const Color(0xFFD0D4DC), width: 1.2),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: SizedBox(
+                                width: double.infinity, height: 120,
+                                child: Image.asset(cat['image'] as String, fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => Container(
+                                    color: const Color(0xFF1A1A2E),
+                                    child: Center(child: Icon(cat['icon'] as IconData, size: 50, color: Colors.white24)),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(cat['title'] as String, style: GoogleFonts.nunito(fontSize: 16, fontWeight: FontWeight.w700)),
+                                const SizedBox(height: 3),
+                                Text(cat['subtitle'] as String, style: GoogleFonts.nunito(fontSize: 12, fontWeight: FontWeight.w500, color: const Color(0xFF333333))),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                )),
+                  // Brand Onboarding button
+                  _buildBrandOnboardingButton(),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSizeSetup() {
+    final isBeer = _selectedCategory == 'Beer';
+    final categoryLabel = _selectedCategory == 'English' ? 'Whisky' : _selectedCategory ?? '';
+
+    // Use sizes from the backend API (already range-grouped)
+    final productProvider = context.watch<ProductProvider>();
+    final sizesFromApi = productProvider.availableSizesWithCounts;
+
+    // If sizes not loaded yet, trigger load
+    if (sizesFromApi.isEmpty && !productProvider.isSizesLoading) {
+      final shopId = context.read<ShopSelectionProvider>().selectedShopId;
+      if (_selectedCategory == 'English') {
+        final englishIds = _getEnglishCategoryIds(productProvider.categories);
+        if (englishIds.isNotEmpty) {
+          productProvider.loadAvailableSizes(categoryIds: englishIds, shopId: shopId);
+        }
+      } else if (_selectedCategory == 'Beer') {
+        final beerCat = productProvider.categories.where((c) => c.name.toLowerCase().contains('beer')).firstOrNull;
+        if (beerCat != null) {
+          productProvider.loadAvailableSizes(categoryId: beerCat.id, shopId: shopId);
+        }
+      }
+    }
+
+    // Use API sizes — these are already range-grouped with product counts
+    final displayRanges = sizesFromApi;
+
+    return SafeArea(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Row(
+              children: [
+                GestureDetector(
+                  onTap: () => setState(() { _selectedCategory = null; _selectedSizeRange = null; }),
+                  child: Container(
+                    width: 40, height: 40,
+                    decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF3855B3)),
+                    child: const Icon(Icons.chevron_left, color: Colors.white, size: 26),
+                  ),
+                ),
+                Expanded(child: Text('Type of capacity', textAlign: TextAlign.center,
+                  style: GoogleFonts.montserratAlternates(fontSize: 17, fontWeight: FontWeight.w600))),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(color: const Color(0xFF2E7D32), borderRadius: BorderRadius.circular(8)),
+                  child: Text(categoryLabel, style: GoogleFonts.nunito(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
+                ),
+              ],
+            ),
+          ),
+          // Hero image
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 20),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0xFFD0D4DC), width: 1.2),
+              color: Colors.white,
+            ),
+            padding: const EdgeInsets.all(10),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: double.infinity, height: 120,
+                child: Image.asset(
+                  isBeer ? 'assets/images/sales/beer_card.png' : 'assets/images/sales/whisky_hero.png',
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(color: const Color(0xFF1A1A2E)),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: productProvider.isSizesLoading
+                ? const Center(child: CircularProgressIndicator.adaptive())
+                : displayRanges.isEmpty
+                    ? Center(child: Text('No products with stock', style: GoogleFonts.nunito(fontSize: 14, color: const Color(0xFF888888))))
+                    : ListView.separated(
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+                        itemCount: displayRanges.length,
+                        separatorBuilder: (_, __) => Divider(height: 0.5, color: Colors.grey.withValues(alpha: 0.15)),
+                        itemBuilder: (context, index) {
+                          final sizeData = displayRanges[index];
+                          final productCount = sizeData.productCount;
+                          return GestureDetector(
+                            onTap: () {
+                              HapticFeedback.mediumImpact();
+                              _pushProductGrid(_selectedCategory!, sizeData.size);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 34, height: 34,
+                                    decoration: BoxDecoration(
+                                      color: productCount > 0 ? const Color(0xFFE8F5E9) : const Color(0xFFF0F1F5),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Icon(isBeer ? Icons.sports_bar_rounded : Icons.liquor_rounded, size: 18,
+                                      color: productCount > 0 ? const Color(0xFF2E7D32) : const Color(0xFF888888)),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text('${sizeData.size} $categoryLabel',
+                                          style: GoogleFonts.nunito(fontSize: 15, fontWeight: FontWeight.w600)),
+                                        Text('$productCount products', style: GoogleFonts.nunito(fontSize: 12, fontWeight: FontWeight.w600, color: const Color(0xFF2E7D32))),
+                                      ],
+                                    ),
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      border: Border.all(color: const Color(0xFFD0D5DD)),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Text('View', style: GoogleFonts.nunito(fontSize: 12, fontWeight: FontWeight.w600, color: const Color(0xFF888888))),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+          ),
+          // Brand Onboarding button below size list
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+            child: _buildBrandOnboardingButton(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Brand Onboarding button — shown on category and size setup screens
+  Widget _buildBrandOnboardingButton() {
+    return GestureDetector(
+      onTap: () async {
+        HapticFeedback.mediumImpact();
+        final productProvider = context.read<ProductProvider>();
+        final shopProvider = context.read<ShopSelectionProvider>();
+        final shopId = shopProvider.selectedShopId;
+
+        await Navigator.push<bool>(
+          context,
+          MaterialPageRoute(
+            builder: (context) => const BrandOnboardingSetupScreen(),
+          ),
+        );
+
+        // Reload inventory when returning
+        if (mounted) {
+          await productProvider.loadProducts(shopId: shopId);
+          if (mounted) {
+            await productProvider.loadAvailableSizes(
+              categoryId: productProvider.selectedCategoryId,
+              shopId: shopId,
+            );
+          }
+        }
+      },
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          gradient: const LinearGradient(
+            colors: [Color(0xFF1349B8), Color(0xFF3855B3)],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF1349B8).withOpacity(0.25),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.storefront_rounded, color: Colors.white, size: 20),
+            const SizedBox(width: 10),
+            Text(
+              'Brand Onboarding',
+              style: GoogleFonts.nunito(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 14),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// FAB for salesman role — directly opens Brand Onboarding
   Widget _buildSalesmanStockFAB() {
     return FloatingActionButton.extended(
       onPressed: () async {
@@ -351,11 +692,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
         final result = await Navigator.push<bool>(
           context,
           MaterialPageRoute(
-            builder: (context) => const AiStockSetupScreen(),
+            builder: (context) => const BrandOnboardingSetupScreen(),
           ),
         );
 
-        if (result == true && mounted) {
+        // Always reload inventory when returning — other screens may have changed provider state
+        if (mounted) {
           await productProvider.loadProducts(shopId: shopId);
           if (mounted) {
             await productProvider.loadAvailableSizes(
@@ -367,8 +709,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
       },
       backgroundColor: const Color(0xFF3855B3),
       foregroundColor: Colors.white,
-      icon: const Icon(Icons.auto_awesome, size: 20),
-      label: const Text('AI Stock Setup', style: TextStyle(fontWeight: FontWeight.w600)),
+      icon: const Icon(Icons.storefront, size: 20),
+      label: const Text('Brand Onboarding', style: TextStyle(fontWeight: FontWeight.w600)),
     );
   }
 
@@ -549,7 +891,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                 },
               ),
 
-              // AI Stock Setup
+              // Brand Onboarding
               ListTile(
                 leading: Container(
                   padding: const EdgeInsets.all(8),
@@ -557,10 +899,10 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     color: const Color(0xFF3855B3).withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Icon(Icons.auto_awesome, color: Color(0xFF3855B3)),
+                  child: const Icon(Icons.storefront, color: Color(0xFF3855B3)),
                 ),
-                title: const Text('AI Stock Setup'),
-                subtitle: const Text('Set opening stock from register photo'),
+                title: const Text('Brand Onboarding'),
+                subtitle: const Text('Add brands from master catalog to your shop'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () async {
                   final productProvider = context.read<ProductProvider>();
@@ -572,11 +914,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   final result = await Navigator.push<bool>(
                     context,
                     MaterialPageRoute(
-                      builder: (context) => const AiStockSetupScreen(),
+                      builder: (context) => const BrandOnboardingSetupScreen(),
                     ),
                   );
 
-                  if (result == true && mounted) {
+                  // Always reload when returning
+                  if (mounted) {
                     await productProvider.loadProducts(shopId: shopId);
                     if (mounted) {
                       await productProvider.loadAvailableSizes(
@@ -1193,16 +1536,16 @@ class _StockPurchaseBottomSheetState extends State<_StockPurchaseBottomSheet> {
     return widget.products.any((product) => (_quantities[product.id] ?? 0) > 0);
   }
 
-  double get _tdsAmount => _purchaseValue * 0.01; // 1% TDS
+  double get _tcsAmount => _purchaseValue * 0.02; // 2% TCS (Tax Collected at Source)
 
   /// Auto-calculate round-off to make total a whole number
   double get _roundOffAmount {
-    final afterTds = _purchaseValue + _tdsAmount;
-    final rounded = afterTds.round().toDouble();
-    return rounded - afterTds;
+    final afterTcs = _purchaseValue + _tcsAmount;
+    final rounded = afterTcs.round().toDouble();
+    return rounded - afterTcs;
   }
 
-  double get _totalAmount => _purchaseValue + _tdsAmount + _roundOffAmount;
+  double get _totalAmount => _purchaseValue + _tcsAmount + _roundOffAmount;
 
   void _incrementQuantity(String productId) {
     setState(() {
@@ -1559,7 +1902,7 @@ class _StockPurchaseBottomSheetState extends State<_StockPurchaseBottomSheet> {
                       children: [
                         _buildPriceRow('Purchase Value', _purchaseValue),
                         const SizedBox(height: 8),
-                        _buildPriceRow('TDS (1%)', _tdsAmount),
+                        _buildPriceRow('TCS (2%)', _tcsAmount),
                         const SizedBox(height: 8),
                         _buildPriceRow('Round Off', _roundOffAmount, isRoundOff: true),
                         const Divider(height: 20),

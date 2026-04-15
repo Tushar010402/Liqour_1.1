@@ -3,17 +3,22 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import '../../../core/constants/product_constants.dart';
+import '../../../core/constants/size_range_constants.dart';
+import '../../../core/models/ai_feedback_model.dart';
 import '../../../core/providers/shop_selection_provider.dart';
+import '../../../core/widgets/ai_feedback_bottom_sheet.dart';
 import '../../../core/services/auth_service.dart';
 import '../../../core/utils/haptic_feedback.dart';
 import '../../../core/utils/snackbar_helper.dart';
 import '../models/ai_stock_models.dart';
 import '../models/product.dart' as models;
 import '../providers/product_provider.dart';
+import '../services/brand_edit_service.dart';
 import '../services/smart_stock_service.dart';
 
 /// Lightweight product class that unifies products from backend allProducts and local cache.
@@ -138,6 +143,10 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
   final List<_ManualEntry> _manualEntries = [];
   bool _notFoundExpanded = false;
 
+  // SaaS category sizes (fallback when tenant has no products yet)
+  // Maps category name (lowercase) → list of size names
+  Map<String, List<String>> _saasCategorySizes = {};
+
   @override
   void initState() {
     super.initState();
@@ -227,6 +236,9 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
 
       debugPrint('[AiStockSetup] Loaded ${_allProducts.length} products, ${_stockMap.length} stock entries');
 
+      // Fetch SaaS category sizes (needed when tenant has no products yet)
+      await _loadSaasCategorySizes();
+
       // Restore provider state so inventory screen isn't affected
       if (savedCatId != null) {
         productProvider.setSelectedCategory(savedCatId, savedCatName);
@@ -242,11 +254,67 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
     }
   }
 
+  /// Fetch predefined sizes from SaaS category-sizes API.
+  /// Groups them by category name so we can look up sizes even when
+  /// the tenant has no products onboarded yet.
+  Future<void> _loadSaasCategorySizes() async {
+    try {
+      final authService = context.read<AuthService>();
+      final brandEditService = BrandEditService(authService: authService);
+      // Fetch ALL SaaS category sizes (no filter)
+      final allSizes = await brandEditService.getCategorySizesRaw();
+      debugPrint('[AiStockSetup] Loaded ${allSizes.length} SaaS category sizes');
+      if (allSizes.isEmpty) return;
+
+      // Group sizes by SaaS category_id
+      final sizesByCatId = <String, List<String>>{};
+      for (final sizeObj in allSizes) {
+        final sizeName = sizeObj['size_name']?.toString() ?? '';
+        final catId = sizeObj['category_id']?.toString() ?? '';
+        if (sizeName.isEmpty || catId.isEmpty) continue;
+        sizesByCatId.putIfAbsent(catId, () => []);
+        if (!sizesByCatId[catId]!.contains(sizeName)) {
+          sizesByCatId[catId]!.add(sizeName);
+        }
+      }
+
+      // Map SaaS category_id → tenant category name.
+      // Beer sizes are unique (330ML, 500ML, 650ML), so detect Beer by content.
+      // All other categories (Whisky, Rum, Vodka) share the same sizes
+      // (90ML, 180ML, 375ML, 750ML, 1L) — assign them to each category name.
+      final grouped = <String, List<String>>{};
+      for (final entry in sizesByCatId.entries) {
+        final sizes = entry.value;
+        final isBeer = sizes.any((s) =>
+            s.contains('330') || s.contains('650'));
+        if (isBeer) {
+          grouped['beer'] = sizes;
+        } else {
+          // These sizes apply to Whisky, Rum, and Vodka equally
+          for (final name in ['whisky', 'rum', 'vodka']) {
+            grouped.putIfAbsent(name, () => List<String>.from(sizes));
+          }
+        }
+      }
+
+      _saasCategorySizes = grouped;
+      debugPrint('[AiStockSetup] SaaS sizes: ${grouped.map((k, v) => MapEntry(k, v.join(", ")))}');
+    } catch (e) {
+      debugPrint('[AiStockSetup] Error loading SaaS category sizes: $e');
+    }
+  }
+
+  /// Always show both categories for AI Stock Setup — user needs to set stock for all
+  List<String> _getUniqueCategories() {
+    return ['English', 'Beer'];
+  }
+
   List<models.Product> _getProductsForCategory(String category) {
     return _allProducts.where((p) {
       final catName = (p.category?.name ?? '').toLowerCase();
       if (category == 'Beer') return catName.contains('beer');
-      return !catName.contains('beer');
+      if (category == 'English') return catName.isNotEmpty && !catName.contains('beer');
+      return (p.category?.name ?? '') == category;
     }).toList();
   }
 
@@ -295,36 +363,34 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
     return '';
   }
 
-  // ── Size stats (same as _SalesCapacityScreen) ──
+  // ── Size stats — grouped by ranges ──
 
   Map<String, _SizeStats> _getSizeStats() {
     final products = _getProductsForCategory(_categoryKey);
-    debugPrint('[AiStockSetup] _getSizeStats: category=$_categoryKey, products=${products.length}, allProducts=${_allProducts.length}');
-
+    final ranges = SizeRangeConstants.rangesFor(_categoryKey);
     final stats = <String, _SizeStats>{};
-    int noSizeCount = 0;
+
+    // Initialize ranges
+    for (final range in ranges) {
+      stats[range.label] = _SizeStats(size: range.label);
+    }
+
+    // Bucket products into ranges
     for (var p in products) {
       final size = _extractProductSize(p);
-      if (size.isEmpty) {
-        noSizeCount++;
-        continue;
-      }
+      if (size.isEmpty) continue;
+      final rangeLabel = SizeRangeConstants.getRangeLabel(size, _categoryKey);
+      if (rangeLabel == null) continue;
       final stock = _stockMap[p.id];
       final qty = stock?.quantity ?? 0;
-      if (!stats.containsKey(size)) stats[size] = _SizeStats(size: size);
-      stats[size]!.totalStock += qty;
-      stats[size]!.totalValue += p.sellingPrice * qty;
+      stats[rangeLabel]!.totalStock += qty;
+      stats[rangeLabel]!.totalValue += (p.mrp > 0 ? p.mrp : p.sellingPrice) * qty;
     }
-    if (noSizeCount > 0) debugPrint('[AiStockSetup] $noSizeCount products had no extractable size');
 
-    final sorted = stats.values.toList()
-      ..sort((a, b) {
-        final aNum = int.tryParse(a.size.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-        final bNum = int.tryParse(b.size.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-        return aNum.compareTo(bNum);
-      });
-    debugPrint('[AiStockSetup] Found ${sorted.length} unique sizes: ${sorted.map((s) => s.size).join(", ")}');
-    return {for (var s in sorted) s.size: s};
+    // AI Stock Setup: Show ALL size ranges so user can set stock for any size
+    // Don't remove empty ranges — the whole point is to set opening stock
+
+    return stats;
   }
 
   // ── Image picking ──
@@ -598,6 +664,9 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
       _cancelled = false;
     });
 
+    // Keep screen awake during AI processing
+    try { await WakelockPlus.enable(); } catch (_) {}
+
     try {
       final service = SmartStockService(authService);
 
@@ -612,11 +681,7 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
       String? exactCategoryId;
       final provider = context.read<ProductProvider>();
       for (final cat in provider.categories) {
-        final catName = cat.name.toLowerCase();
-        if (_categoryKey == 'Beer' && catName.contains('beer')) {
-          exactCategoryId = cat.id;
-          break;
-        } else if (_categoryKey == 'English' && catName.contains('whisk')) {
+        if (cat.name == _categoryKey) {
           exactCategoryId = cat.id;
           break;
         }
@@ -664,11 +729,14 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
       if (_cancelled || !mounted) return;
       setState(() => _currentStep = 3);
       if (mounted) SnackbarHelper.showError(context, e.toString().replaceAll('Exception: ', ''));
+    } finally {
+      try { await WakelockPlus.disable(); } catch (_) {}
     }
   }
 
   void _cancelProcessing() {
     _cancelled = true;
+    try { WakelockPlus.disable(); } catch (_) {}
     setState(() => _currentStep = 3); // Back to upload step
   }
 
@@ -740,11 +808,9 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
         if (catName.contains('beer')) return false;
       }
 
-      // Size filter
+      // Size filter — supports range labels
       if (_selectedSize != null) {
-        final normalizedProductSize = ProductConstants.normalizeSize(p.size);
-        final normalizedFilterSize = ProductConstants.normalizeSize(_selectedSize!);
-        if (normalizedProductSize != normalizedFilterSize) return false;
+        if (!SizeRangeConstants.sizeMatchesRange(p.size, _selectedSize!, _categoryKey)) return false;
       }
 
       return true;
@@ -1006,6 +1072,12 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
         }
 
         if (!mounted) return;
+        await AIFeedbackBottomSheet.show(
+          context,
+          flowType: AIFlowType.stockSetup,
+          successMessage: msg,
+        );
+        if (!mounted) return;
         Navigator.pop(context, true);
         return; // Don't fall through — widget is being removed from tree
       } else {
@@ -1200,21 +1272,18 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Column(
                     children: [
-                      _buildCategoryCard(
-                        category: 'English',
-                        title: 'Whisky',
-                        subtitle: 'Whisky category performance overview. Tracking volume and total value',
-                        imageAsset: _StockAssets.whiskyCard,
-                        icon: Icons.liquor,
-                      ),
-                      const SizedBox(height: 16),
-                      _buildCategoryCard(
-                        category: 'Beer',
-                        title: 'Beer',
-                        subtitle: 'Beer category performance overview. Tracking volume and total value',
-                        imageAsset: _StockAssets.beerCard,
-                        icon: Icons.sports_bar,
-                      ),
+                      ..._getUniqueCategories().map((cat) => Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: _buildCategoryCard(
+                          category: cat,
+                          title: cat == 'English' ? 'Whisky & Spirits' : cat,
+                          subtitle: cat == 'English'
+                              ? 'Whisky, Vodka, Rum, Gin & more \u2022 ${_getProductsForCategory(cat).length} products'
+                              : '${_getProductsForCategory(cat).length} products',
+                          imageAsset: cat == 'Beer' ? _StockAssets.beerCard : _StockAssets.whiskyCard,
+                          icon: cat == 'Beer' ? Icons.sports_bar : Icons.liquor,
+                        ),
+                      )),
                       const SizedBox(height: 20),
                     ],
                   ),
@@ -1246,7 +1315,8 @@ class _AiStockSetupScreenState extends State<AiStockSetupScreen> with TickerProv
             _selectedCategoryName = 'Whisky';
           }
           _selectedSize = null;
-          _currentStep = 1;
+          // Beer: skip size selection, go directly to image upload
+          _currentStep = (category == 'Beer') ? 3 : 1;
         });
       },
       child: Container(

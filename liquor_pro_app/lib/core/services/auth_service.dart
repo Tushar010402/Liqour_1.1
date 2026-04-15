@@ -26,6 +26,7 @@ class AuthService {
   static const String _keyUserName = 'user_name';
   static const String _keyUserEmail = 'user_email';
   static const String _keyUserRole = 'user_role';
+  static const String _keyUserPhone = 'user_phone';
   static const String _keySessionId = 'session_id';  // For device management
 
   AuthService({
@@ -47,6 +48,7 @@ class AuthService {
     required String userName,
     required String email,
     required String role,
+    String? phone,
   }) async {
     await _secureStorage.write(
       key: _keyToken,
@@ -70,6 +72,9 @@ class AuthService {
     await _prefs.setString(_keyUserName, userName);
     await _prefs.setString(_keyUserEmail, email);
     await _prefs.setString(_keyUserRole, role);
+    if (phone != null) {
+      await _prefs.setString(_keyUserPhone, phone);
+    }
   }
 
   // Get token
@@ -116,6 +121,11 @@ class AuthService {
     return _prefs.getString(_keyUserRole);
   }
 
+  // Get user phone
+  Future<String?> getUserPhone() async {
+    return _prefs.getString(_keyUserPhone);
+  }
+
   // Save session ID (for device management - identifying current session)
   Future<void> saveSessionId(String sessionId) async {
     await _prefs.setString(_keySessionId, sessionId);
@@ -152,6 +162,7 @@ class AuthService {
     await _prefs.remove(_keyUserName);
     await _prefs.remove(_keyUserEmail);
     await _prefs.remove(_keyUserRole);
+    await _prefs.remove(_keyUserPhone);
     await _prefs.remove(_keySessionId);  // Clear session ID for device management
   }
 

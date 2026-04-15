@@ -95,9 +95,18 @@ class SmartPurchaseItem {
   final double? dbCostPrice;
   final int? currentStock;
 
+  // Gate pass duty (excise duty included in buying price — for compliance logging)
+  final double dutyFee;
+  final double dutyPerBottle;
+
   // User resolution state (frontend-only, not from backend)
   int userSelectedIndex; // -1 = not yet selected
   bool userSkipped;
+
+  // User edit overrides (frontend-only, not from backend)
+  double? userCostPrice;    // Override for ratePerBottle
+  double? userDutyFee;      // Override for dutyPerBottle
+  int? userQuantity;        // Override for quantityBottles
 
   SmartPurchaseItem({
     this.rowNumber = 0,
@@ -121,8 +130,13 @@ class SmartPurchaseItem {
     this.warnings = const [],
     this.dbCostPrice,
     this.currentStock,
+    this.dutyFee = 0.0,
+    this.dutyPerBottle = 0.0,
     this.userSelectedIndex = -1,
     this.userSkipped = false,
+    this.userCostPrice,
+    this.userDutyFee,
+    this.userQuantity,
   });
 
   factory SmartPurchaseItem.fromJson(Map<String, dynamic> json) {
@@ -152,6 +166,8 @@ class SmartPurchaseItem {
           .toList(),
       dbCostPrice: _parseDoubleNullable(json['db_cost_price']),
       currentStock: _parseInt(json['current_stock']),
+      dutyFee: _parseDouble(json['duty_fee']),
+      dutyPerBottle: _parseDouble(json['duty_per_bottle']),
     );
   }
 
@@ -191,6 +207,23 @@ class SmartPurchaseItem {
     final diff = (ratePerBottle - dbCostPrice!).abs();
     return (diff / dbCostPrice!) > 0.01;
   }
+
+  /// Whether matched brand name differs from invoice brand name.
+  bool get hasNameMismatch {
+    if (matchedBrandName == null) return false;
+    final invoiceLower = brandName.toLowerCase().replaceAll(RegExp(r'[\s\-]+'), '');
+    final matchedLower = matchedBrandName!.toLowerCase().replaceAll(RegExp(r'[\s\-]+'), '');
+    return !matchedLower.contains(invoiceLower) && !invoiceLower.contains(matchedLower);
+  }
+
+  /// Effective cost price — user override or AI-extracted rate
+  double get effectiveCostPrice => userCostPrice ?? ratePerBottle;
+
+  /// Effective duty fee — user override or gate pass duty
+  double get effectiveDutyFee => userDutyFee ?? dutyPerBottle;
+
+  /// Effective quantity in bottles — user override or AI-extracted
+  int get effectiveQuantity => userQuantity ?? quantityBottles;
 }
 
 /// An alternative product match suggested by the backend.
@@ -309,6 +342,7 @@ class AIPurchaseItemMeta {
   final int quantityBottles;
   final String quantityUnit;
   final int bottlesPerCase;
+  final double dutyFee; // Excise duty per bottle
   final List<String> warnings;
 
   const AIPurchaseItemMeta({
@@ -319,6 +353,7 @@ class AIPurchaseItemMeta {
     this.quantityBottles = 0,
     this.quantityUnit = 'bottles',
     this.bottlesPerCase = 1,
+    this.dutyFee = 0.0,
     this.warnings = const [],
   });
 }

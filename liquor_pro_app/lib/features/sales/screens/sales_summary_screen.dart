@@ -97,6 +97,7 @@ class SalesSummaryScreen extends StatefulWidget {
 
 class _SalesSummaryScreenState extends State<SalesSummaryScreen> {
   late List<SalesSummaryItem> _items;
+  late List<SalesSummaryItem> _allProducts; // Master list of ALL products (summary + available)
   bool _skippedExpanded = false;
   bool _isSubmitting = false;
   int _addedCount = 0;
@@ -105,6 +106,21 @@ class _SalesSummaryScreenState extends State<SalesSummaryScreen> {
   void initState() {
     super.initState();
     _items = List.from(widget.items);
+    // Build master list: items in summary + available products
+    final allIds = <String>{};
+    _allProducts = <SalesSummaryItem>[];
+    for (final item in widget.items) {
+      if (!allIds.contains(item.productId)) {
+        _allProducts.add(item);
+        allIds.add(item.productId);
+      }
+    }
+    for (final item in widget.availableProducts) {
+      if (!allIds.contains(item.productId)) {
+        _allProducts.add(item);
+        allIds.add(item.productId);
+      }
+    }
   }
 
   double get _grandTotal => _items.fold(0.0, (s, i) => s + i.price * i.quantity);
@@ -358,18 +374,18 @@ class _SalesSummaryScreenState extends State<SalesSummaryScreen> {
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-                    itemCount: _items.length + 1 + (widget.isAIMode && widget.availableProducts.isNotEmpty ? 1 : 0),
+                    itemCount: _items.length + 1 + (_allProducts.length > _items.length ? 1 : 0),
                     itemBuilder: (_, i) {
                       if (i < _items.length) return _row(i, _items[i]);
                       // Add Missing section before Grand Total
-                      if (widget.isAIMode && widget.availableProducts.isNotEmpty && i == _items.length) return _buildAddMissingSection();
+                      if (_allProducts.length > _items.length && i == _items.length) return _buildAddMissingSection();
                       return _total();
                     },
                   ),
           ),
 
-          // Original bottom bar
-          if (_items.isNotEmpty)
+          // Original bottom bar — hidden in read-only mode (no onSubmit/onSubmitItems)
+          if (_items.isNotEmpty && (widget.onSubmit != null || widget.onSubmitItems != null))
             BottomActionBar(
               label: _isSubmitting ? 'Submitting...' : 'Submit',
               onPressed: _isSubmitting ? null : _handleSubmit,
@@ -828,10 +844,10 @@ class _SalesSummaryScreenState extends State<SalesSummaryScreen> {
   }
 
   void _showAddItemSheet() {
-    // Exclude products already in the list (prevents duplicates)
-    final matchedIds = _items.map((i) => i.productId).toSet();
-    final available = widget.availableProducts
-        .where((p) => !matchedIds.contains(p.productId))
+    // Dynamically build available list from master list minus current summary items
+    final currentIds = _items.map((i) => i.productId).toSet();
+    final available = _allProducts
+        .where((p) => !currentIds.contains(p.productId))
         .toList();
 
     if (available.isEmpty) {

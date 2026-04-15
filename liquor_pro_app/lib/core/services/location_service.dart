@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
+import '../config/debug_performance_config.dart';
 
 /// Location Data Model for sales tracking
 class LocationData {
@@ -40,13 +41,30 @@ class LocationService {
 
   /// Get current location with graceful fallback
   /// Returns null if permission denied or unavailable - NEVER BLOCKS
+  ///
+  /// On iOS Simulator, returns a mock location to avoid triggering
+  /// MapKit.SnapshotService which consumes 100%+ CPU.
   Future<LocationData?> getCurrentLocation() async {
+    // Skip real GPS on simulator — MapKit SnapshotService eats 100%+ CPU
+    if (DebugPerformanceConfig.isSimulator &&
+        !DebugPerformanceConfig.enableLocationOnSimulator) {
+      if (kDebugMode) {
+        debugPrint('[LocationService] Simulator detected — returning mock location');
+      }
+      return LocationData(
+        latitude: 28.6139,   // New Delhi (mock)
+        longitude: 77.2090,
+        accuracy: 100.0,
+        timestamp: DateTime.now(),
+      );
+    }
+
     try {
       // Check if location services are enabled
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
         if (kDebugMode) {
-          print('[LocationService] Location services disabled');
+          debugPrint('[LocationService] Location services disabled');
         }
         return null;
       }

@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import '../../../core/services/dio_api_service.dart';
 import '../../../core/config/api_config.dart';
 import '../../../core/exceptions/api_exception.dart';
@@ -71,6 +72,7 @@ class UserManagementService {
 
   /// Create new user
   /// POST /api/admin/users
+  /// Throws [PhoneConflictException] if phone is already registered (409)
   Future<UserItem?> createUser(CreateUserRequest request) async {
     try {
       final response = await _apiService.post<Map<String, dynamic>>(
@@ -83,18 +85,68 @@ class UserManagementService {
         return UserItem.fromJson(response.data!);
       }
 
-      // Throw ApiException with actual backend error message
+      // Check for 409 phone conflict
+      if (response.statusCode == 409) {
+        throw PhoneConflictException(
+          message: response.message ?? 'Phone already registered',
+          phone: request.phone ?? '',
+        );
+      }
+
       throw ApiException.fromResponse(
         message: response.message ?? 'Failed to create user',
         statusCode: response.statusCode,
         errors: response.errors,
       );
-    } catch (e) {
-      print('Error creating user: $e');
-      // Re-throw ApiException as-is, wrap other exceptions
-      if (e is ApiException) {
-        rethrow;
+    } on PhoneConflictException {
+      rethrow;
+    } on ApiException {
+      rethrow;
+    } on DioException catch (e) {
+      // Catch 409 from Dio error response
+      if (e.response?.statusCode == 409) {
+        final data = e.response?.data;
+        final errorCode = data is Map ? data['error_code'] : null;
+        if (errorCode == 'phone_already_registered') {
+          final existing = data['existing_user'] as Map<String, dynamic>?;
+          throw PhoneConflictException(
+            message: data['message'] ?? 'Phone already registered',
+            phone: request.phone ?? '',
+            existingUserName: existing?['name'],
+            existingUserRole: existing?['role'],
+            existingTenant: existing?['tenant'],
+          );
+        }
       }
+      throw ApiException.fromResponse(
+        message: e.response?.data?['error'] ?? e.message ?? 'Failed to create user',
+        statusCode: e.response?.statusCode,
+      );
+    } catch (e) {
+      if (e is PhoneConflictException) rethrow;
+      throw ApiException.network(e.toString());
+    }
+  }
+
+  /// Send OTP for phone transfer verification
+  /// POST /api/admin/users/send-transfer-otp
+  Future<String?> sendPhoneTransferOTP(String phone) async {
+    try {
+      final response = await _apiService.post<Map<String, dynamic>>(
+        '${ApiConfig.adminUsers}/send-transfer-otp',
+        body: {'phone': phone},
+        fromJson: (data) => data as Map<String, dynamic>,
+      );
+
+      if (response.isSuccess && response.data != null) {
+        return response.data!['session_id'] as String?;
+      }
+      throw ApiException.fromResponse(
+        message: response.message ?? 'Failed to send OTP',
+        statusCode: response.statusCode,
+      );
+    } catch (e) {
+      if (e is ApiException) rethrow;
       throw ApiException.network(e.toString());
     }
   }

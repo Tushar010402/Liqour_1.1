@@ -193,6 +193,7 @@ class SaasBrandVariant {
   final DateTime createdAt;
   final DateTime updatedAt;
   final bool? isOnboarded; // Track if this variant is already onboarded
+  final int currentStock; // Current stock quantity for onboarded variants
 
   // Nested objects from backend
   final CategoryInfo? category;
@@ -217,6 +218,7 @@ class SaasBrandVariant {
     required this.createdAt,
     required this.updatedAt,
     this.isOnboarded,
+    this.currentStock = 0,
     this.category,
     this.subcategory,
   });
@@ -245,6 +247,7 @@ class SaasBrandVariant {
           ? DateTime.tryParse(json['updated_at']) ?? DateTime.now()
           : DateTime.now(),
       isOnboarded: json['is_onboarded'],
+      currentStock: json['current_stock'] ?? 0,
       category: json['category'] != null && json['category'] is Map<String, dynamic>
           ? CategoryInfo.fromJson(json['category'] as Map<String, dynamic>)
           : null,

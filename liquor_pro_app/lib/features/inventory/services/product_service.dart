@@ -560,9 +560,10 @@ class ProductService {
         // if backend returns both "180ML" and "180ml" as separate records
         final Map<String, SizeWithCount> deduplicatedSizes = {};
         for (final sizeWithCount in sizesWithCounts) {
-          final normalizedSize = sizeWithCount.size.toUpperCase().replaceAll(' ', '');
+          // For range labels (contain parentheses), use as-is; for raw sizes, normalize
+          final isRange = sizeWithCount.size.contains('(') || sizeWithCount.size.contains('Below') || sizeWithCount.size.contains('Bulk');
+          final normalizedSize = isRange ? sizeWithCount.size : sizeWithCount.size.toUpperCase().replaceAll(' ', '');
           if (deduplicatedSizes.containsKey(normalizedSize)) {
-            // Merge counts: add productCount and totalStockQuantity
             final existing = deduplicatedSizes[normalizedSize]!;
             deduplicatedSizes[normalizedSize] = SizeWithCount(
               size: normalizedSize,
@@ -570,7 +571,6 @@ class ProductService {
               totalStockQuantity: existing.totalStockQuantity + sizeWithCount.totalStockQuantity,
             );
           } else {
-            // First occurrence - use normalized size
             deduplicatedSizes[normalizedSize] = SizeWithCount(
               size: normalizedSize,
               productCount: sizeWithCount.productCount,

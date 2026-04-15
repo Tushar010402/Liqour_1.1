@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import '../../config/environment_config.dart';
 import '../logging_service.dart';
 import 'dio_logging_interceptor.dart';
 
@@ -32,11 +34,22 @@ class LoggingNavigatorObserver extends NavigatorObserver {
     return route.runtimeType.toString();
   }
 
-  /// Update current screen and notify Dio interceptor
+  /// Update current screen and notify Dio interceptor + Firebase Analytics
   void _updateCurrentScreen(String screenName) {
     currentScreenName = screenName;
     // Update Dio interceptor so API logs include screen context
     DioLoggingInterceptor.setCurrentScreen(screenName);
+    // Log screen view to Firebase Analytics (non-debug, analytics-enabled only)
+    if (!kDebugMode && EnvironmentConfig.enableAnalytics) {
+      try {
+        FirebaseAnalytics.instance.logScreenView(
+          screenName: screenName,
+          screenClass: screenName,
+        );
+      } catch (_) {
+        // Non-blocking — don't let analytics failures affect navigation
+      }
+    }
   }
 
   @override

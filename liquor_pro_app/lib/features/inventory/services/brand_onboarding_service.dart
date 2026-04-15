@@ -14,9 +14,10 @@ class BrandOnboardingService {
   BrandOnboardingService(this._apiService);
 
   /// Get available SaaS brand templates for onboarding
-  Future<ApiResponse<List<SaasBrand>>> getAvailableBrands() async {
+  Future<ApiResponse<List<SaasBrand>>> getAvailableBrands({String? shopId}) async {
     final response = await _apiService.get<List<SaasBrand>>(
       '/api/inventory/saas-brands/available',
+      queryParams: shopId != null ? {'shop_id': shopId} : null,
       fromJson: (data) {
         if (data is List) {
           return data

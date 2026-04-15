@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import '../config/debug_performance_config.dart';
 
 /// Industrial-Grade Request Deduplication Service
 /// Best Practices:
@@ -33,7 +34,7 @@ class RequestDeduplicationService {
 
   // Cleanup timer
   Timer? _cleanupTimer;
-  static const Duration _cleanupInterval = Duration(seconds: 30);
+  static final Duration _cleanupInterval = DebugPerformanceConfig.deduplicationCleanupInterval;
 
   /// Deduplicate a request
   /// If a request with the same key is already pending, returns the same Future

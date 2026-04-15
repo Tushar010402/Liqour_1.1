@@ -16,6 +16,7 @@ import '../../finance/screens/cash_dashboard_screen.dart';
 import '../../admin/screens/user_management_screen.dart';
 import '../../reports/screens/reports_screen.dart';
 import '../../settings/screens/settings_screen.dart';
+import '../../inventory/screens/stock_update_approvals_screen.dart';
 
 /// Manager Home Screen — approvals hero, shop comparison, team status, alerts.
 class ManagerHomeScreen extends ConsumerStatefulWidget {
@@ -120,44 +121,63 @@ class _ManagerHomeScreenState extends ConsumerState<ManagerHomeScreen> {
               }
             }
 
-            return Row(
+            return Column(
               children: [
-                HomeApprovalCard(
-                  title: 'Daily Sales',
-                  pendingCount: pendingSalesCount,
-                  icon: Icons.receipt_long_rounded,
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => Scaffold(
-                        appBar: AppBar(
-                          title: const Text('Daily Sales'),
-                          elevation: 0,
+                Row(
+                  children: [
+                    HomeApprovalCard(
+                      title: 'Daily Sales',
+                      pendingCount: pendingSalesCount,
+                      icon: Icons.receipt_long_rounded,
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => Scaffold(
+                            appBar: AppBar(
+                              title: const Text('Daily Sales'),
+                              elevation: 0,
+                            ),
+                            body: const SimpleSalesHistory(),
+                          ),
                         ),
-                        body: const SimpleSalesHistory(),
+                      ),
+                    ),
+                    SizedBox(width: iOSDesignTokens.space12),
+                    HomeApprovalCard(
+                      title: 'Cash',
+                      pendingCount: pendingCashCount,
+                      icon: Icons.account_balance_wallet_rounded,
+                      onTap: () {
+                        if (shopId == null) return;
+                        final auth = provider_pkg.Provider.of<AuthProvider>(context,
+                            listen: false);
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => CashDashboardScreen(
+                              shopId: shopId,
+                              userRole: auth.currentUser?.role ?? 'manager',
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+                SizedBox(height: iOSDesignTokens.space12),
+                SizedBox(
+                  width: double.infinity,
+                  child: HomeApprovalCard(
+                    title: 'Stock Updates',
+                    pendingCount: 0,
+                    icon: Icons.inventory_2_rounded,
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const StockUpdateApprovalsScreen(),
                       ),
                     ),
                   ),
-                ),
-                SizedBox(width: iOSDesignTokens.space12),
-                HomeApprovalCard(
-                  title: 'Cash',
-                  pendingCount: pendingCashCount,
-                  icon: Icons.account_balance_wallet_rounded,
-                  onTap: () {
-                    if (shopId == null) return;
-                    final auth = provider_pkg.Provider.of<AuthProvider>(context,
-                        listen: false);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => CashDashboardScreen(
-                          shopId: shopId,
-                          userRole: auth.currentUser?.role ?? 'manager',
-                        ),
-                      ),
-                    );
-                  },
                 ),
               ],
             );

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
@@ -736,6 +737,7 @@ class _QuickSaleOCRScreenState extends ConsumerState<QuickSaleOCRScreen>
       _extractedItems = [];
       _currentSession = null;
       _isProcessing = false;
+      try { WakelockPlus.disable(); } catch (_) {}
     });
   }
 
@@ -748,6 +750,9 @@ class _QuickSaleOCRScreenState extends ConsumerState<QuickSaleOCRScreen>
       _processingProgress = 0.1;
       _processingSubStatus = 'Optimizing for OCR';
     });
+
+    // Keep screen awake during OCR processing
+    try { await WakelockPlus.enable(); } catch (_) {}
 
     try {
       // Compress image before sending
@@ -793,6 +798,7 @@ class _QuickSaleOCRScreenState extends ConsumerState<QuickSaleOCRScreen>
       SnackbarHelper.showError(context, 'Failed to process image: $e');
       setState(() {
         _isProcessing = false;
+      try { WakelockPlus.disable(); } catch (_) {}
         _processingStatus = '';
         _processingProgress = 0.0;
         _processingSubStatus = '';
@@ -889,6 +895,7 @@ class _QuickSaleOCRScreenState extends ConsumerState<QuickSaleOCRScreen>
           setState(() {
             _extractedItems = response.extractedItems;
             _isProcessing = false;
+      try { WakelockPlus.disable(); } catch (_) {}
             _processingStatus = '';
             _processingProgress = 0.0;
             _processingSubStatus = '';
@@ -924,6 +931,7 @@ class _QuickSaleOCRScreenState extends ConsumerState<QuickSaleOCRScreen>
   void _cancelProcessing() {
     setState(() {
       _isProcessing = false;
+      try { WakelockPlus.disable(); } catch (_) {}
       _processingStatus = '';
       _processingProgress = 0.0;
       _processingSubStatus = '';

@@ -4,12 +4,14 @@
 library;
 import 'package:flutter/foundation.dart';
 import 'app_logger.dart';
+import '../config/debug_performance_config.dart';
 
 class Logger {
   Logger._();
 
   static void info(String message, [dynamic data]) {
-    // OPTIMIZATION: Only log in debug mode to prevent production overhead
+    // OPTIMIZATION: Gated behind verbose flag to reduce console I/O
+    if (!DebugPerformanceConfig.verboseDebugPrints && kDebugMode) return;
     if (!kDebugMode) return;
 
     // FIXED: Single log call instead of double logging
@@ -21,7 +23,8 @@ class Logger {
   }
 
   static void debug(String message, [dynamic data]) {
-    // OPTIMIZATION: Only log in debug mode
+    // OPTIMIZATION: Gated behind verbose flag to reduce console I/O
+    if (!DebugPerformanceConfig.verboseDebugPrints && kDebugMode) return;
     if (!kDebugMode) return;
 
     // FIXED: Single log call instead of double logging

@@ -10,6 +10,7 @@ class UserModel {
   final String? tenantId; // UUID from backend (extracted from tenant object)
   final String? tenantName;
   final String? profileImage;
+  final String? tagLine;
   final bool isActive;
   final DateTime? createdAt;
 
@@ -24,6 +25,7 @@ class UserModel {
     this.tenantId,
     this.tenantName,
     this.profileImage,
+    this.tagLine,
     this.isActive = true,
     this.createdAt,
   });
@@ -40,6 +42,7 @@ class UserModel {
       tenantId: json['tenant_id'] as String?, // Will be added by AuthProvider
       tenantName: json['tenant_name'] as String?,
       profileImage: json['profile_image'] as String?,
+      tagLine: json['tag_line'] as String?,
       isActive: json['is_active'] as bool? ?? true,
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'] as String)
@@ -59,6 +62,7 @@ class UserModel {
       'tenant_id': tenantId,
       'tenant_name': tenantName,
       'profile_image': profileImage,
+      'tag_line': tagLine,
       'is_active': isActive,
       'created_at': createdAt?.toIso8601String(),
     };
@@ -89,6 +93,24 @@ class UserModel {
   }
 
   String get fullName => '$firstName $lastName'.trim();
+
+  UserModel copyWith({String? phone, String? email, String? tenantId, String? tagLine}) {
+    return UserModel(
+      id: id,
+      username: username,
+      email: email ?? this.email,
+      firstName: firstName,
+      lastName: lastName,
+      role: role,
+      phone: phone ?? this.phone,
+      tenantId: tenantId ?? this.tenantId,
+      tenantName: tenantName,
+      profileImage: profileImage,
+      tagLine: tagLine ?? this.tagLine,
+      isActive: isActive,
+      createdAt: createdAt,
+    );
+  }
 }
 
 /// Login Request - Backend expects "username" field

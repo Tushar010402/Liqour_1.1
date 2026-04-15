@@ -1684,9 +1684,9 @@ class _StockPurchaseBottomSheetState extends State<_StockPurchaseBottomSheet> {
     return total;
   }
 
-  double get _tdsAmount => _purchaseValue * 0.01; // 1% TDS
+  double get _tcsAmount => _purchaseValue * 0.02; // 2% TCS (Tax Collected at Source)
 
-  double get _totalAmount => _purchaseValue + _tdsAmount;
+  double get _totalAmount => _purchaseValue + _tcsAmount;
 
   /// Group products by size for display (sorted high to low: 750ML, 375ML, 180ML, 90ML)
   Map<String, List<Product>> _groupProductsBySize() {
@@ -1903,7 +1903,7 @@ class _StockPurchaseBottomSheetState extends State<_StockPurchaseBottomSheet> {
                       children: [
                         _buildPriceRow('Purchase Value', _purchaseValue),
                         const SizedBox(height: 8),
-                        _buildPriceRow('TDS (1%)', _tdsAmount, isSubtle: true),
+                        _buildPriceRow('TCS (2%)', _tcsAmount, isSubtle: true),
                         const Divider(height: 20),
                         _buildPriceRow('Total Amount', _totalAmount, isBold: true),
                       ],

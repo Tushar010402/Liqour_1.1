@@ -296,7 +296,7 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
     }
     HapticFeedbackUtil.medium();
 
-    // Build summary items — use AI duty fee if available (more accurate from gate pass)
+    // Build summary items — use AI duty/leakage/short if available
     final summaryItems = items.map((e) {
       final aiMeta = widget.aiItemMeta?[e.product.id];
       final dutyFee = (aiMeta != null && aiMeta.dutyFee > 0) ? aiMeta.dutyFee : e.product.dutyFee;
@@ -309,6 +309,8 @@ class _PurchaseEntryScreenState extends State<PurchaseEntryScreen> {
         sellingPrice: e.product.sellingPrice,
         dutyFee: dutyFee,
         quantity: e.quantity,
+        leakage: aiMeta?.leakage ?? 0,
+        shortReceived: aiMeta?.shortReceived ?? 0,
         stock: widget.stockMap[e.product.id]?.quantity ?? 0,
       );
     }).toList();

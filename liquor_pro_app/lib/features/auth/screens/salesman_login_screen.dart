@@ -11,6 +11,7 @@ import '../../../core/utils/logger.dart';
 import '../models/device_session_models.dart';
 import '../providers/auth_provider.dart';
 import '../widgets/device_limit_modal.dart';
+import '../../../core/providers/shop_selection_provider.dart';
 
 /// Combined Phone + OTP Login Screen — pixel-matched to JSX Screen_Login.
 /// Hero shrinks smoothly when OTP fields appear, auto-scrolls to show OTP.
@@ -302,6 +303,9 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
 
       if (result != null) {
         if (result.isLogin) {
+          // Load shops before navigating home (critical after login)
+          if (mounted) await context.read<ShopSelectionProvider>().loadShops();
+          if (!mounted) return;
           context.go('/home');
         } else if (result.needsRegistration) {
           context.go('/pre-registration', extra: {
@@ -340,6 +344,9 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
 
       if (result != null) {
         if (result.isLogin) {
+          // Load shops before navigating home (critical after login)
+          if (mounted) await context.read<ShopSelectionProvider>().loadShops();
+          if (!mounted) return;
           context.go('/home');
         } else if (result.needsRegistration) {
           context.go('/pre-registration', extra: {
@@ -413,7 +420,7 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
         final result = await authProvider.verifyFirebaseToken(firebaseIdToken: idToken);
         await _firebaseAuth.signOut();
         if (!mounted) return;
-        if (result != null && result.isLogin) { context.go('/home'); return; }
+        if (result != null && result.isLogin) { await context.read<ShopSelectionProvider>().loadShops(); if (!mounted) return; context.go('/home'); return; }
       } else {
         // Dr. Dang force login
         final result = await authProvider.forceLoginOtp(
@@ -423,7 +430,7 @@ class _SalesmanLoginScreenState extends State<SalesmanLoginScreen>
           sessionId: _sessionId,
         );
         if (!mounted) return;
-        if (result != null && result.isLogin) { context.go('/home'); return; }
+        if (result != null && result.isLogin) { await context.read<ShopSelectionProvider>().loadShops(); if (!mounted) return; context.go('/home'); return; }
       }
       setState(() { _isLoading = false; _errorMessage = authProvider.errorMessage ?? 'Login failed. Please try again.'; });
     } catch (e) {

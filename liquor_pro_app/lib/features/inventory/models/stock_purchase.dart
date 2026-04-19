@@ -54,6 +54,8 @@ class StockPurchaseItem {
   final double costPrice;
   final double totalAmount;
   final double dutyFee; // Excise duty from gate pass (included in buying price)
+  final int leakage;       // Bottles damaged/leaked during transport
+  final int shortReceived; // Bottles short received vs invoice
 
   StockPurchaseItem({
     required this.productId,
@@ -64,7 +66,12 @@ class StockPurchaseItem {
     required this.costPrice,
     required this.totalAmount,
     this.dutyFee = 0.0,
+    this.leakage = 0,
+    this.shortReceived = 0,
   });
+
+  /// Net quantity that goes into stock (after deducting leakage + short)
+  int get netQuantity => quantity - leakage - shortReceived;
 
   factory StockPurchaseItem.fromJson(Map<String, dynamic> json) {
     // Debug: Log the raw JSON to see what backend sends
@@ -148,6 +155,8 @@ class StockPurchaseItem {
       costPrice: costPrice,
       totalAmount: totalAmount,
       dutyFee: (json['duty_fee'] ?? json['dutyFee'] ?? 0).toDouble(),
+      leakage: (json['leakage'] ?? 0) is int ? (json['leakage'] ?? 0) : (json['leakage'] ?? 0).toInt(),
+      shortReceived: (json['short_received'] ?? 0) is int ? (json['short_received'] ?? 0) : (json['short_received'] ?? 0).toInt(),
     );
   }
 
@@ -161,6 +170,8 @@ class StockPurchaseItem {
       'cost_price': costPrice,
       'total_amount': totalAmount,
       if (dutyFee > 0) 'duty_fee': dutyFee,
+      if (leakage > 0) 'leakage': leakage,
+      if (shortReceived > 0) 'short_received': shortReceived,
     };
   }
 
@@ -173,6 +184,8 @@ class StockPurchaseItem {
     required int quantity,
     required double costPrice,
     double dutyFee = 0.0,
+    int leakage = 0,
+    int shortReceived = 0,
   }) {
     return StockPurchaseItem(
       productId: productId,
@@ -183,6 +196,8 @@ class StockPurchaseItem {
       costPrice: costPrice,
       totalAmount: quantity * costPrice,
       dutyFee: dutyFee,
+      leakage: leakage,
+      shortReceived: shortReceived,
     );
   }
 }
@@ -532,9 +547,12 @@ class CreateStockPurchaseRequest {
           'unit_price': item.costPrice,  // Backend expects unit_price
           'total_price': item.totalAmount,
           if (item.dutyFee > 0) 'duty_fee': item.dutyFee,
+          if (item.leakage > 0) 'leakage': item.leakage,
+          if (item.shortReceived > 0) 'short_received': item.shortReceived,
         };
       }).toList(),
       'total_amount': totalAmount, // Send total (subtotal + TCS + round-off) to backend
+      'tax_amount': tcsAmount,     // TCS 2% sent to backend for storage
       if (notes != null) 'notes': notes,
       'round_off': roundOff ?? calculatedRoundOff, // Send round-off to backend
       // Receipt Information - backend expects 'receipt_no'

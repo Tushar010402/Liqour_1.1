@@ -53,6 +53,12 @@ class _SalesmanHomeScreenState extends State<SalesmanHomeScreen> {
     if (!mounted) return;
     final shopProvider = Provider.of<ShopSelectionProvider>(context, listen: false);
     final dashboardProvider = Provider.of<DashboardProvider>(context, listen: false);
+
+    // Ensure shops are loaded (critical after login/logout cycle)
+    if (shopProvider.shops.isEmpty || !shopProvider.hasSelectedShop) {
+      await shopProvider.loadShops();
+    }
+
     final shopId = shopProvider.selectedShopId;
     if (shopId != null) {
       dashboardProvider.setSelectedShop(shopId);

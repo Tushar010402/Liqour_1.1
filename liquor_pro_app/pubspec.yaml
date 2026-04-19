@@ -175,6 +175,10 @@ flutter:
     - assets/images/
     - assets/images/sales/
     - assets/icons/
+    # Bundled Montserrat Alternates + Nunito TTFs. The `google_fonts` package
+    # auto-picks files from google_fonts/ via the asset manifest, so no
+    # runtime fetch from fonts.google.com is needed.
+    - google_fonts/
 
   # fonts:
   #   - family: Poppins

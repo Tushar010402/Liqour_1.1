@@ -15,6 +15,7 @@ import '../models/product.dart' as models;
 import '../models/ai_purchase_models.dart';
 import '../services/smart_purchase_service.dart';
 import '../widgets/purchase_match_picker.dart';
+import '../../auth/providers/auth_provider.dart';
 import 'purchase_entry_screen.dart';
 
 TextStyle _heading({double size = 18, FontWeight weight = FontWeight.w800, Color color = const Color(0xFF1A1D26)}) {
@@ -442,6 +443,8 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
   // ── Edit item inline ──
 
   void _showEditSheet(SmartPurchaseItem item) {
+    final role = context.read<AuthProvider>().currentUser?.role?.toLowerCase() ?? '';
+    final canSeePricing = role == 'admin' || role == 'manager' || role == 'assistant_manager';
     final qtyController = TextEditingController(text: item.effectiveQuantity.toString());
     final costController = TextEditingController(
       text: item.effectiveCostPrice > 0 ? item.effectiveCostPrice.toStringAsFixed(2) : '',
@@ -449,6 +452,8 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
     final dutyController = TextEditingController(
       text: item.effectiveDutyFee > 0 ? item.effectiveDutyFee.toStringAsFixed(2) : '',
     );
+    final leakController = TextEditingController(text: item.userLeakage > 0 ? item.userLeakage.toString() : '');
+    final shortController = TextEditingController(text: item.userShortReceived > 0 ? item.userShortReceived.toString() : '');
 
     showModalBottomSheet(
       context: context,
@@ -530,31 +535,58 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
             ),
             const SizedBox(height: 16),
 
-            // Editable fields
+            // Editable fields — Qty always visible; Cost/Duty only for managers+
             Row(
               children: [
                 Expanded(
                   child: _editField('Qty (bottles)', qtyController, isInt: true),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _editField('Cost Price/btl', costController),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _editField('Duty/btl', dutyController),
-                ),
+                if (canSeePricing) ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _editField('Cost Price/btl', costController),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _editField('Duty/btl', dutyController),
+                  ),
+                ],
               ],
             ),
 
-            // DB reference
+            // MRP reference
             if (item.dbCostPrice != null && item.dbCostPrice! > 0) ...[
               const SizedBox(height: 8),
               Text(
-                'DB Cost: \u20B9${item.dbCostPrice!.toStringAsFixed(2)}',
+                'MRP: \u20B9${item.dbCostPrice!.toStringAsFixed(2)}',
                 style: _body(size: 11, color: const Color(0xFF999999)),
               ),
             ],
+
+            // Receiving Issues
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF8E1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFFE082)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Receiving Issues', style: _body(size: 12, weight: FontWeight.w700, color: const Color(0xFFF57C00))),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(child: _editField('Leakage', leakController, isInt: true)),
+                      const SizedBox(width: 12),
+                      Expanded(child: _editField('Short Received', shortController, isInt: true)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
 
             const SizedBox(height: 20),
 
@@ -581,9 +613,13 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
                         final qty = int.tryParse(qtyController.text);
                         final cost = double.tryParse(costController.text);
                         final duty = double.tryParse(dutyController.text);
+                        final leak = int.tryParse(leakController.text) ?? 0;
+                        final short = int.tryParse(shortController.text) ?? 0;
                         if (qty != null && qty > 0) item.userQuantity = qty;
-                        if (cost != null && cost > 0) item.userCostPrice = cost;
-                        if (duty != null && duty >= 0) item.userDutyFee = duty;
+                        if (canSeePricing && cost != null && cost > 0) item.userCostPrice = cost;
+                        if (canSeePricing && duty != null && duty >= 0) item.userDutyFee = duty;
+                        item.userLeakage = leak;
+                        item.userShortReceived = short;
                       });
                       Navigator.pop(ctx);
                     },
@@ -654,7 +690,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
       if (item.hasRateMismatch) {
         warnings.add(
           'Invoice cost \u20B9${item.effectiveCostPrice.toStringAsFixed(0)} '
-          'differs from DB \u20B9${item.dbCostPrice?.toStringAsFixed(0) ?? "?"}',
+          'differs from MRP \u20B9${item.dbCostPrice?.toStringAsFixed(0) ?? "?"}',
         );
       }
       if (item.needsReview) {
@@ -673,6 +709,8 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
         quantityUnit: item.quantityUnit,
         bottlesPerCase: item.bottlesPerCase,
         dutyFee: item.effectiveDutyFee,
+        leakage: item.userLeakage,
+        shortReceived: item.userShortReceived,
         warnings: warnings,
       );
     }
@@ -1301,33 +1339,46 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
 
             const SizedBox(height: 6),
 
-            // Row 3: Size + Qty + pricing pills
+            // Row 3: Size + Qty + pricing pills (role-based)
             Padding(
               padding: const EdgeInsets.only(left: 26),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: [
-                  _sizePill(item.size),
-                  _dataPill(qtyLabel),
-                  _dataPill('Cost \u20B9${item.effectiveCostPrice.toStringAsFixed(0)}/btl'),
-                  if (item.dbCostPrice != null && item.dbCostPrice! > 0)
-                    _dataPill('DB \u20B9${item.dbCostPrice!.toStringAsFixed(0)}',
-                      highlight: item.hasRateMismatch),
-                  if (item.effectiveDutyFee > 0)
-                    _dataPill('Duty \u20B9${item.effectiveDutyFee.toStringAsFixed(0)}',
-                      color: const Color(0xFF7B1FA2)),
-                ],
-              ),
+              child: Builder(builder: (context) {
+                final role = context.read<AuthProvider>().currentUser?.role?.toLowerCase() ?? '';
+                final canSeePricing = role == 'admin' || role == 'manager' || role == 'assistant_manager';
+                return Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    _sizePill(item.size),
+                    _dataPill(qtyLabel, bold: true),
+                    if (canSeePricing)
+                      _dataPill('Cost \u20B9${item.effectiveCostPrice.toStringAsFixed(0)}/btl'),
+                    if (item.dbCostPrice != null && item.dbCostPrice! > 0)
+                      _dataPill('MRP \u20B9${item.dbCostPrice!.toStringAsFixed(0)}',
+                        highlight: item.hasRateMismatch),
+                    if (canSeePricing && item.effectiveDutyFee > 0)
+                      _dataPill('Duty \u20B9${item.effectiveDutyFee.toStringAsFixed(0)}',
+                        color: const Color(0xFF7B1FA2)),
+                    if (item.hasReceivingIssues) ...[
+                      if (item.userLeakage > 0)
+                        _dataPill('Leak: ${item.userLeakage}', color: const Color(0xFFD84315)),
+                      if (item.userShortReceived > 0)
+                        _dataPill('Short: ${item.userShortReceived}', color: const Color(0xFFD84315)),
+                    ],
+                  ],
+                );
+              }),
             ),
 
-            // Row 4: Edit hint
+            // Row 4: Edit hint + receiving issues
             Padding(
               padding: const EdgeInsets.only(left: 26, top: 5),
               child: Row(
                 children: [
                   if (isEdited)
                     Text('Edited', style: _body(size: 10, weight: FontWeight.w700, color: const Color(0xFF4CAF50))),
+                  if (item.hasReceivingIssues)
+                    Text(' Net: ${item.netReceivableQuantity}btl', style: _body(size: 10, weight: FontWeight.w700, color: const Color(0xFF2E7D32))),
                   const Spacer(),
                   Text('Edit \u25B8', style: _body(size: 11, weight: FontWeight.w700, color: const Color(0xFF3855B3))),
                 ],
@@ -1339,7 +1390,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
     );
   }
 
-  Widget _dataPill(String text, {bool highlight = false, Color? color}) {
+  Widget _dataPill(String text, {bool highlight = false, Color? color, bool bold = false}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
       decoration: BoxDecoration(
@@ -1353,9 +1404,9 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
       child: Text(
         text,
         style: _body(
-          size: 10,
-          weight: FontWeight.w600,
-          color: color ?? (highlight ? const Color(0xFFF57C00) : const Color(0xFF666666)),
+          size: bold ? 11 : 10,
+          weight: bold ? FontWeight.w800 : FontWeight.w600,
+          color: color ?? (highlight ? const Color(0xFFF57C00) : (bold ? const Color(0xFF333333) : const Color(0xFF666666))),
         ),
       ),
     );
@@ -1438,7 +1489,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
                 runSpacing: 4,
                 children: [
                   _sizePill(item.size),
-                  _dataPill(qtyLabel),
+                  _dataPill(qtyLabel, bold: true),
                   if (item.effectiveCostPrice > 0)
                     _dataPill('Cost \u20B9${item.effectiveCostPrice.toStringAsFixed(0)}/btl'),
                   if (item.effectiveDutyFee > 0)
@@ -1494,7 +1545,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
                   children: [
                     _sizePill(item.size.isNotEmpty ? item.size : '?'),
                     const SizedBox(width: 8),
-                    Text(qtyLabel, style: _body(size: 11, color: const Color(0xFF666666))),
+                    Text(qtyLabel, style: _body(size: 12, weight: FontWeight.w800, color: const Color(0xFF333333))),
                     const SizedBox(width: 8),
                     Text('No match', style: _body(size: 11, color: const Color(0xFFE53935))),
                   ],
@@ -1541,7 +1592,7 @@ class _AIPurchaseEntryScreenState extends State<AIPurchaseEntryScreen> with Tick
         color: const Color(0xFFE3F2FD),
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(size, style: _body(size: 10, weight: FontWeight.w700, color: const Color(0xFF1565C0))),
+      child: Text(size, style: _body(size: 11, weight: FontWeight.w800, color: const Color(0xFF1565C0))),
     );
   }
 

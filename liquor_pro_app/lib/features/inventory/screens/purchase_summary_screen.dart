@@ -16,6 +16,7 @@ import '../models/stock_purchase.dart';
 import '../providers/stock_purchase_provider.dart';
 import '../services/stock_purchase_service.dart';
 import '../../finance/providers/vendor_provider.dart';
+import '../../auth/providers/auth_provider.dart';
 
 TextStyle _heading({double size = 18, FontWeight weight = FontWeight.w800, Color color = const Color(0xFF1A1D26)}) {
   return GoogleFonts.montserratAlternates(fontSize: size, fontWeight: weight, color: color);
@@ -35,6 +36,8 @@ class PurchaseSummaryItem {
   final double sellingPrice;
   final double dutyFee;
   int quantity;
+  int leakage;
+  int shortReceived;
   final int stock;
 
   PurchaseSummaryItem({
@@ -46,10 +49,14 @@ class PurchaseSummaryItem {
     required this.sellingPrice,
     this.dutyFee = 0.0,
     required this.quantity,
+    this.leakage = 0,
+    this.shortReceived = 0,
     required this.stock,
   });
 
   double get totalAmount => costPrice * quantity;
+  int get netQuantity => quantity - leakage - shortReceived;
+  bool get hasReceivingIssues => leakage > 0 || shortReceived > 0;
 }
 
 /// Full-screen Purchase Summary — mirrors SalesSummaryScreen.
@@ -224,6 +231,11 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
   void _editItem(int index) {
     final item = _items[index];
     final controller = TextEditingController(text: item.quantity.toString());
+    final leakController = TextEditingController(text: item.leakage > 0 ? item.leakage.toString() : '');
+    final shortController = TextEditingController(text: item.shortReceived > 0 ? item.shortReceived.toString() : '');
+    final role = context.read<AuthProvider>().currentUser?.role?.toLowerCase() ?? '';
+    final canSeePricing = role == 'admin' || role == 'manager' || role == 'assistant_manager';
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -239,8 +251,14 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
             const SizedBox(height: 16),
             Text(_cleanName(item.name), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             const SizedBox(height: 4),
-            Text('Cost: \u20B9${item.costPrice.toStringAsFixed(0)}  •  Stock: ${item.stock}', style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
+            Text(
+              canSeePricing
+                ? 'Cost: \u20B9${item.costPrice.toStringAsFixed(0)}  •  Stock: ${item.stock}'
+                : 'Stock: ${item.stock}',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+            ),
             const SizedBox(height: 16),
+            // Quantity
             Row(
               children: [
                 const Text('Quantity', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF555555))),
@@ -264,6 +282,47 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 14),
+            // Receiving Issues
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF8E1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFFE082)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Receiving Issues', style: _body(size: 12, weight: FontWeight.w700, color: const Color(0xFFF57C00))),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(child: _miniField('Leakage', leakController)),
+                      const SizedBox(width: 12),
+                      Expanded(child: _miniField('Short Received', shortController)),
+                    ],
+                  ),
+                  StatefulBuilder(
+                    builder: (_, setLocal) {
+                      leakController.addListener(() => setLocal(() {}));
+                      shortController.addListener(() => setLocal(() {}));
+                      final qty = int.tryParse(controller.text) ?? item.quantity;
+                      final leak = int.tryParse(leakController.text) ?? 0;
+                      final short = int.tryParse(shortController.text) ?? 0;
+                      final net = qty - leak - short;
+                      if (leak > 0 || short > 0) {
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text('Net stock: $net bottles', style: _body(size: 11, weight: FontWeight.w700, color: net > 0 ? const Color(0xFF2E7D32) : const Color(0xFFD84315))),
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                ],
+              ),
+            ),
             const SizedBox(height: 20),
             Row(
               children: [
@@ -276,8 +335,18 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
                 Expanded(flex: 2, child: ElevatedButton(
                   onPressed: () {
                     final newQty = int.tryParse(controller.text) ?? 0;
+                    final leak = int.tryParse(leakController.text) ?? 0;
+                    final short = int.tryParse(shortController.text) ?? 0;
                     Navigator.pop(ctx);
-                    if (newQty <= 0) { setState(() => _items.removeAt(index)); } else { setState(() => item.quantity = newQty); }
+                    if (newQty <= 0) {
+                      setState(() => _items.removeAt(index));
+                    } else {
+                      setState(() {
+                        item.quantity = newQty;
+                        item.leakage = leak;
+                        item.shortReceived = short;
+                      });
+                    }
                   },
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2962FF), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.symmetric(vertical: 12), elevation: 0),
                   child: const Text('Save', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
@@ -287,6 +356,31 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _miniField(String label, TextEditingController controller) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: _body(size: 10, weight: FontWeight.w600, color: const Color(0xFF888888))),
+        const SizedBox(height: 4),
+        TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(4)],
+          style: _body(size: 14, weight: FontWeight.w700),
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: '0',
+            hintStyle: _body(size: 13, color: const Color(0xFFBBBBBB)),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFD0D5DD))),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFD0D5DD))),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFF57C00), width: 1.5)),
+          ),
+        ),
+      ],
     );
   }
 
@@ -345,6 +439,8 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
       quantity: e.quantity,
       costPrice: e.costPrice,
       dutyFee: e.dutyFee,
+      leakage: e.leakage,
+      shortReceived: e.shortReceived,
     )).toList();
 
     final provider = context.read<StockPurchaseProvider>();
@@ -506,19 +602,28 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
           // Pills
           Padding(
             padding: const EdgeInsets.only(left: 22),
-            child: Row(
-              children: [
-                _pill('Qty - ${item.quantity}'),
-                const SizedBox(width: 5),
-                _pill('Cost - \u20B9${item.costPrice.toStringAsFixed(0)}'),
-                if (item.sellingPrice > 0 && item.sellingPrice != item.costPrice) ...[
-                  const SizedBox(width: 5),
-                  _pill('MRP - \u20B9${item.sellingPrice.toStringAsFixed(0)}'),
+            child: Builder(builder: (context) {
+              final role = context.read<AuthProvider>().currentUser?.role?.toLowerCase() ?? '';
+              final canSeePricing = role == 'admin' || role == 'manager' || role == 'assistant_manager';
+              return Wrap(
+                spacing: 5,
+                runSpacing: 4,
+                children: [
+                  _pill('Qty - ${item.quantity}'),
+                  if (canSeePricing) _pill('Cost - \u20B9${item.costPrice.toStringAsFixed(0)}'),
+                  if (item.sellingPrice > 0 && item.sellingPrice != item.costPrice)
+                    _pill('MRP - \u20B9${item.sellingPrice.toStringAsFixed(0)}'),
+                  if (item.hasReceivingIssues) ...[
+                    if (item.leakage > 0)
+                      _pill('Leak: ${item.leakage}', color: const Color(0xFFD84315)),
+                    if (item.shortReceived > 0)
+                      _pill('Short: ${item.shortReceived}', color: const Color(0xFFD84315)),
+                    _pill('Net: ${item.netQuantity}', color: const Color(0xFF2E7D32)),
+                  ],
+                  Text('Stock: ${item.stock}', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: item.stock > 0 ? const Color(0xFF2E7D32) : const Color(0xFFD84315))),
                 ],
-                const SizedBox(width: 6),
-                Text('Stock: ${item.stock}', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: item.stock > 0 ? const Color(0xFF2E7D32) : const Color(0xFFD84315))),
-              ],
-            ),
+              );
+            }),
           ),
           const SizedBox(height: 5),
           // Edit + size badge
@@ -546,11 +651,15 @@ class _PurchaseSummaryScreenState extends State<PurchaseSummaryScreen> {
     );
   }
 
-  Widget _pill(String text) {
+  Widget _pill(String text, {Color? color}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(color: const Color(0xFFF0F1F5), borderRadius: BorderRadius.circular(4), border: Border.all(color: const Color(0xFFE2E4EA), width: 0.5)),
-      child: Text(text, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Color(0xFF555555))),
+      decoration: BoxDecoration(
+        color: color != null ? color.withValues(alpha: 0.1) : const Color(0xFFF0F1F5),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color?.withValues(alpha: 0.3) ?? const Color(0xFFE2E4EA), width: 0.5),
+      ),
+      child: Text(text, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color ?? const Color(0xFF555555))),
     );
   }
 

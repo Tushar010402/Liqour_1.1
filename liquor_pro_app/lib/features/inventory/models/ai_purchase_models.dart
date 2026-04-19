@@ -108,6 +108,10 @@ class SmartPurchaseItem {
   double? userDutyFee;      // Override for dutyPerBottle
   int? userQuantity;        // Override for quantityBottles
 
+  // Receiving issues (frontend-only, tracked for audit)
+  int userLeakage;          // Bottles damaged/leaked during transport
+  int userShortReceived;    // Bottles short received vs invoice
+
   SmartPurchaseItem({
     this.rowNumber = 0,
     required this.brandName,
@@ -137,6 +141,8 @@ class SmartPurchaseItem {
     this.userCostPrice,
     this.userDutyFee,
     this.userQuantity,
+    this.userLeakage = 0,
+    this.userShortReceived = 0,
   });
 
   factory SmartPurchaseItem.fromJson(Map<String, dynamic> json) {
@@ -224,6 +230,12 @@ class SmartPurchaseItem {
 
   /// Effective quantity in bottles — user override or AI-extracted
   int get effectiveQuantity => userQuantity ?? quantityBottles;
+
+  /// Net receivable quantity — after deducting leakage and short receiving
+  int get netReceivableQuantity => effectiveQuantity - userLeakage - userShortReceived;
+
+  /// Whether there are receiving issues
+  bool get hasReceivingIssues => userLeakage > 0 || userShortReceived > 0;
 }
 
 /// An alternative product match suggested by the backend.
@@ -343,6 +355,8 @@ class AIPurchaseItemMeta {
   final String quantityUnit;
   final int bottlesPerCase;
   final double dutyFee; // Excise duty per bottle
+  final int leakage;       // Bottles leaked/damaged
+  final int shortReceived; // Bottles short received
   final List<String> warnings;
 
   const AIPurchaseItemMeta({
@@ -354,6 +368,8 @@ class AIPurchaseItemMeta {
     this.quantityUnit = 'bottles',
     this.bottlesPerCase = 1,
     this.dutyFee = 0.0,
+    this.leakage = 0,
+    this.shortReceived = 0,
     this.warnings = const [],
   });
 }

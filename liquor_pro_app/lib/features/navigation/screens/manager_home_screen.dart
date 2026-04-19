@@ -41,6 +41,12 @@ class _ManagerHomeScreenState extends ConsumerState<ManagerHomeScreen> {
         provider_pkg.Provider.of<ShopSelectionProvider>(context, listen: false);
     final dashboardProvider =
         provider_pkg.Provider.of<DashboardProvider>(context, listen: false);
+
+    // Ensure shops are loaded (critical after login/logout cycle)
+    if (shopProvider.shops.isEmpty || !shopProvider.hasSelectedShop) {
+      await shopProvider.loadShops();
+    }
+
     final shopId = shopProvider.selectedShopId;
     if (shopId == null) return;
     await Future.wait([

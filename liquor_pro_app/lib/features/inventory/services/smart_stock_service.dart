@@ -178,6 +178,9 @@ class SmartStockService {
     String? notes,
     String? categoryId,
     String? size,
+    String? stockColumn,
+    String? sessionId,
+    List<String>? imageUrls,
   }) async {
     try {
       final token = await _authService.getToken();
@@ -213,6 +216,9 @@ class SmartStockService {
           if (notes != null) 'notes': notes,
           if (categoryId != null) 'category_id': categoryId,
           if (size != null) 'size': size,
+          if (stockColumn != null) 'stock_column': stockColumn,
+          if (sessionId != null) 'session_id': sessionId,
+          if (imageUrls != null) 'image_urls': imageUrls,
         }),
       ).timeout(const Duration(seconds: 30));
 

@@ -126,64 +126,115 @@ func (s *TenantService) GetShops(ctx context.Context, tenantID uuid.UUID) ([]*Sh
 	return shopResponses, nil
 }
 
-// GetSalesmanShopID retrieves the shop_id assigned to a salesman by their user_id
-// Returns nil if user is not a salesman or has no shop assigned
-// Deprecated: Use utils.GetUserShopAccess for new code
-func (s *TenantService) GetSalesmanShopID(ctx context.Context, userID, tenantID uuid.UUID) (*uuid.UUID, error) {
-	var salesman models.Salesman
-	err := s.db.Where("user_id = ? AND tenant_id = ?", userID, tenantID).First(&salesman).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil // User is not a salesman
-		}
-		return nil, fmt.Errorf("failed to lookup salesman: %w", err)
+// GetShopsForUser returns shops based on user role
+// - Admin/Manager/Assistant Manager: All tenant shops
+// - Executive: Only shops mapped via the executive_shops join table
+// - Salesman: Only their single assigned shop
+func (s *TenantService) GetShopsForUser(ctx context.Context, userID, tenantID uuid.UUID, role string) ([]*ShopResponse, error) {
+	switch role {
+	case models.RoleSalesman:
+		return s.getSalesmanShops(ctx, userID, tenantID)
+	case models.RoleExecutive:
+		return s.getExecutiveShops(ctx, userID, tenantID)
+	default:
+		return s.GetShops(ctx, tenantID)
 	}
-	return &salesman.ShopID, nil
 }
 
-// GetShopsByUser returns shops based on user role using centralized access control
-// - Roles with restricted access (salesman): only their assigned shop
-// - Roles with full access (admin, manager, etc.): all tenant shops
-// - Unknown roles: empty list (security default)
-func (s *TenantService) GetShopsByUser(ctx context.Context, tenantID, userID uuid.UUID, userRole string) ([]*ShopResponse, error) {
-	var shops []models.Shop
+// getSalesmanShops returns the single shop the salesman is assigned to.
+func (s *TenantService) getSalesmanShops(ctx context.Context, userID, tenantID uuid.UUID) ([]*ShopResponse, error) {
+	var salesman models.Salesman
+	err := s.db.Preload("Shop").
+		Where("user_id = ? AND tenant_id = ?", userID, tenantID).
+		First(&salesman).Error
 
-	// Use centralized shop access control
-	access, err := utils.GetUserShopAccess(ctx, s.db.DB, userID, tenantID, userRole)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine shop access: %w", err)
-	}
-
-	switch access.AccessLevel {
-	case utils.ShopAccessAll:
-		// Full access - return all shops in tenant
-		err = s.db.Where("tenant_id = ?", tenantID).Order("name").Find(&shops).Error
-
-	case utils.ShopAccessAssigned:
-		// Restricted access - return only assigned shop
-		if access.AllowedShopID == nil {
-			// No shop assigned - return empty list
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return []*ShopResponse{}, nil
 		}
-		err = s.db.Where("id = ? AND tenant_id = ?", *access.AllowedShopID, tenantID).Find(&shops).Error
-
-	case utils.ShopAccessNone:
-		// Unknown role - security default: return empty list
-		return []*ShopResponse{}, nil
-
-	default:
-		return nil, fmt.Errorf("unexpected access level: %d", access.AccessLevel)
+		return nil, fmt.Errorf("failed to get salesman shops: %w", err)
 	}
 
+	if salesman.Shop != nil {
+		return []*ShopResponse{s.mapShopToResponse(salesman.Shop)}, nil
+	}
+	return []*ShopResponse{}, nil
+}
+
+// getExecutiveShops returns the shops mapped to an executive via executive_shops.
+// Inactive or soft-deleted shops are filtered out so the picker never lists them.
+func (s *TenantService) getExecutiveShops(ctx context.Context, userID, tenantID uuid.UUID) ([]*ShopResponse, error) {
+	var shops []models.Shop
+	err := s.db.
+		Joins("JOIN executive_shops es ON es.shop_id = shops.id AND es.deleted_at IS NULL").
+		Where("es.user_id = ? AND es.tenant_id = ? AND shops.tenant_id = ? AND shops.is_active = ?",
+			userID, tenantID, tenantID, true).
+		Order("shops.name").
+		Find(&shops).Error
 	if err != nil {
-		return nil, fmt.Errorf("failed to get shops: %w", err)
+		return nil, fmt.Errorf("failed to get executive shops: %w", err)
 	}
 
-	shopResponses := make([]*ShopResponse, len(shops))
-	for i, shop := range shops {
-		shopResponses[i] = s.mapShopToResponse(&shop)
+	out := make([]*ShopResponse, len(shops))
+	for i := range shops {
+		out[i] = s.mapShopToResponse(&shops[i])
 	}
-	return shopResponses, nil
+	return out, nil
+}
+
+// GetExecutiveShopIDs returns just the assigned shop UUIDs for an executive
+// (used when serialising UserResponse).
+func (s *TenantService) GetExecutiveShopIDs(ctx context.Context, userID, tenantID uuid.UUID) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := s.db.Model(&models.ExecutiveShop{}).
+		Where("user_id = ? AND tenant_id = ?", userID, tenantID).
+		Pluck("shop_id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to list executive shop ids: %w", err)
+	}
+	return ids, nil
+}
+
+// ReplaceExecutiveShops sets the executive's shop assignments to exactly the
+// given set, atomically. All shop IDs must belong to the tenant. An empty
+// shopIDs slice clears all assignments.
+func (s *TenantService) ReplaceExecutiveShops(ctx context.Context, userID, tenantID uuid.UUID, shopIDs []uuid.UUID) error {
+	// Validate every shop belongs to this tenant before touching anything.
+	if len(shopIDs) > 0 {
+		var count int64
+		if err := s.db.Model(&models.Shop{}).
+			Where("id IN ? AND tenant_id = ?", shopIDs, tenantID).
+			Count(&count).Error; err != nil {
+			return fmt.Errorf("failed to validate shops: %w", err)
+		}
+		if int(count) != len(shopIDs) {
+			return errors.New("one or more shops do not belong to this tenant")
+		}
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().
+			Where("user_id = ? AND tenant_id = ?", userID, tenantID).
+			Delete(&models.ExecutiveShop{}).Error; err != nil {
+			return fmt.Errorf("failed to clear executive shops: %w", err)
+		}
+		if len(shopIDs) == 0 {
+			return nil
+		}
+		rows := make([]models.ExecutiveShop, len(shopIDs))
+		tid := tenantID
+		for i, sid := range shopIDs {
+			rows[i] = models.ExecutiveShop{
+				TenantModel: models.TenantModel{TenantID: &tid},
+				UserID:      userID,
+				ShopID:      sid,
+			}
+		}
+		if err := tx.Create(&rows).Error; err != nil {
+			return fmt.Errorf("failed to insert executive shops: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetShopByID returns shop by ID
@@ -209,9 +260,11 @@ func (s *TenantService) CreateShop(ctx context.Context, req CreateShopRequest, t
 		return nil, errors.New("shop with this name already exists")
 	}
 
-	// Check if license number already exists for this tenant
-	if err := s.db.Where("license_number = ? AND tenant_id = ?", req.LicenseNumber, tenantID).First(&existingShop).Error; err == nil {
-		return nil, errors.New("shop with this license number already exists")
+	// Check if license number already exists for this tenant (skip if empty)
+	if req.LicenseNumber != "" {
+		if err := s.db.Where("license_number = ? AND tenant_id = ?", req.LicenseNumber, tenantID).First(&existingShop).Error; err == nil {
+			return nil, errors.New("shop with this license number already exists")
+		}
 	}
 
 	shop := models.Shop{
@@ -266,10 +319,12 @@ func (s *TenantService) UpdateShop(ctx context.Context, shopID, tenantID uuid.UU
 		shop.Phone = *req.Phone
 	}
 	if req.LicenseNumber != nil {
-		// Check if license number already exists for another shop
-		var existingShop models.Shop
-		if err := s.db.Where("license_number = ? AND tenant_id = ? AND id != ?", *req.LicenseNumber, tenantID, shopID).First(&existingShop).Error; err == nil {
-			return nil, errors.New("shop with this license number already exists")
+		// Check if license number already exists for another shop (skip if empty)
+		if *req.LicenseNumber != "" {
+			var existingShop models.Shop
+			if err := s.db.Where("license_number = ? AND tenant_id = ? AND id != ?", *req.LicenseNumber, tenantID, shopID).First(&existingShop).Error; err == nil {
+				return nil, errors.New("shop with this license number already exists")
+			}
 		}
 		updates["license_number"] = *req.LicenseNumber
 		shop.LicenseNumber = *req.LicenseNumber
@@ -588,21 +643,4 @@ func (s *TenantService) GetAllShops(ctx context.Context) ([]*models.Shop, error)
 		result[i] = &shops[i]
 	}
 	return result, nil
-}
-
-// IsTenantNameAvailable checks if a tenant name is available for registration
-func (s *TenantService) IsTenantNameAvailable(ctx context.Context, name string) (bool, error) {
-	var tenant models.Tenant
-	err := s.db.Where("name = ?", name).First(&tenant).Error
-
-	if err == nil {
-		// Tenant found, name is not available
-		return false, nil
-	} else if errors.Is(err, gorm.ErrRecordNotFound) {
-		// Tenant not found, name is available
-		return true, nil
-	}
-
-	// Database error
-	return false, fmt.Errorf("failed to check tenant name: %w", err)
 }

@@ -53,29 +53,35 @@ type StockTransferItemRequest struct {
 	Quantity  int       `json:"quantity" binding:"required,gt=0"`
 }
 
-// StockResponse represents stock in responses
+// StockResponse represents stock in responses. DisplayName + bold indices
+// are carried through so the web admin can render the admin-curated name
+// (bold distinctive identifier + smaller light rest) everywhere stock is
+// shown — stock list, sale entry, purchase item lines, stock adjust, etc.
+// Falls back to ProductName / BrandName client-side when DisplayName is
+// empty, preserving behavior for products that haven't been configured.
 type StockResponse struct {
-	ID                uuid.UUID  `json:"id"`
-	ShopID            uuid.UUID  `json:"shop_id"`
-	ShopName          string     `json:"shop_name"`
-	ProductID         uuid.UUID  `json:"product_id"`
-	ProductName       string     `json:"product_name"`
-	BrandName         string     `json:"brand_name"`
-	CategoryName      string     `json:"category_name"`
-	SubcategoryName   string     `json:"subcategory_name,omitempty"`
-	Size              string     `json:"size"`
-	SKU               string     `json:"sku"`
-	ImageURL          string     `json:"image_url"`
-	Quantity          int        `json:"quantity"`
-	ReservedQuantity  int        `json:"reserved_quantity"`
-	AvailableQuantity int        `json:"available_quantity"`
-	MinimumLevel      int        `json:"minimum_level"`
-	MaximumLevel      int        `json:"maximum_level"`
-	CostingMethod     string     `json:"costing_method"`
-	AverageCost       float64    `json:"average_cost"`
-	LastPurchasePrice float64    `json:"last_purchase_price"`
-	LastPurchaseDate  *time.Time `json:"last_purchase_date"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ID                    uuid.UUID  `json:"id"`
+	ShopID                uuid.UUID  `json:"shop_id"`
+	ShopName              string     `json:"shop_name"`
+	ProductID             uuid.UUID  `json:"product_id"`
+	ProductName           string     `json:"product_name"`
+	BrandName             string     `json:"brand_name"`
+	DisplayName           string     `json:"display_name,omitempty"`
+	DisplayNameBoldStart  *int       `json:"display_name_bold_start,omitempty"`
+	DisplayNameBoldLength *int       `json:"display_name_bold_length,omitempty"`
+	CategoryName          string     `json:"category_name"`
+	Size                  string     `json:"size"`
+	SKU                   string     `json:"sku"`
+	Quantity              int        `json:"quantity"`
+	ReservedQuantity      int        `json:"reserved_quantity"`
+	AvailableQuantity     int        `json:"available_quantity"`
+	MinimumLevel          int        `json:"minimum_level"`
+	MaximumLevel          int        `json:"maximum_level"`
+	CostingMethod         string     `json:"costing_method"`
+	AverageCost           float64    `json:"average_cost"`
+	LastPurchasePrice     float64    `json:"last_purchase_price"`
+	LastPurchaseDate      *time.Time `json:"last_purchase_date"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 // StockHistoryResponse represents stock movement history
@@ -108,8 +114,7 @@ func (s *StockService) GetStockByShop(ctx context.Context, shopID, tenantID uuid
 		Where("shop_id = ? AND tenant_id = ?", shopID, tenantID).
 		Preload("Shop").
 		Preload("Product.Brand").
-		Preload("Product.Category").
-		Preload("Product.Subcategory")
+		Preload("Product.Category")
 
 	// Apply filters
 	if filters.ProductID != uuid.Nil {
@@ -122,6 +127,13 @@ func (s *StockService) GetStockByShop(ctx context.Context, shopID, tenantID uuid
 	if filters.BrandID != uuid.Nil {
 		query = query.Joins("JOIN products ON stocks.product_id = products.id").
 			Where("products.brand_id = ?", filters.BrandID)
+	}
+	if filters.Size != "" {
+		// Need JOIN with products if not already joined
+		if filters.CategoryID == uuid.Nil && filters.BrandID == uuid.Nil {
+			query = query.Joins("JOIN products ON stocks.product_id = products.id")
+		}
+		query = query.Where("UPPER(products.size) = UPPER(?)", filters.Size)
 	}
 	if filters.LowStock {
 		query = query.Where("quantity <= minimum_level")
@@ -154,7 +166,6 @@ func (s *StockService) GetStockByProduct(ctx context.Context, productID, tenantI
 		Preload("Shop").
 		Preload("Product.Brand").
 		Preload("Product.Category").
-		Preload("Product.Subcategory").
 		Find(&stocks).Error
 
 	if err != nil {
@@ -174,8 +185,12 @@ func (s *StockService) GetStockByProduct(ctx context.Context, productID, tenantI
 func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentRequest, tenantID, userID uuid.UUID) (*StockResponse, error) {
 	// Verify shop and product exist
 	var shop models.Shop
-	if err := s.db.Where("id = ? AND tenant_id = ?", req.ShopID, tenantID).First(&shop).Error; err != nil {
-		return nil, errors.New("shop not found")
+	err := s.db.Where("id = ? AND tenant_id = ?", req.ShopID, tenantID).First(&shop).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("SHOP_NOT_FOUND: Shop with ID %s not found for your account. Please create a shop first or select a different shop", req.ShopID)
+		}
+		return nil, fmt.Errorf("failed to verify shop: %w", err)
 	}
 
 	var product models.Product
@@ -200,7 +215,7 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 	var newQuantity int
 
 	// Start transaction
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err = s.db.Transaction(func(tx *gorm.DB) error {
 		// Get or create stock record with row-level locking to prevent race conditions
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
@@ -210,12 +225,11 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				// Create new stock record
 				stock = models.Stock{
-					TenantModel:       models.TenantModel{TenantID: &tenantID},
-					ShopID:            req.ShopID,
-					ProductID:         req.ProductID,
-					Quantity:          0,
-					AvailableQuantity: 0,
-					CostingMethod:     models.CostingFIFO,
+					TenantModel:   models.TenantModel{TenantID: &tenantID},
+					ShopID:        req.ShopID,
+					ProductID:     req.ProductID,
+					Quantity:      0,
+					CostingMethod: models.CostingFIFO,
 				}
 				if err := tx.Create(&stock).Error; err != nil {
 					return fmt.Errorf("failed to create stock record: %w", err)
@@ -255,17 +269,22 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 
 		// Update stock
 		stock.Quantity = newQuantity
-		stock.UpdateAvailableQuantity()
 		if err := tx.Save(&stock).Error; err != nil {
 			return fmt.Errorf("failed to update stock: %w", err)
 		}
 
-		// Create stock history
+		// Create stock history. Quantity is the SIGNED DELTA so the v1.0.216
+		// math-gate trigger (new = prev + qty) accepts the row. Pre-fix the
+		// "remove" / "set" branches stored req.Quantity (always positive)
+		// which would have broken the trigger immediately.
+		adjShopRef, adjProdRef := stock.ShopID, stock.ProductID
 		history := models.StockHistory{
 			TenantModel:      models.TenantModel{TenantID: &tenantID},
 			StockID:          stock.ID,
+			ShopID:           &adjShopRef,
+			ProductID:        &adjProdRef,
 			MovementType:     "adjustment",
-			Quantity:         req.Quantity,
+			Quantity:         newQuantity - previousQuantity,
 			PreviousQuantity: previousQuantity,
 			NewQuantity:      newQuantity,
 			Reference:        req.Reason,
@@ -287,8 +306,8 @@ func (s *StockService) AdjustStock(ctx context.Context, req StockAdjustmentReque
 	// Clear cache
 	s.clearStockCache(ctx, tenantID, req.ShopID, req.ProductID)
 
-	// Load related data and return
-	s.db.Preload("Shop").Preload("Product.Brand").Preload("Product.Category").Preload("Product.Subcategory").First(&stock, stock.ID)
+	// Load related data and return (scoped by tenant for safety)
+	s.db.Where("tenant_id = ?", tenantID).Preload("Shop").Preload("Product.Brand").Preload("Product.Category").First(&stock, stock.ID)
 	return s.mapStockToResponse(&stock), nil
 }
 
@@ -307,30 +326,16 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 		return errors.New("cannot transfer to the same shop")
 	}
 
-	// Batch-load products and source stocks before transaction (eliminates N+1)
-	productIDs := make([]uuid.UUID, len(req.Items))
-	for i, item := range req.Items {
-		productIDs[i] = item.ProductID
-	}
-
-	var products []models.Product
-	if err := s.db.Where("id IN ? AND tenant_id = ?", productIDs, tenantID).Find(&products).Error; err != nil {
-		return fmt.Errorf("failed to verify products: %w", err)
-	}
-	productMap := make(map[uuid.UUID]models.Product, len(products))
-	for _, p := range products {
-		productMap[p.ID] = p
-	}
-	if len(productMap) != len(productIDs) {
-		return errors.New("one or more products not found")
-	}
-
 	// Start transaction
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		transferRef := fmt.Sprintf("TRANSFER-%s-%d", time.Now().Format("20060102"), time.Now().Unix()%10000)
 
 		for _, item := range req.Items {
-			product := productMap[item.ProductID]
+			// Verify product exists
+			var product models.Product
+			if err := tx.Where("id = ? AND tenant_id = ?", item.ProductID, tenantID).First(&product).Error; err != nil {
+				return fmt.Errorf("product %s not found", item.ProductID)
+			}
 
 			// Get source stock
 			var fromStock models.Stock
@@ -350,7 +355,6 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 
 			// Update source stock
 			fromStock.Quantity -= item.Quantity
-			fromStock.UpdateAvailableQuantity()
 			if err := tx.Save(&fromStock).Error; err != nil {
 				return fmt.Errorf("failed to update source stock: %w", err)
 			}
@@ -380,13 +384,12 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					// Create new stock record
 					toStock = models.Stock{
-						TenantModel:       models.TenantModel{TenantID: &tenantID},
-						ShopID:            req.ToShopID,
-						ProductID:         item.ProductID,
-						Quantity:          0,
-						AvailableQuantity: 0,
-						CostingMethod:     fromStock.CostingMethod,
-						AverageCost:       fromStock.AverageCost,
+						TenantModel:   models.TenantModel{TenantID: &tenantID},
+						ShopID:        req.ToShopID,
+						ProductID:     item.ProductID,
+						Quantity:      0,
+						CostingMethod: fromStock.CostingMethod,
+						AverageCost:   fromStock.AverageCost,
 					}
 					if err := tx.Create(&toStock).Error; err != nil {
 						return fmt.Errorf("failed to create destination stock: %w", err)
@@ -399,7 +402,6 @@ func (s *StockService) CreateStockTransfer(ctx context.Context, req StockTransfe
 			// Update destination stock
 			previousToQty := toStock.Quantity
 			toStock.Quantity += item.Quantity
-			toStock.UpdateAvailableQuantity()
 			if err := tx.Save(&toStock).Error; err != nil {
 				return fmt.Errorf("failed to update destination stock: %w", err)
 			}
@@ -450,6 +452,49 @@ func (s *StockService) GetStockHistory(ctx context.Context, stockID, tenantID uu
 	responses := make([]*StockHistoryResponse, len(histories))
 	for i, history := range histories {
 		responses[i] = s.mapStockHistoryToResponse(&history)
+	}
+
+	return responses, nil
+}
+
+// GetAllStocks returns all stocks for a tenant, optionally filtered by shop
+func (s *StockService) GetAllStocks(ctx context.Context, tenantID uuid.UUID, shopID *uuid.UUID, filters StockFilters) ([]*StockResponse, error) {
+	query := s.db.Model(&models.Stock{}).
+		Where("tenant_id = ?", tenantID).
+		Preload("Shop").
+		Preload("Product.Brand").
+		Preload("Product.Category")
+
+	// Apply shop filter if provided
+	if shopID != nil {
+		query = query.Where("shop_id = ?", *shopID)
+	}
+
+	// Apply additional filters
+	if filters.ProductID != uuid.Nil {
+		query = query.Where("product_id = ?", filters.ProductID)
+	}
+	if filters.CategoryID != uuid.Nil {
+		query = query.Joins("JOIN products ON stocks.product_id = products.id").
+			Where("products.category_id = ?", filters.CategoryID)
+	}
+	if filters.BrandID != uuid.Nil {
+		query = query.Joins("JOIN products ON stocks.product_id = products.id").
+			Where("products.brand_id = ?", filters.BrandID)
+	}
+	if filters.LowStock {
+		query = query.Where("quantity <= minimum_level")
+	}
+
+	var stocks []models.Stock
+	if err := query.Find(&stocks).Error; err != nil {
+		return nil, fmt.Errorf("failed to get stocks: %w", err)
+	}
+
+	// Convert to response format
+	responses := make([]*StockResponse, len(stocks))
+	for i, stock := range stocks {
+		responses[i] = s.mapStockToResponse(&stock)
 	}
 
 	return responses, nil
@@ -551,12 +596,16 @@ func (s *StockService) ProcessSale(ctx context.Context, saleID uuid.UUID, items 
 				return fmt.Errorf("failed to update stock: %w", err)
 			}
 
-			// Create history
+			// Create history. Quantity is the SIGNED DELTA so the v1.0.216
+			// math-gate trigger accepts the row (sale = negative, return = positive).
+			psShopRef, psProdRef := stock.ShopID, stock.ProductID
 			history := models.StockHistory{
 				TenantModel:      models.TenantModel{TenantID: &tenantID},
 				StockID:          stock.ID,
+				ShopID:           &psShopRef,
+				ProductID:        &psProdRef,
 				MovementType:     movementType,
-				Quantity:         item.Quantity,
+				Quantity:         newQty - previousQty,
 				PreviousQuantity: previousQty,
 				NewQuantity:      newQty,
 				UnitCost:         item.UnitPrice,
@@ -581,6 +630,7 @@ type StockFilters struct {
 	ProductID  uuid.UUID `form:"product_id"`
 	CategoryID uuid.UUID `form:"category_id"`
 	BrandID    uuid.UUID `form:"brand_id"`
+	Size       string    `form:"size"` // Filter by product size (e.g., "180ML")
 	LowStock   bool      `form:"low_stock"`
 }
 
@@ -610,7 +660,12 @@ func (s *StockService) mapStockToResponse(stock *models.Stock) *StockResponse {
 		response.ProductName = stock.Product.Name
 		response.Size = stock.Product.Size
 		response.SKU = stock.Product.SKU
-		response.ImageURL = stock.Product.ImageURL
+		// Flow display_name through so the web can render the bold+small
+		// treatment exactly like product-detail / brand-detail pages,
+		// instead of falling back to raw product.name everywhere.
+		response.DisplayName = stock.Product.DisplayName
+		response.DisplayNameBoldStart = stock.Product.DisplayNameBoldStart
+		response.DisplayNameBoldLength = stock.Product.DisplayNameBoldLength
 
 		if stock.Product.Brand != nil {
 			response.BrandName = stock.Product.Brand.Name
@@ -618,10 +673,6 @@ func (s *StockService) mapStockToResponse(stock *models.Stock) *StockResponse {
 
 		if stock.Product.Category != nil {
 			response.CategoryName = stock.Product.Category.Name
-		}
-
-		if stock.Product.Subcategory != nil {
-			response.SubcategoryName = stock.Product.Subcategory.Name
 		}
 	}
 
@@ -668,6 +719,18 @@ func (s *StockService) clearStockCache(ctx context.Context, tenantID, shopID, pr
 		fmt.Sprintf("low_stock:%s", tenantID.String()),
 	}
 
+	for _, key := range cacheKeys {
+		s.cache.Delete(ctx, key)
+	}
+}
+
+// ClearShopStockCache clears tenant-level stock cache entries for a shop
+func (s *StockService) ClearShopStockCache(ctx context.Context, tenantID, shopID uuid.UUID) {
+	cacheKeys := []string{
+		fmt.Sprintf("stock_levels:%s", tenantID.String()),
+		fmt.Sprintf("low_stock:%s", tenantID.String()),
+		fmt.Sprintf("stocks:shop:%s:tenant:%s", shopID.String(), tenantID.String()),
+	}
 	for _, key := range cacheKeys {
 		s.cache.Delete(ctx, key)
 	}
@@ -909,90 +972,47 @@ func (s *StockService) GetStockAgingReport(ctx context.Context, tenantID uuid.UU
 	}, nil
 }
 
-// GetStockMovements retrieves stock movement history with filtering and pagination
-func (s *StockService) GetStockMovements(ctx context.Context, tenantID uuid.UUID, shopID, productID *uuid.UUID, movementType string, limit, offset int) ([]*StockHistoryResponse, int64, error) {
-	var movements []models.StockMovement
-	var total int64
-
-	// Build base query
-	query := s.db.Model(&models.StockMovement{}).
-		Where("stock_movements.tenant_id = ?", tenantID).
-		Joins("JOIN stocks ON stocks.id = stock_movements.stock_id").
-		Joins("JOIN products ON products.id = stocks.product_id").
-		Joins("JOIN shops ON shops.id = stocks.shop_id")
-
-	// Apply filters
-	if shopID != nil {
-		query = query.Where("stocks.shop_id = ?", *shopID)
-	}
-
-	if productID != nil {
-		query = query.Where("stocks.product_id = ?", *productID)
-	}
-
-	if movementType != "" {
-		query = query.Where("stock_movements.movement_type = ?", movementType)
-	}
-
-	// Get total count
-	if err := query.Count(&total).Error; err != nil {
-		return nil, 0, fmt.Errorf("failed to count stock movements: %w", err)
-	}
-
-	// Get movements with pagination
-	if err := s.db.
-		Where("stock_movements.tenant_id = ?", tenantID).
-		Joins("JOIN stocks ON stocks.id = stock_movements.stock_id").
-		Joins("JOIN products ON products.id = stocks.product_id").
-		Joins("JOIN shops ON shops.id = stocks.shop_id").
-		Preload("Stock").
-		Preload("Stock.Product").
-		Preload("Stock.Shop").
-		Order("stock_movements.created_at DESC").
-		Limit(limit).
-		Offset(offset).
-		Find(&movements).Error; err != nil {
-		return nil, 0, fmt.Errorf("failed to get stock movements: %w", err)
-	}
-
-	// Build response
-	var responses []*StockHistoryResponse
-	for _, movement := range movements {
-		response := &StockHistoryResponse{
-			ID:           movement.ID,
-			StockID:      movement.StockID,
-			MovementType: movement.MovementType,
-			Quantity:     movement.Quantity,
-			Reference:    movement.Reference,
-			Notes:        movement.Notes,
-			CreatedAt:    movement.CreatedAt,
-		}
-
-		if movement.Stock != nil {
-			if movement.Stock.Product != nil {
-				response.ProductName = movement.Stock.Product.Name
-			}
-			if movement.Stock.Shop != nil {
-				response.ShopName = movement.Stock.Shop.Name
-			}
-		}
-
-		responses = append(responses, response)
-	}
-
-	return responses, total, nil
+// BrandStockUpdateRequest represents a request to update stock by brand name and size
+type BrandStockUpdateRequest struct {
+	ShopID         uuid.UUID `json:"shop_id" binding:"required"`
+	BrandName      string    `json:"brand_name" binding:"required"`
+	Size           string    `json:"size" binding:"required"`
+	Quantity       int       `json:"quantity" binding:"required"`
+	AdjustmentType string    `json:"adjustment_type" binding:"required"` // add, remove, set
+	Reason         string    `json:"reason"`
+	Notes          string    `json:"notes"`
 }
 
-// GetSalesmanShopID retrieves the shop_id assigned to a salesman by their user_id
-// Returns nil if user is not a salesman or has no shop assigned
-func (s *StockService) GetSalesmanShopID(ctx context.Context, userID, tenantID uuid.UUID) (*uuid.UUID, error) {
-	var salesman models.Salesman
-	err := s.db.Where("user_id = ? AND tenant_id = ?", userID, tenantID).First(&salesman).Error
+// UpdateStockByBrandAndSize updates stock for a product identified by brand name and size
+func (s *StockService) UpdateStockByBrandAndSize(ctx context.Context, req BrandStockUpdateRequest, tenantID, userID uuid.UUID) (*StockResponse, error) {
+	// Find the product by brand name and size
+	var product models.Product
+	err := s.db.Joins("JOIN brands ON brands.id = products.brand_id").
+		Where("LOWER(brands.name) = LOWER(?) AND products.size = ? AND products.tenant_id = ?",
+			req.BrandName, req.Size, tenantID).
+		First(&product).Error
+
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil // User is not a salesman
+			return nil, fmt.Errorf("product not found for brand '%s' with size '%s'", req.BrandName, req.Size)
 		}
-		return nil, fmt.Errorf("failed to lookup salesman: %w", err)
+		return nil, fmt.Errorf("failed to find product: %w", err)
 	}
-	return &salesman.ShopID, nil
+
+	// Now use the existing AdjustStock method with the product ID
+	stockAdjustReq := StockAdjustmentRequest{
+		ShopID:         req.ShopID,
+		ProductID:      product.ID,
+		Quantity:       req.Quantity,
+		AdjustmentType: req.AdjustmentType,
+		Reason:         req.Reason,
+		Notes:          req.Notes,
+	}
+
+	// Default reason if not provided
+	if stockAdjustReq.Reason == "" {
+		stockAdjustReq.Reason = fmt.Sprintf("Stock update for %s %s from OCR", req.BrandName, req.Size)
+	}
+
+	return s.AdjustStock(ctx, stockAdjustReq, tenantID, userID)
 }

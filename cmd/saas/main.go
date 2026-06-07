@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,9 +15,9 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/liquorpro/go-backend/internal/saas/handlers"
+	saasMiddleware "github.com/liquorpro/go-backend/internal/saas/middleware"
 	"github.com/liquorpro/go-backend/internal/saas/models"
 	"github.com/liquorpro/go-backend/internal/saas/services"
-	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
@@ -86,6 +87,10 @@ func main() {
 	discountService := services.NewDiscountService(db, cfg)
 	usageTrackingService := services.NewUsageTrackingService(db, cacheClient, cfg)
 	brandService := services.NewBrandService(db, cacheClient, cfg, logger.Logger)
+	brandExcelService := services.NewBrandExcelService(db, logger.Logger)
+	categorySizeService := services.NewCategorySizeService(db)
+	unitService := services.NewUnitService(db)
+	featureFlagService := services.NewFeatureFlagService(db)
 
 	// Initialize billing service (assuming it exists)
 	billingService := services.NewAutonomousBillingService(db, cfg, cacheClient)
@@ -102,7 +107,10 @@ func main() {
 	discountHandler := handlers.NewDiscountHandler(discountService)
 	usageHandler := handlers.NewUsageHandler(usageTrackingService)
 	planTransitionHandler := handlers.NewPlanTransitionHandler(planTransitionService)
-	brandHandler := handlers.NewBrandHandler(brandService)
+	brandHandler := handlers.NewBrandHandler(brandService, brandExcelService)
+	categorySizeHandler := handlers.NewCategorySizeHandler(categorySizeService)
+	unitHandler := handlers.NewUnitHandler(unitService)
+	featureFlagHandler := handlers.NewFeatureFlagHandler(featureFlagService)
 
 	// Setup routes
 	router := setupRoutes(
@@ -117,6 +125,9 @@ func main() {
 		usageHandler,
 		planTransitionHandler,
 		brandHandler,
+		categorySizeHandler,
+		unitHandler,
+		featureFlagHandler,
 	)
 
 	// Create server
@@ -160,7 +171,12 @@ func runMigrations(db *gorm.DB) error {
 		&models.UsageRecord{},
 		&models.WebhookEvent{},
 		&models.AdminUser{},
+		&models.AdminInvitation{},
+		&models.AdminActivityLog{},
 		&models.AuditLog{},
+		&models.Unit{},
+		&models.FeatureFlag{},
+		&models.SystemConfiguration{},
 		&models.PlanBillingVariant{},
 		&models.GlobalDiscountConfig{},
 		&models.PlanDiscountOverride{},
@@ -168,16 +184,12 @@ func runMigrations(db *gorm.DB) error {
 		&models.PlanTransition{},
 		&models.PlanTransitionHistory{},
 
-		// Usage tracking models
-		&models.TenantUser{},
-		&models.Shop{},
-		&models.Product{},
-
 		// Brand management models (SaaS-specific)
 		&models.SaasBrand{},
 		&models.BrandVariant{},
 		&models.TenantBrand{},
 		&models.TenantBrandVariant{},
+		&models.CategorySize{},
 		// Temporarily commented - tables already exist with correct schema
 		// &models.BrandCategory{},
 		// &models.BrandSubcategory{},
@@ -196,15 +208,15 @@ func setupRoutes(
 	usageHandler *handlers.UsageHandler,
 	planTransitionHandler *handlers.PlanTransitionHandler,
 	brandHandler *handlers.BrandHandler,
+	categorySizeHandler *handlers.CategorySizeHandler,
+	unitHandler *handlers.UnitHandler,
+	featureFlagHandler *handlers.FeatureFlagHandler,
 ) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 	router.Use(middleware.CORSMiddleware())
-	router.Use(monitoring.PrometheusMiddleware("saas"))
-
-	// Prometheus metrics endpoint
-	router.GET("/metrics", monitoring.PrometheusHandler())
+	router.Use(middleware.GzipMiddleware()) // Compress 1645-brand catalog response (3MB → ~600KB)
 
 	// Health check
 	router.GET("/health", func(c *gin.Context) {
@@ -229,12 +241,12 @@ func setupRoutes(
 		internal := api.Group("/internal")
 		{
 			// Brand template endpoints for inter-service communication
-			// IMPORTANT: Specific routes MUST come BEFORE parameterized routes
 			internal.GET("/brands", brandHandler.GetBrandsInternal)
-			internal.GET("/brands/categories", brandHandler.GetAllBrandCategories)
-			internal.GET("/brands/subcategories", brandHandler.GetBrandSubcategories)
 			internal.GET("/brands/:id", brandHandler.GetBrandByID)
 			internal.GET("/brands/:id/variants", brandHandler.GetBrandVariants)
+			internal.GET("/brands/categories", brandHandler.GetAllBrandCategories)
+			internal.GET("/brands/subcategories", brandHandler.GetBrandSubcategories)
+			internal.GET("/brands/category-sizes", categorySizeHandler.GetCategorySizesForInternal)
 
 			// Tenant-specific brand endpoints
 			internal.GET("/tenants/:tenant_id/brands", brandHandler.GetTenantBrands)
@@ -243,15 +255,26 @@ func setupRoutes(
 		// SaaS Admin Authentication routes (public)
 		saasAuth := api.Group("/saas-admin")
 		{
-			saasAuth.POST("/is-admin", adminHandler.IsSaaSAdmin)
 			saasAuth.POST("/send-otp", adminHandler.SendOTP)
 			saasAuth.POST("/verify-otp", adminHandler.VerifyOTP)
+			saasAuth.POST("/accept-invitation", adminHandler.AcceptInvitation)
 		}
 
 		// Protected routes
 		protected := api.Group("")
 		protected.Use(middleware.AuthMiddleware(cfg.JWT, cacheClient))
 		{
+			// Public brand catalog (for tenant users to browse and onboard brands)
+			saas := protected.Group("/saas")
+			{
+				brands := saas.Group("/brands")
+				{
+					brands.GET("/public", brandHandler.GetAllBrands)           // Get all brands with variants
+					brands.GET("/:id", brandHandler.GetBrandByID)              // Get specific brand details
+					brands.GET("/:id/variants", brandHandler.GetBrandVariants) // Get variants for a brand
+				}
+			}
+
 			// Subscription management
 			subscriptions := protected.Group("/subscriptions")
 			{
@@ -308,19 +331,48 @@ func setupRoutes(
 
 		// Super Admin routes with proper middleware
 		superAdmin := api.Group("/super-admin")
-		// Use SetAdminContext middleware to ensure admin context is always set
+		// Extract user context from Gateway headers or set default admin context
 		superAdmin.Use(func(c *gin.Context) {
-			// Set default admin context if not already set
+			// First, try to extract context from Gateway-forwarded headers
+			userID := c.GetHeader("X-User-ID")
+			tenantID := c.GetHeader("X-Tenant-ID")
+			role := c.GetHeader("X-User-Role")
+
+			// If headers are present, set them in context (Gateway already validated)
+			if userID != "" {
+				c.Set("user_id", userID)
+				c.Set("admin_user_id", userID)
+			}
+			if tenantID != "" {
+				c.Set("tenant_id", tenantID)
+			}
+			if role != "" {
+				c.Set("role", role)
+			}
+
+			// Read permissions from gateway header
+			if permsHeader := c.GetHeader("X-User-Permissions"); permsHeader != "" {
+				perms := strings.Split(permsHeader, ",")
+				c.Set("permissions", perms)
+			} else if role != "" {
+				// Fallback: assign default permissions for the role
+				c.Set("permissions", models.GetDefaultPermissions(role))
+			}
+
+			// Fall back to default admin context if not set by headers
 			if c.GetString("user_id") == "" {
 				c.Set("user_id", "00000000-0000-0000-0000-000000000001")
 				c.Set("admin_user_id", "00000000-0000-0000-0000-000000000001")
 				c.Set("role", "saas_admin")
+				c.Set("permissions", models.GetDefaultPermissions("saas_admin"))
 			}
+
 			c.Next()
 		})
 		{
 			// Plan management
 			plans := superAdmin.Group("/plans")
+			plans.Use(saasMiddleware.AdminPermissionMiddleware(models.PermManagePlans))
 			{
 				plans.GET("", planHandler.GetPlans)
 				plans.POST("", planHandler.CreatePlan)
@@ -333,10 +385,37 @@ func setupRoutes(
 				plans.PUT("/:id/discounts", planHandler.UpdatePlanDiscounts)
 			}
 
+			// Admin Team Management
+			team := superAdmin.Group("/team")
+			team.Use(saasMiddleware.AdminPermissionMiddleware(models.PermManageTeam))
+			{
+				team.GET("", adminHandler.GetAdminUsers)
+				team.POST("", adminHandler.CreateAdminUser)
+				team.GET("/:id", adminHandler.GetAdminUser)
+				team.PUT("/:id", adminHandler.UpdateAdminUser)
+				team.DELETE("/:id", adminHandler.DeleteAdminUser)
+				team.POST("/invite", adminHandler.InviteAdminUser)
+				team.GET("/invitations", adminHandler.GetPendingInvitations)
+				team.DELETE("/invitations/:id", adminHandler.RevokeInvitation)
+				team.GET("/:id/activity", adminHandler.GetAdminActivity)
+			}
+
+			// Admin Profile
+			profile := superAdmin.Group("/profile")
+			{
+				profile.GET("", adminHandler.GetMyProfile)
+				profile.PUT("", adminHandler.UpdateMyProfile)
+			}
+
 			// Tenant management
 			tenants := superAdmin.Group("/tenants")
+			tenants.Use(saasMiddleware.AdminPermissionMiddleware(models.PermManageTenants))
 			{
 				tenants.GET("", adminHandler.GetAllTenants)
+				tenants.GET("/:tenant_id", adminHandler.GetTenantDetail)
+				tenants.GET("/:tenant_id/timeline", adminHandler.GetTenantTimeline)
+				tenants.POST("/:tenant_id/deactivate", adminHandler.DeactivateTenant)
+				tenants.POST("/:tenant_id/reactivate", adminHandler.ReactivateTenant)
 			}
 
 			// Subscription management
@@ -349,6 +428,7 @@ func setupRoutes(
 
 			// Discount Management
 			discounts := superAdmin.Group("/discounts")
+			discounts.Use(saasMiddleware.AdminPermissionMiddleware(models.PermManageDiscounts))
 			{
 				// Global discount configurations
 				discounts.GET("/configs", discountHandler.GetGlobalDiscountConfigs)
@@ -382,6 +462,7 @@ func setupRoutes(
 
 			// Analytics
 			analytics := superAdmin.Group("/analytics")
+			analytics.Use(saasMiddleware.AdminPermissionMiddleware(models.PermViewAnalytics))
 			{
 				analytics.GET("/dashboard", analyticsHandler.GetDashboard)
 				analytics.GET("/revenue", analyticsHandler.GetRevenue)
@@ -391,6 +472,7 @@ func setupRoutes(
 
 			// Brand management (Super Admin)
 			brands := superAdmin.Group("/brands")
+			brands.Use(saasMiddleware.AdminPermissionMiddleware(models.PermManageBrands))
 			{
 				// Category management (specific routes first)
 				brands.GET("/categories", brandHandler.GetAllBrandCategories)
@@ -431,6 +513,10 @@ func setupRoutes(
 				brands.GET("/packages", brandHandler.GetBrandPackages)
 				brands.GET("/onboarding-stats", brandHandler.GetTenantOnboardingStats)
 
+				// Excel import/export operations (specific routes)
+				brands.GET("/template/download", brandHandler.DownloadBrandTemplate)
+				brands.POST("/bulk-import", brandHandler.BulkImportBrandsFromExcel)
+
 				// Bulk operations (specific routes)
 				brands.POST("/bulk", brandHandler.BulkCreateBrands)
 
@@ -446,12 +532,53 @@ func setupRoutes(
 				brands.GET("/:id/variants", brandHandler.GetBrandVariants)
 			}
 
+			// Category Size Management (Super Admin)
+			categorySizes := superAdmin.Group("/category-sizes")
+			{
+				categorySizes.GET("", categorySizeHandler.GetAllCategorySizes)
+				categorySizes.GET("/:id", categorySizeHandler.GetCategorySizeByID)
+				categorySizes.POST("", categorySizeHandler.CreateCategorySize)
+				categorySizes.PUT("/:id", categorySizeHandler.UpdateCategorySize)
+				categorySizes.DELETE("/:id", categorySizeHandler.DeleteCategorySize)
+			}
+
+			// Category-specific size routes
+			categories := superAdmin.Group("/categories")
+			{
+				categories.GET("/:category_id/sizes", categorySizeHandler.GetCategorySizesByCategory)
+				categories.POST("/:category_id/sizes/bulk", categorySizeHandler.BulkCreateCategorySizes)
+			}
+
+			// Unit management
+			units := superAdmin.Group("/units")
+			units.Use(saasMiddleware.AdminPermissionMiddleware(models.PermManageMasterData))
+			{
+				units.GET("", unitHandler.GetAllUnits)
+				units.POST("", unitHandler.CreateUnit)
+				units.GET("/:id", unitHandler.GetUnitByID)
+				units.PUT("/:id", unitHandler.UpdateUnit)
+				units.DELETE("/:id", unitHandler.DeleteUnit)
+			}
+
 			// System management
 			system := superAdmin.Group("/system")
+			system.Use(saasMiddleware.AdminPermissionMiddleware(models.PermSystemAdmin))
 			{
 				system.GET("/health", adminHandler.GetSystemHealth)
 				system.GET("/audit-logs", adminHandler.GetAuditLogs)
 				system.POST("/maintenance", adminHandler.ToggleMaintenanceMode)
+
+				// Feature flags
+				system.GET("/feature-flags", featureFlagHandler.GetAllFlags)
+				system.POST("/feature-flags", featureFlagHandler.CreateFlag)
+				system.GET("/feature-flags/:key", featureFlagHandler.GetFlagByKey)
+				system.PUT("/feature-flags/:key", featureFlagHandler.UpdateFlag)
+				system.DELETE("/feature-flags/:key", featureFlagHandler.DeleteFlag)
+				system.POST("/feature-flags/:key/check", featureFlagHandler.CheckFeatureEnabled)
+
+				// System configuration
+				system.GET("/configs", featureFlagHandler.GetAllConfigs)
+				system.PUT("/configs/:key", featureFlagHandler.UpdateConfig)
 			}
 
 			// Usage monitoring and management (SaaS admin)

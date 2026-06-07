@@ -16,13 +16,7 @@ type Config struct {
 	App      AppConfig      `mapstructure:"app"`
 	Services ServicesConfig `mapstructure:"services"`
 	Kafka    KafkaConfig    `mapstructure:"kafka"`
-}
-
-// KafkaConfig holds Kafka messaging configuration
-type KafkaConfig struct {
-	Brokers string `mapstructure:"brokers"`
-	Enabled bool   `mapstructure:"enabled"`
-	GroupID string `mapstructure:"group_id"`
+	GraphQL  GraphQLConfig  `mapstructure:"graphql"`
 }
 
 // ServerConfig holds server configuration
@@ -87,6 +81,27 @@ type ServiceConfig struct {
 	URL  string `mapstructure:"url"`
 }
 
+// KafkaConfig holds Kafka configuration
+type KafkaConfig struct {
+	Enabled       bool     `mapstructure:"enabled"`
+	Brokers       []string `mapstructure:"brokers"`
+	GroupID       string   `mapstructure:"group_id"`
+	BatchSize     int      `mapstructure:"batch_size"`
+	BatchTimeout  int      `mapstructure:"batch_timeout"`
+	RetryAttempts int      `mapstructure:"retry_attempts"`
+}
+
+// GraphQLConfig holds GraphQL configuration
+type GraphQLConfig struct {
+	Enabled             bool   `mapstructure:"enabled"`
+	EnablePlayground    bool   `mapstructure:"enable_playground"`
+	EnableIntrospection bool   `mapstructure:"enable_introspection"`
+	MaxComplexity       int    `mapstructure:"max_complexity"`
+	MaxDepth            int    `mapstructure:"max_depth"`
+	RateLimitPerMinute  int    `mapstructure:"rate_limit_per_minute"`
+	WebSocketEnabled    bool   `mapstructure:"websocket_enabled"`
+}
+
 // LoadConfig loads configuration from file and environment variables
 func LoadConfig(configPath string) (*Config, error) {
 	viper.SetConfigName("config")
@@ -102,24 +117,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	// Explicit bindings for commonly used env vars that don't match the pattern
-	// docker-compose uses DATABASE_NAME, but viper expects DATABASE_DBNAME
-	viper.BindEnv("database.dbname", "DATABASE_NAME")
-	viper.BindEnv("database.host", "DATABASE_HOST")
-	viper.BindEnv("database.port", "DATABASE_PORT")
-	viper.BindEnv("database.user", "DATABASE_USER")
-	viper.BindEnv("database.password", "DATABASE_PASSWORD")
-	viper.BindEnv("redis.host", "REDIS_HOST")
-	viper.BindEnv("redis.port", "REDIS_PORT")
-	viper.BindEnv("redis.password", "REDIS_PASSWORD")
-	viper.BindEnv("jwt.secret", "JWT_SECRET")
-	viper.BindEnv("jwt.expiration_hours", "JWT_EXPIRATION_HOURS")
-	viper.BindEnv("jwt.refresh_hours", "JWT_REFRESH_HOURS")
-	viper.BindEnv("server.host", "SERVER_HOST")
-	viper.BindEnv("app.environment", "APP_ENVIRONMENT")
-	viper.BindEnv("kafka.brokers", "KAFKA_BROKERS")
-	viper.BindEnv("kafka.enabled", "KAFKA_ENABLED")
-	viper.BindEnv("kafka.group_id", "KAFKA_GROUP_ID")
+	// Bind specific environment variables to handle naming inconsistencies
+	// This ensures DATABASE_NAME maps to database.dbname
+	bindEnvVars()
 
 	if err := viper.ReadInConfig(); err != nil {
 		// Config file not found, use defaults and env vars
@@ -136,22 +136,51 @@ func LoadConfig(configPath string) (*Config, error) {
 	return &config, nil
 }
 
+// bindEnvVars explicitly binds environment variables to configuration keys
+// This handles naming inconsistencies (e.g., DATABASE_NAME -> database.dbname)
+func bindEnvVars() {
+	// Database environment variables
+	viper.BindEnv("database.host", "DATABASE_HOST")
+	viper.BindEnv("database.port", "DATABASE_PORT")
+	viper.BindEnv("database.user", "DATABASE_USER")
+	viper.BindEnv("database.password", "DATABASE_PASSWORD")
+	viper.BindEnv("database.dbname", "DATABASE_NAME") // Maps DATABASE_NAME to dbname
+	viper.BindEnv("database.sslmode", "DATABASE_SSLMODE", "DATABASE_SSL_MODE")
+	viper.BindEnv("database.timezone", "DATABASE_TIMEZONE", "DATABASE_TIME_ZONE")
+
+	// Redis environment variables
+	viper.BindEnv("redis.host", "REDIS_HOST")
+	viper.BindEnv("redis.port", "REDIS_PORT")
+	viper.BindEnv("redis.password", "REDIS_PASSWORD")
+	viper.BindEnv("redis.db", "REDIS_DB")
+
+	// JWT environment variables
+	viper.BindEnv("jwt.secret", "JWT_SECRET")
+	viper.BindEnv("jwt.expiration_hours", "JWT_EXPIRATION_HOURS")
+	viper.BindEnv("jwt.refresh_hours", "JWT_REFRESH_HOURS")
+
+	// App environment variables
+	viper.BindEnv("app.environment", "APP_ENVIRONMENT")
+	viper.BindEnv("app.debug", "APP_DEBUG")
+	viper.BindEnv("app.log_level", "LOG_LEVEL")
+}
+
 // setDefaults sets default configuration values
 func setDefaults() {
 	// Server defaults
-	viper.SetDefault("server.host", "localhost")
+	viper.SetDefault("server.host", "0.0.0.0")
 	viper.SetDefault("server.port", 8090)
 	viper.SetDefault("server.mode", "debug")
-	viper.SetDefault("server.read_timeout", 10)
-	viper.SetDefault("server.write_timeout", 10)
+	viper.SetDefault("server.read_timeout", 120)  // Increased for large OCR uploads
+	viper.SetDefault("server.write_timeout", 120) // Increased for OCR processing
 	viper.SetDefault("server.idle_timeout", 120)
 
 	// Database defaults
 	viper.SetDefault("database.host", "localhost")
 	viper.SetDefault("database.port", 5432)
-	viper.SetDefault("database.user", "postgres")
-	viper.SetDefault("database.password", "password")
-	viper.SetDefault("database.dbname", "liquorpro")
+	viper.SetDefault("database.user", "liquorpro_prod")
+	viper.SetDefault("database.password", "liquorpro_password")
+	viper.SetDefault("database.dbname", "liquorpro_production")
 	viper.SetDefault("database.sslmode", "disable")
 	viper.SetDefault("database.timezone", "UTC")
 
@@ -163,14 +192,9 @@ func setDefaults() {
 
 	// JWT defaults
 	viper.SetDefault("jwt.secret", "your-secret-key")
-	viper.SetDefault("jwt.expiration_hours", 24)  // 24 hours
-	viper.SetDefault("jwt.refresh_hours", 168)    // 7 days
+	viper.SetDefault("jwt.expiration_hours", 168)  // 7 days — prevents frequent re-login
+	viper.SetDefault("jwt.refresh_hours", 720)    // 30 days
 	viper.SetDefault("jwt.issuer", "liquorpro")
-
-	// Kafka defaults
-	viper.SetDefault("kafka.brokers", "")
-	viper.SetDefault("kafka.enabled", false)
-	viper.SetDefault("kafka.group_id", "liquorpro")
 
 	// App defaults
 	viper.SetDefault("app.name", "LiquorPro")
@@ -180,21 +204,38 @@ func setDefaults() {
 	viper.SetDefault("app.log_level", "info")
 
 	// Services defaults
-	viper.SetDefault("services.gateway.host", "localhost")
+	viper.SetDefault("services.gateway.host", "0.0.0.0")
 	viper.SetDefault("services.gateway.port", 8090)
 	viper.SetDefault("services.gateway.url", "http://localhost:8090")
-	viper.SetDefault("services.auth.host", "localhost")
+	viper.SetDefault("services.auth.host", "0.0.0.0")
 	viper.SetDefault("services.auth.port", 8091)
 	viper.SetDefault("services.auth.url", "http://localhost:8091")
-	viper.SetDefault("services.sales.host", "localhost")
+	viper.SetDefault("services.sales.host", "0.0.0.0")
 	viper.SetDefault("services.sales.port", 8092)
 	viper.SetDefault("services.sales.url", "http://localhost:8092")
-	viper.SetDefault("services.inventory.host", "localhost")
+	viper.SetDefault("services.inventory.host", "0.0.0.0")
 	viper.SetDefault("services.inventory.port", 8093)
 	viper.SetDefault("services.inventory.url", "http://localhost:8093")
-	viper.SetDefault("services.finance.host", "localhost")
+	viper.SetDefault("services.finance.host", "0.0.0.0")
 	viper.SetDefault("services.finance.port", 8094)
 	viper.SetDefault("services.finance.url", "http://localhost:8094")
+
+	// Kafka defaults (optional, graceful degradation if not available)
+	viper.SetDefault("kafka.enabled", false) // Disabled by default
+	viper.SetDefault("kafka.brokers", []string{"localhost:9092"})
+	viper.SetDefault("kafka.group_id", "liquorpro-group")
+	viper.SetDefault("kafka.batch_size", 100)
+	viper.SetDefault("kafka.batch_timeout", 1000)
+	viper.SetDefault("kafka.retry_attempts", 3)
+
+	// GraphQL defaults
+	viper.SetDefault("graphql.enabled", true) // Enabled by default
+	viper.SetDefault("graphql.enable_playground", true)
+	viper.SetDefault("graphql.enable_introspection", true)
+	viper.SetDefault("graphql.max_complexity", 1000)
+	viper.SetDefault("graphql.max_depth", 10)
+	viper.SetDefault("graphql.rate_limit_per_minute", 100)
+	viper.SetDefault("graphql.websocket_enabled", true)
 }
 
 // GetDatabaseConnectionString returns the database connection string

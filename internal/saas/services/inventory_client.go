@@ -215,3 +215,86 @@ func (c *InventoryClient) NotifyInventoryOnBrandAssignment(tenantID uuid.UUID, b
 
 	return nil
 }
+
+// StockInitializationItem represents a single stock item to initialize
+type StockInitializationItem struct {
+	VariantID uuid.UUID `json:"variant_id"`
+	ProductID uuid.UUID `json:"product_id"` // Same as variant_id for now
+	Quantity  int       `json:"quantity"`
+}
+
+// StockInitializationRequest represents request to initialize stock for a shop
+type StockInitializationRequest struct {
+	TenantID uuid.UUID                 `json:"tenant_id"`
+	ShopID   uuid.UUID                 `json:"shop_id"`
+	Items    []StockInitializationItem `json:"items"`
+	Source   string                    `json:"source"` // "bulk_import", "manual", etc.
+}
+
+// StockInitializationResponse represents response from stock initialization
+type StockInitializationResponse struct {
+	Success         bool     `json:"success"`
+	ItemsCreated    int      `json:"items_created"`
+	ItemsFailed     int      `json:"items_failed"`
+	TotalQuantity   int      `json:"total_quantity"`
+	Errors          []string `json:"errors,omitempty"`
+}
+
+// InitializeStockForShop initializes stock for specific variants in a shop
+func (c *InventoryClient) InitializeStockForShop(request StockInitializationRequest) (*StockInitializationResponse, error) {
+	// Prepare the request
+	jsonData, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stock initialization request: %w", err)
+	}
+
+	// Create HTTP request to inventory service
+	url := fmt.Sprintf("%s/api/inventory/stocks/initialize", c.baseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Service", "saas-admin")
+	req.Header.Set("X-Tenant-ID", request.TenantID.String())
+
+	c.logger.Info("Initializing stock for shop",
+		zap.String("tenant_id", request.TenantID.String()),
+		zap.String("shop_id", request.ShopID.String()),
+		zap.Int("items", len(request.Items)))
+
+	// Send request
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.logger.Error("Failed to initialize stock",
+			zap.Error(err),
+			zap.String("tenant_id", request.TenantID.String()),
+			zap.String("shop_id", request.ShopID.String()))
+		return nil, fmt.Errorf("failed to call inventory service: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Parse response
+	var stockResponse StockInitializationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&stockResponse); err != nil {
+		c.logger.Error("Failed to parse stock initialization response", zap.Error(err))
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		c.logger.Error("Stock initialization failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("tenant_id", request.TenantID.String()),
+			zap.String("shop_id", request.ShopID.String()))
+		return &stockResponse, fmt.Errorf("inventory service returned status %d", resp.StatusCode)
+	}
+
+	c.logger.Info("Successfully initialized stock",
+		zap.String("tenant_id", request.TenantID.String()),
+		zap.String("shop_id", request.ShopID.String()),
+		zap.Int("items_created", stockResponse.ItemsCreated),
+		zap.Int("total_quantity", stockResponse.TotalQuantity))
+
+	return &stockResponse, nil
+}

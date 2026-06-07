@@ -2,12 +2,11 @@ package services
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
+	"log"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,15 +14,15 @@ import (
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
 	"github.com/liquorpro/go-backend/pkg/shared/models"
+	"github.com/liquorpro/go-backend/pkg/shared/sizing"
 	"github.com/liquorpro/go-backend/pkg/shared/utils"
 	"gorm.io/gorm"
 )
 
 // ProductService handles product management operations
 type ProductService struct {
-	db         *database.DB
-	cache      *cache.Cache
-	saasClient *SaaSBrandClient
+	db    *database.DB
+	cache *cache.Cache
 }
 
 // NewProductService creates a new product service
@@ -34,14 +33,15 @@ func NewProductService(db *database.DB, cache *cache.Cache) *ProductService {
 	}
 }
 
-// SetSaaSClient sets the SaaS client for category lookups
-func (s *ProductService) SetSaaSClient(client *SaaSBrandClient) {
-	s.saasClient = client
-}
-
 // ProductRequest represents product creation/update request
 type ProductRequest struct {
 	Name           string    `json:"name" binding:"required"`
+	DisplayName    string    `json:"display_name"`
+	// DisplayNameBoldStart + DisplayNameBoldLength jointly define the bold
+	// range [start, start+length) inside DisplayName. Start defaults to 0
+	// (prefix); length 0/NULL = no styling.
+	DisplayNameBoldStart  *int      `json:"display_name_bold_start,omitempty"`
+	DisplayNameBoldLength *int      `json:"display_name_bold_length,omitempty"`
 	CategoryID     uuid.UUID `json:"category_id" binding:"required"`
 	BrandID        uuid.UUID `json:"brand_id" binding:"required"`
 	Size           string    `json:"size" binding:"required"`
@@ -49,40 +49,52 @@ type ProductRequest struct {
 	Description    string    `json:"description"`
 	Barcode        string    `json:"barcode"`
 	SKU            string    `json:"sku"`
-	ImageURL       string    `json:"image_url"`
-	ImageBase64    string    `json:"image_base64"`
-	CostPrice      float64   `json:"cost_price" binding:"required,gte=0"`
-	DutyFee        float64   `json:"duty_fee"`
-	TotalCost      float64   `json:"total_cost"`
-	SellingPrice   float64   `json:"selling_price" binding:"required,gte=0"`
-	MRP            float64   `json:"mrp"`
+	CostPrice      float64   `json:"cost_price" binding:"required,gt=0"`
+	SellingPrice   float64   `json:"selling_price" binding:"required,gt=0"`
+	MRP            float64   `json:"mrp" binding:"required,gt=0"`
 	IsActive       bool      `json:"is_active"`
 }
 
 // ProductResponse represents product in responses
 type ProductResponse struct {
-	ID              uuid.UUID  `json:"id"`
-	Name            string     `json:"name"`
-	CategoryID      uuid.UUID  `json:"category_id"`
-	CategoryName    string     `json:"category_name"`
-	SubcategoryID   *uuid.UUID `json:"subcategory_id,omitempty"`
-	SubcategoryName string     `json:"subcategory_name,omitempty"`
-	BrandID         uuid.UUID  `json:"brand_id"`
-	BrandName       string     `json:"brand_name"`
-	Size            string     `json:"size"`
-	AlcoholContent  float64    `json:"alcohol_content"`
-	Description     string     `json:"description"`
-	Barcode         string     `json:"barcode"`
-	SKU             string     `json:"sku"`
-	ImageURL        string     `json:"image_url"`
-	CostPrice       float64    `json:"cost_price"`
-	DutyFee         float64    `json:"duty_fee"`
-	SellingPrice    float64    `json:"selling_price"`
-	MRP             float64    `json:"mrp"`
-	IsActive        bool       `json:"is_active"`
-	CurrentStock    int        `json:"current_stock"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID             uuid.UUID `json:"id"`
+	Name           string    `json:"name"`
+	CategoryID     uuid.UUID `json:"category_id"`
+	CategoryName   string    `json:"category_name"`
+	BrandID        uuid.UUID `json:"brand_id"`
+	BrandName      string    `json:"brand_name"`
+	Size           string    `json:"size"`
+	AlcoholContent float64   `json:"alcohol_content"`
+	Description    string    `json:"description"`
+	Barcode        string    `json:"barcode"`
+	SKU            string    `json:"sku"`
+	CostPrice      float64   `json:"cost_price"`
+	SellingPrice   float64   `json:"selling_price"`
+	MRP            float64   `json:"mrp"`
+	Price          float64   `json:"price"`
+	DisplayName    string    `json:"display_name"`
+	DisplayNameBoldStart  *int `json:"display_name_bold_start,omitempty"`
+	DisplayNameBoldLength *int `json:"display_name_bold_length,omitempty"`
+	IsActive       bool      `json:"is_active"`
+	CurrentStock   int       `json:"current_stock"`
+	SaasBrandID    *uuid.UUID `json:"saas_brand_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	// Purchase-priority enrichments (only populated when ProductFilters.PurchasePriority=true).
+	// PurchasePriority: 1=bought in last 90d, 2=currently in stock, 3=ever bought, 4=master only.
+	// LastPurchasedAt is the most recent purchase_date for this product in this shop, or nil.
+	PurchasePriority *int       `json:"purchase_priority,omitempty"`
+	LastPurchasedAt  *time.Time `json:"last_purchased_at,omitempty"`
+	// v1.0.250 — Front/Back photo verification fields surfaced so the same
+	// images appear everywhere the product is shown (inventory list, Manual
+	// Purchase picker, edit screen). When verified=true the URL is durable
+	// (/uploads/stock_setup/verifications/... served via nginx).
+	FrontImageURL         string     `json:"front_image_url,omitempty"`
+	BackImageURL          string     `json:"back_image_url,omitempty"`
+	BackImageMRP          float64    `json:"back_image_mrp,omitempty"`
+	VerifiedViaImageFront bool       `json:"verified_via_image_front,omitempty"`
+	VerifiedViaImageBack  bool       `json:"verified_via_image_back,omitempty"`
+	PhotoVerifiedAt       *time.Time `json:"photo_verified_at,omitempty"`
 }
 
 // BrandPricingRequest represents brand pricing request
@@ -108,6 +120,17 @@ func (s *ProductService) CreateProduct(ctx context.Context, req ProductRequest, 
 		return nil, errors.New("brand not found")
 	}
 
+	// v1.0.219 — canonicalise size at the write boundary so garbage like
+	// "180ML1" or "8375" never lands in products.size. Rejecting at the API
+	// keeps the chip strips honest in every downstream screen.
+	if req.Size != "" {
+		canonical, _, _, ok := sizing.Canonicalize(req.Size, sizing.CategoryIsBeer(category.Name))
+		if !ok {
+			return nil, fmt.Errorf("invalid size '%s' — must be one of: 90ml, 180ml, 375ml, 750ml, 1000ml (or 330ml/500ml/650ml for beer)", req.Size)
+		}
+		req.Size = canonical
+	}
+
 	// Check for duplicate SKU if provided
 	if req.SKU != "" {
 		var existing models.Product
@@ -119,37 +142,52 @@ func (s *ProductService) CreateProduct(ctx context.Context, req ProductRequest, 
 		req.SKU = s.generateSKU(brand.Name, req.Size)
 	}
 
-	// Normalize size to uppercase for consistency (prevents "500ml" and "500ML" duplicates)
-	normalizedSize := normalizeSize(req.Size)
-
-	// Process product image (base64 decode and save)
-	imageURL, err := s.processProductImage(tenantID, req.ImageBase64, req.ImageURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process product image: %w", err)
+	// Auto-set display_name from brand name if not provided
+	displayName := req.DisplayName
+	if displayName == "" {
+		displayName = brand.Name
 	}
+
+	// Auto-link to master catalog if a confident match exists (saas_brands + brand_variants).
+	// Keeps manually-created products in sync with the authoritative excise catalog, which
+	// future AI matching, reporting, and duplicate prevention rely on.
+	saasBrandID, saasVariantID := s.findMasterLinkage(tenantID, req.Name, brand.Name, req.Size, req.MRP)
+
+	// Normalize bold range (start, length) so it never exceeds display_name bounds.
+	boldStart, boldLen := sanitizeBoldRange(req.DisplayNameBoldStart, req.DisplayNameBoldLength, displayName)
 
 	// Create product
 	product := models.Product{
-		TenantModel:    models.TenantModel{TenantID: &tenantID},
-		Name:           req.Name,
+		TenantModel:           models.TenantModel{TenantID: &tenantID},
+		Name:                  req.Name,
+		DisplayName:           displayName,
+		DisplayNameBoldStart:  boldStart,
+		DisplayNameBoldLength: boldLen,
 		CategoryID:     req.CategoryID,
 		BrandID:        req.BrandID,
-		Size:           normalizedSize,
+		SaaSBrandID:    saasBrandID,
+		SaaSVariantID:  saasVariantID,
+		Size:           req.Size,
 		AlcoholContent: req.AlcoholContent,
 		Description:    req.Description,
 		Barcode:        req.Barcode,
 		SKU:            req.SKU,
-		ImageURL:       imageURL,
 		CostPrice:      req.CostPrice,
 		SellingPrice:   req.SellingPrice,
 		MRP:            req.MRP,
 		IsActive:       req.IsActive,
+		CreatedVia:     "manual", // 2026-05-18 — provenance (exempt from AI-Purchase image gate)
 		Category:       &category,
 		Brand:          &brand,
 	}
 
 	if err := s.db.Create(&product).Error; err != nil {
 		return nil, fmt.Errorf("failed to create product: %w", err)
+	}
+	if saasBrandID != nil {
+		// Log when linkage is established so we can track adoption from logs without
+		// querying the DB.
+		fmt.Printf("ProductService: Created product '%s' linked to master saas_brand_id=%s\n", req.Name, saasBrandID.String()[:8])
 	}
 
 	// Clear cache
@@ -164,64 +202,218 @@ func (s *ProductService) GetProducts(ctx context.Context, tenantID uuid.UUID, fi
 	var totalCount int64
 
 	query := s.db.Model(&models.Product{}).
-		Where("products.tenant_id = ?", tenantID).
+		Where("tenant_id = ?", tenantID).
 		Preload("Category").
-		Preload("Subcategory").
 		Preload("Brand")
 
-	// Note: shop_id filter is used for stock levels only, not for filtering products
-	// All tenant products are shown, with shop-specific stock quantities
-
 	// Apply filters
+	// Priority: CategoryIDs (multiple) > CategoryID (single)
 	if len(filters.CategoryIDs) > 0 {
-		// Multiple categories filter (takes precedence over single CategoryID)
-		query = query.Where("products.category_id IN ?", filters.CategoryIDs)
+		query = query.Where("category_id IN ?", filters.CategoryIDs)
 	} else if filters.CategoryID != uuid.Nil {
-		query = query.Where("products.category_id = ?", filters.CategoryID)
+		query = query.Where("category_id = ?", filters.CategoryID)
 	}
 	if filters.BrandID != uuid.Nil {
-		query = query.Where("products.brand_id = ?", filters.BrandID)
+		query = query.Where("brand_id = ?", filters.BrandID)
 	}
-	if filters.IsActive != nil {
-		query = query.Where("products.is_active = ?", *filters.IsActive)
-	}
-	if filters.Search != "" {
-		searchPattern := "%" + filters.Search + "%"
-		query = query.Where("products.name ILIKE ? OR products.sku ILIKE ? OR products.barcode ILIKE ?",
-			searchPattern, searchPattern, searchPattern)
+	// Ownership filter: restrict to products this shop OWNS, regardless of
+	// stock presence. Unlike ShopID (stock-presence), this is the correct
+	// scope for a per-shop picker — a manager setting up a shop's shelf must
+	// only see/pick that shop's own SKUs, so we never re-introduce a link to
+	// another shop's product (which trg_block_crossshop_stock rejects at
+	// approve). Applied to the COUNT, the list, and the TotalStock subquery
+	// because they all derive from this same `query`.
+	if filters.OwnerShopID != uuid.Nil {
+		query = query.Where("products.shop_id = ?", filters.OwnerShopID)
 	}
 	if filters.Size != "" {
-		query = query.Where("UPPER(products.size) = UPPER(?)", filters.Size)
+		// Check if this is a range label (contains parenthesis or "Below" or "Bulk")
+		isRange := false
+		var minML, maxML int
+		allRanges := append(beerSizeRanges, nonBeerSizeRanges...)
+		for _, rng := range allRanges {
+			if strings.EqualFold(rng.Label, filters.Size) {
+				isRange = true
+				minML = rng.MinML
+				maxML = rng.MaxML
+				break
+			}
+		}
+		if isRange {
+			// Range-based filter: find products whose size in ml falls within range
+			// Build list of matching sizes from existing products
+			var matchingSizes []string
+			s.db.WithContext(ctx).Table("products").
+				Select("DISTINCT UPPER(size)").
+				Where("tenant_id = ? AND deleted_at IS NULL AND is_active = true AND size IS NOT NULL AND size != ''", tenantID).
+				Scan(&matchingSizes)
+			var filteredSizes []string
+			for _, sz := range matchingSizes {
+				ml := extractML(sz)
+				if ml >= minML && ml <= maxML {
+					filteredSizes = append(filteredSizes, sz)
+				}
+			}
+			if len(filteredSizes) > 0 {
+				query = query.Where("UPPER(size) IN ?", filteredSizes)
+			} else {
+				query = query.Where("1 = 0") // no matching sizes
+			}
+		} else {
+			// Exact size match (backward compatible)
+			query = query.Where("UPPER(size) = UPPER(?)", filters.Size)
+		}
+	}
+	if filters.IsActive != nil {
+		query = query.Where("is_active = ?", *filters.IsActive)
+	}
+	if filters.Search != "" {
+		// Tokenized AND search across the fields the user actually sees
+		// in the picker: tenant name/sku/barcode, the tenant's display_name
+		// override, and the master saas_brand name (which is what falls
+		// back into the picker label when display_name is empty). Each
+		// whitespace-separated token must hit at least one of those fields.
+		//
+		// Why not a single "%<query>%" substring: real catalog names
+		// interleave brand + line + variant + size ("M2 Magic Moments
+		// Jamun Spicymint Flavoured Vodka"), so a user typing
+		// "m2 jamun" gets zero hits from plain ILIKE. Tokenizing fixes
+		// that without needing pg_trgm.
+		//
+		// Why EXISTS instead of JOIN on saas_brands: several column names
+		// (name, size, is_active, deleted_at) are also present on
+		// saas_brands, and the unqualified Where clauses earlier in this
+		// function would become ambiguous under a JOIN.
+		rawTokens := strings.Fields(strings.ToLower(filters.Search))
+		tokens := make([]string, 0, len(rawTokens))
+		for _, t := range rawTokens {
+			if len(t) < 2 {
+				continue
+			}
+			tokens = append(tokens, t)
+			if len(tokens) >= 8 {
+				break
+			}
+		}
+		for _, tok := range tokens {
+			pattern := "%" + tok + "%"
+			query = query.Where(
+				"products.name ILIKE ? OR products.sku ILIKE ? OR products.barcode ILIKE ? OR products.display_name ILIKE ? OR EXISTS (SELECT 1 FROM saas_brands sb WHERE sb.id = products.saas_brand_id AND sb.deleted_at IS NULL AND sb.name ILIKE ?)",
+				pattern, pattern, pattern, pattern, pattern,
+			)
+		}
+	}
+	// Shop filter: only return products that have a stock record in the specified shop.
+	// PurchasePriority intentionally bypasses both the in-shop filter AND the zero-stock
+	// filter so the entire master catalog is available — the picker sorts master items
+	// to the bottom rather than hiding them. The operator can still purchase a brand-new
+	// SKU on a one-off basis without admins having to seed inventory first.
+	if filters.ShopID != uuid.Nil && !filters.PurchasePriority {
+		query = query.Where("products.id IN (SELECT product_id FROM stocks WHERE shop_id = ? AND deleted_at IS NULL)", filters.ShopID)
+
+		// Hide products with zero stock in this shop by default — the inventory
+		// list should show what you HAVE, not every SKU you've ever stocked.
+		// Tushar's Mahua Khera shop accumulated 22 zero-stock SKUs from prior
+		// stock-setup runs that overwrote rows to 0 (manual entries, swap-pick
+		// failures, sold-out items). Showing them as noisy 0-rows obscures the
+		// real inventory. Admins pass ?include_zero_stock=true to see everything
+		// (e.g. for cleanup, re-stocking decisions).
+		if !filters.IncludeZeroStock {
+			query = query.Where(
+				`COALESCE((SELECT SUM(quantity) FROM stocks WHERE product_id = products.id AND shop_id = ? AND deleted_at IS NULL), 0) > 0`,
+				filters.ShopID,
+			)
+		}
 	}
 
 	// Count total records
-	countQuery := query.Session(&gorm.Session{})
-	if err := countQuery.Count(&totalCount).Error; err != nil {
+	if err := query.Count(&totalCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count products: %w", err)
 	}
 
-	// Get paginated records
-	// Use consistent multi-column sort order to prevent products "jumping" during pagination
-	// Sort by: size DESC (750ML first), selling_price ASC, product ID (for tie-breaking)
-	offset := (filters.Page - 1) * filters.PageSize
-	if err := query.Offset(offset).
-		Limit(filters.PageSize).
-		Order("products.size DESC, products.selling_price ASC, products.id ASC").
-		Find(&products).Error; err != nil {
+	// v1.0.299 — TotalStock: SUM of stocks.quantity over the full filtered
+	// set at this shop, independent of pagination. The Flutter inventory-list
+	// header shows this so the visible "X pcs" matches the approved record
+	// total regardless of which page is loaded. Previously the header summed
+	// only the current page (kProductPageSize=30 in Flutter) — chhotu's 180ml
+	// record had 31 products with the 31st on page 2 carrying 141 units, so
+	// the header read 2770 instead of 2911. With this field the header is
+	// always SUM(stocks.quantity) across every product matching the same
+	// filters as TotalCount, computed in a single SQL aggregate.
+	//
+	// Only computed when a shop is filtered (stock is per-shop). When no
+	// shop is in scope (admin tenant-wide list), totalStock stays 0 and the
+	// Flutter side falls back to its previous per-page sum.
+	var totalStock int64
+	if filters.ShopID != uuid.Nil && !filters.PurchasePriority {
+		// Reuse the exact same query (already carries WHERE-clause filters
+		// for tenant, category, size, search, is_active, shop in-stock, etc.)
+		// but project the stock SUM and reset pagination/order so Count's
+		// LIMIT/OFFSET don't apply. GORM's .Session(&gorm.Session{}) gives
+		// us a fresh statement built from the same WHERE tree.
+		stockSubq := s.db.WithContext(ctx).
+			Table("(?) AS p_filtered", query.Session(&gorm.Session{}).Select("products.id")).
+			Select("COALESCE(SUM(stocks.quantity), 0)").
+			Joins("JOIN stocks ON stocks.product_id = p_filtered.id AND stocks.shop_id = ? AND stocks.deleted_at IS NULL", filters.ShopID)
+		if err := stockSubq.Row().Scan(&totalStock); err != nil {
+			// Non-fatal: the page list still works, header falls back.
+			log.Printf("GetProducts: total_stock SUM failed (non-fatal): %v", err)
+			totalStock = 0
+		}
+	}
+
+	// Pagination: in PurchasePriority mode we fetch the entire matching set
+	// (no SQL offset/limit) so the Go-side priority sort sees every row, then
+	// apply the limit/offset in memory. Master catalogs cap at ~2000 rows for
+	// liquor SKUs, well under any concerning memory footprint.
+	dbQuery := query
+	if !filters.PurchasePriority {
+		offset := (filters.Page - 1) * filters.PageSize
+		dbQuery = dbQuery.Offset(offset).Limit(filters.PageSize).Order("name ASC")
+	} else {
+		dbQuery = dbQuery.Order("LOWER(products.name) ASC")
+	}
+	if err := dbQuery.Find(&products).Error; err != nil {
 		return nil, fmt.Errorf("failed to get products: %w", err)
 	}
 
-	// Get stock levels for products (shop-specific if shop_id provided)
-	stockMap := s.getStockLevelsForShop(tenantID, filters.ShopID, products)
-
-	// Build SaaS category/subcategory lookup maps for products with missing local categories
-	saasCategoryMap, saasSubcategoryMap := s.getSaaSCategoryMaps()
-
 	// Convert to response format
+	// NOTE: We don't include stock here because stock is shop-specific
+	// and products are tenant-wide. Stock should be fetched separately
+	// via the /api/inventory/stock endpoint with shop_id parameter.
 	responses := make([]*ProductResponse, len(products))
 	for i, product := range products {
-		stock := stockMap[product.ID]
-		responses[i] = s.mapProductToResponseWithSaaS(&product, stock, saasCategoryMap, saasSubcategoryMap)
+		responses[i] = s.mapProductToResponse(&product, 0)
+	}
+
+	// Backfill display_name_bold_* from the linked master saas_brand when the
+	// product row doesn't have its own bold range configured. Only 15/209
+	// products have bold configured locally; most inherit from the master
+	// catalog (1600+ rows), so without this fallback the Flutter app + web
+	// admin render everything as a flat un-emphasized line and the
+	// "bold distinctive identifier" UX the master catalog was designed for
+	// never fires on Inventory / Daily Sales Entry rows.
+	s.applyDisplayBoldFallback(responses, products)
+
+	// Purchase-priority enrichment: tag each product with a tier (1-4) based on
+	// recent purchase history + current stock for the requested shop, then sort
+	// so "what the operator actually buys" floats to the top. Saves the user
+	// scrolling through hundreds of master-catalog SKUs they will never order.
+	if filters.PurchasePriority && filters.ShopID != uuid.Nil && len(responses) > 0 {
+		s.enrichWithPurchasePriority(ctx, responses, filters.ShopID)
+
+		// Apply offset/limit in Go after the priority sort so the frontend
+		// still sees pagination semantics.
+		offset := (filters.Page - 1) * filters.PageSize
+		if offset > len(responses) {
+			offset = len(responses)
+		}
+		end := offset + filters.PageSize
+		if end > len(responses) {
+			end = len(responses)
+		}
+		totalCount = int64(len(responses))
+		responses = responses[offset:end]
 	}
 
 	totalPages := int((totalCount + int64(filters.PageSize) - 1) / int64(filters.PageSize))
@@ -232,7 +424,111 @@ func (s *ProductService) GetProducts(ctx context.Context, tenantID uuid.UUID, fi
 		Page:       filters.Page,
 		PageSize:   filters.PageSize,
 		TotalPages: totalPages,
+		TotalStock: totalStock,
 	}, nil
+}
+
+// enrichWithPurchasePriority adds purchase_priority + last_purchased_at + current_stock
+// to each ProductResponse and re-sorts the slice so tier-1 (recently purchased) products
+// float to the top. Two batched queries: one MAX(purchase_date) per product_id from
+// stock_purchases joined to stock_purchase_items in this shop, one SUM(stock.quantity)
+// per product_id in this shop. Single sweep through responses to assign tiers.
+func (s *ProductService) enrichWithPurchasePriority(ctx context.Context, responses []*ProductResponse, shopID uuid.UUID) {
+	if len(responses) == 0 {
+		return
+	}
+	productIDs := make([]uuid.UUID, len(responses))
+	for i, r := range responses {
+		productIDs[i] = r.ID
+	}
+
+	type purchaseRow struct {
+		ProductID       uuid.UUID `gorm:"column:product_id"`
+		LastPurchasedAt time.Time `gorm:"column:last_purchased_at"`
+	}
+	var purchaseRows []purchaseRow
+	if err := s.db.WithContext(ctx).Raw(`
+		SELECT spi.product_id AS product_id, MAX(sp.purchase_date) AS last_purchased_at
+		FROM stock_purchase_items spi
+		JOIN stock_purchases sp ON sp.id = spi.purchase_id
+		WHERE sp.shop_id = ? AND spi.product_id IN ? AND sp.deleted_at IS NULL AND spi.deleted_at IS NULL
+		GROUP BY spi.product_id
+	`, shopID, productIDs).Scan(&purchaseRows).Error; err != nil {
+		// Soft failure: enrichment is advisory; on error fall back to all-tier-4.
+		purchaseRows = nil
+	}
+	lastPurchase := make(map[uuid.UUID]time.Time, len(purchaseRows))
+	for _, r := range purchaseRows {
+		lastPurchase[r.ProductID] = r.LastPurchasedAt
+	}
+
+	type stockRow struct {
+		ProductID uuid.UUID `gorm:"column:product_id"`
+		Qty       int       `gorm:"column:qty"`
+	}
+	var stockRows []stockRow
+	if err := s.db.WithContext(ctx).Raw(`
+		SELECT product_id, COALESCE(SUM(quantity), 0) AS qty
+		FROM stocks
+		WHERE shop_id = ? AND product_id IN ? AND deleted_at IS NULL
+		GROUP BY product_id
+	`, shopID, productIDs).Scan(&stockRows).Error; err != nil {
+		stockRows = nil
+	}
+	currentStock := make(map[uuid.UUID]int, len(stockRows))
+	for _, r := range stockRows {
+		currentStock[r.ProductID] = r.Qty
+	}
+
+	ninetyDaysAgo := time.Now().Add(-90 * 24 * time.Hour)
+	for _, resp := range responses {
+		if t, ok := lastPurchase[resp.ID]; ok {
+			tCopy := t
+			resp.LastPurchasedAt = &tCopy
+		}
+		if qty, ok := currentStock[resp.ID]; ok && qty > 0 {
+			resp.CurrentStock = qty
+		}
+		var tier int
+		switch {
+		case resp.LastPurchasedAt != nil && resp.LastPurchasedAt.After(ninetyDaysAgo):
+			tier = 1
+		case resp.CurrentStock > 0:
+			tier = 2
+		case resp.LastPurchasedAt != nil:
+			tier = 3
+		default:
+			tier = 4
+		}
+		t := tier
+		resp.PurchasePriority = &t
+	}
+
+	// Stable sort: tier asc, then last_purchased_at desc within tier (most
+	// recent re-orders show first), then name asc as a final tiebreak.
+	sort.SliceStable(responses, func(i, j int) bool {
+		ti, tj := 4, 4
+		if responses[i].PurchasePriority != nil {
+			ti = *responses[i].PurchasePriority
+		}
+		if responses[j].PurchasePriority != nil {
+			tj = *responses[j].PurchasePriority
+		}
+		if ti != tj {
+			return ti < tj
+		}
+		li, lj := responses[i].LastPurchasedAt, responses[j].LastPurchasedAt
+		if li != nil && lj != nil && !li.Equal(*lj) {
+			return li.After(*lj)
+		}
+		if li != nil && lj == nil {
+			return true
+		}
+		if li == nil && lj != nil {
+			return false
+		}
+		return strings.ToLower(responses[i].Name) < strings.ToLower(responses[j].Name)
+	})
 }
 
 // GetProductByID returns product by ID
@@ -251,14 +547,12 @@ func (s *ProductService) GetProductByID(ctx context.Context, productID, tenantID
 		return nil, fmt.Errorf("failed to get product: %w", err)
 	}
 
-	// Get stock level
-	var totalStock int
-	s.db.Model(&models.Stock{}).
-		Where("product_id = ? AND tenant_id = ?", productID, tenantID).
-		Select("COALESCE(SUM(quantity), 0)").
-		Scan(&totalStock)
-
-	return s.mapProductToResponse(&product, totalStock), nil
+	// NOTE: We don't include stock here because stock is shop-specific
+	// and products are tenant-wide. Stock should be fetched separately
+	// via the /api/inventory/stock endpoint with shop_id parameter.
+	resp := s.mapProductToResponse(&product, 0)
+	s.applyDisplayBoldFallback([]*ProductResponse{resp}, []models.Product{product})
+	return resp, nil
 }
 
 // UpdateProduct updates product information
@@ -268,16 +562,6 @@ func (s *ProductService) UpdateProduct(ctx context.Context, productID, tenantID 
 	err := s.db.Where("id = ? AND tenant_id = ?", productID, tenantID).First(&product).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// Check if product exists at all (for better error messaging)
-			var anyProduct models.Product
-			if checkErr := s.db.Unscoped().Where("id = ?", productID).First(&anyProduct).Error; checkErr == nil {
-				if anyProduct.TenantID != nil && *anyProduct.TenantID != tenantID {
-					return nil, errors.New("product not found for this tenant")
-				}
-				if anyProduct.DeletedAt.Valid {
-					return nil, errors.New("product has been deleted")
-				}
-			}
 			return nil, errors.New("product not found")
 		}
 		return nil, fmt.Errorf("failed to find product: %w", err)
@@ -307,41 +591,54 @@ func (s *ProductService) UpdateProduct(ctx context.Context, productID, tenantID 
 		}
 	}
 
-	// Process product image
-	// If ImageBase64 is provided, decode and save; otherwise use ImageURL from request
-	// If neither is provided, keep existing product.ImageURL
-	imageURL := req.ImageURL
-	if req.ImageBase64 != "" {
-		processedURL, err := s.processProductImage(tenantID, req.ImageBase64, "")
-		if err != nil {
-			return nil, fmt.Errorf("failed to process product image: %w", err)
+	// v1.0.219 — canonicalise size on update too. Look up the new category
+	// (or fall back to the existing one) so beer vs non-beer routing is
+	// correct when the operator hasn't changed the category.
+	if req.Size != "" {
+		catName := ""
+		if req.CategoryID != uuid.Nil {
+			var cat models.Category
+			if err := s.db.Where("id = ? AND tenant_id = ?", req.CategoryID, tenantID).First(&cat).Error; err == nil {
+				catName = cat.Name
+			}
 		}
-		imageURL = processedURL
-	} else if imageURL == "" {
-		// Keep existing image if no new image or URL provided
-		imageURL = product.ImageURL
+		if catName == "" && product.Category != nil {
+			catName = product.Category.Name
+		}
+		canonical, _, _, ok := sizing.Canonicalize(req.Size, sizing.CategoryIsBeer(catName))
+		if !ok {
+			return nil, fmt.Errorf("invalid size '%s' — must be one of: 90ml, 180ml, 375ml, 750ml, 1000ml (or 330ml/500ml/650ml for beer)", req.Size)
+		}
+		req.Size = canonical
 	}
 
-	// Normalize size to uppercase for consistency
-	normalizedSize := normalizeSize(req.Size)
-
 	// Update product
+	// display_name + display_name_bold_length are updatable from the admin portal.
+	// When the caller provides a new DisplayName we save it and clamp the bold length
+	// to its new bounds; when they clear DisplayName we clear the bold length too so
+	// the row stays internally consistent.
+	displayName := req.DisplayName
+	if displayName == "" {
+		displayName = product.DisplayName
+	}
+	boldStart, boldLen := sanitizeBoldRange(req.DisplayNameBoldStart, req.DisplayNameBoldLength, displayName)
+
 	updates := map[string]interface{}{
-		"name":            req.Name,
-		"category_id":     req.CategoryID,
-		"brand_id":        req.BrandID,
-		"size":            normalizedSize,
-		"alcohol_content": req.AlcoholContent,
-		"description":     req.Description,
-		"barcode":         req.Barcode,
-		"sku":             req.SKU,
-		"image_url":       imageURL,
-		"cost_price":      req.CostPrice,
-		"duty_fee":        req.DutyFee,
-		"total_cost":      req.TotalCost,
-		"selling_price":   req.SellingPrice,
-		"mrp":             req.MRP,
-		"is_active":       req.IsActive,
+		"name":                      req.Name,
+		"category_id":               req.CategoryID,
+		"brand_id":                  req.BrandID,
+		"size":                      req.Size,
+		"alcohol_content":           req.AlcoholContent,
+		"description":               req.Description,
+		"barcode":                   req.Barcode,
+		"sku":                       req.SKU,
+		"cost_price":                req.CostPrice,
+		"selling_price":             req.SellingPrice,
+		"mrp":                       req.MRP,
+		"is_active":                 req.IsActive,
+		"display_name":              displayName,
+		"display_name_bold_start":   boldStart,
+		"display_name_bold_length":  boldLen,
 	}
 
 	if err := s.db.Model(&product).Updates(updates).Error; err != nil {
@@ -421,19 +718,8 @@ func (s *ProductService) CreateBrand(ctx context.Context, req BrandRequest, tena
 	return s.mapBrandToResponse(&brand, 0), nil
 }
 
-// Cache TTL for brands list (5 minutes)
-const brandsCacheTTL = 5 * time.Minute
-
-// GetBrands returns all brands (cached for 5 minutes)
+// GetBrands returns all brands
 func (s *ProductService) GetBrands(ctx context.Context, tenantID uuid.UUID) ([]*BrandResponse, error) {
-	cacheKey := fmt.Sprintf("brands:%s", tenantID.String())
-
-	// Try to get from cache first
-	var cachedBrands []*BrandResponse
-	if err := s.cache.Get(ctx, cacheKey, &cachedBrands); err == nil {
-		return cachedBrands, nil
-	}
-
 	var brands []models.Brand
 
 	err := s.db.Where("tenant_id = ?", tenantID).
@@ -444,7 +730,7 @@ func (s *ProductService) GetBrands(ctx context.Context, tenantID uuid.UUID) ([]*
 		return nil, fmt.Errorf("failed to get brands: %w", err)
 	}
 
-	// Get product counts for each brand in a single query
+	// Get product counts for each brand
 	var brandCounts []struct {
 		BrandID uuid.UUID
 		Count   int
@@ -465,9 +751,6 @@ func (s *ProductService) GetBrands(ctx context.Context, tenantID uuid.UUID) ([]*
 	for i, brand := range brands {
 		responses[i] = s.mapBrandToResponse(&brand, countMap[brand.ID])
 	}
-
-	// Cache the result
-	_ = s.cache.Set(ctx, cacheKey, responses, brandsCacheTTL)
 
 	return responses, nil
 }
@@ -619,15 +902,35 @@ func (s *ProductService) CreateBrandPricing(ctx context.Context, req BrandPricin
 
 // ProductFilters represents filters for products
 type ProductFilters struct {
-	CategoryID  uuid.UUID   `form:"category_id"`
-	CategoryIDs []uuid.UUID `form:"-"` // Multiple category IDs for filtering (comma-separated in query)
-	BrandID     uuid.UUID   `form:"brand_id"`
-	ShopID      uuid.UUID   `form:"shop_id"`
-	Size        string      `form:"size"`
-	IsActive    *bool       `form:"is_active"`
-	Search      string      `form:"search"`
-	Page        int         `form:"page"`
-	PageSize    int         `form:"page_size"`
+	CategoryIDs []uuid.UUID // Multiple category IDs for combined filters
+	Size        string      // Size filter (e.g. "90ML")
+	ShopID     uuid.UUID `form:"shop_id"` // Filter products that have stock in this shop
+	// OwnerShopID filters to products this shop OWNS (products.shop_id = ?),
+	// independent of whether any stock row exists yet. Distinct from ShopID
+	// (which is stock-presence based and hides a shop's own zero-stock SKUs).
+	// Used by per-shop pickers — e.g. the Stock Setup "Swap" dialog — so a
+	// manager can only ever pick a product that belongs to the record's shop,
+	// never another shop's identically-named row (the cross-shop-link bug class
+	// blocked by trg_block_crossshop_stock at approve).
+	OwnerShopID uuid.UUID `form:"owner_shop_id"`
+	CategoryID  uuid.UUID `form:"category_id"`
+	BrandID    uuid.UUID `form:"brand_id"`
+	IsActive   *bool     `form:"is_active"`
+	Search     string    `form:"search"`
+	Page       int       `form:"page"`
+	PageSize   int       `form:"page_size"`
+	// When false (default) and ShopID is set, hide zero-stock products that
+	// are duplicates of a populated SKU (same saas_brand_id + size). Surfaces
+	// the right one to the user without nuking legitimately-empty SKUs.
+	// Admins can pass ?include_zero_stock=true to see all zombies for cleanup.
+	IncludeZeroStock bool `form:"include_zero_stock"`
+	// PurchasePriority switches the picker to "smart" mode: instead of hiding
+	// products this shop has no stock for, return the entire master catalog
+	// but ranked into 4 tiers so the operator sees what they actually buy at
+	// the top. Requires ShopID. Disables the standard zero-stock + in-shop
+	// filters when true. Tier 1 = bought in last 90d, Tier 2 = current stock,
+	// Tier 3 = ever bought, Tier 4 = master only.
+	PurchasePriority bool `form:"purchase_priority"`
 }
 
 // ProductListResponse represents paginated product response
@@ -637,117 +940,80 @@ type ProductListResponse struct {
 	Page       int                `json:"page"`
 	PageSize   int                `json:"page_size"`
 	TotalPages int                `json:"total_pages"`
+	// v1.0.299 — TotalStock is SUM(stocks.quantity) across the FULL filtered
+	// set (every product matching the same WHERE clauses as TotalCount),
+	// independent of pagination. The Flutter inventory-list header reads this
+	// directly so the visible "X pcs" matches what was approved, regardless
+	// of which page of products is loaded. Computed at shop-scope; 0 when no
+	// shop filter is applied (the per-product COALESCE subquery only makes
+	// sense within a shop).
+	TotalStock int64 `json:"total_stock"`
 }
 
-// Cache TTL for SaaS category maps (10 minutes - rarely change)
-const saasCategoryMapCacheTTL = 10 * time.Minute
-
-// CachedCategoryMaps holds cached category and subcategory name maps
-type CachedCategoryMaps struct {
-	Categories    map[string]string `json:"categories"`    // UUID string -> name
-	Subcategories map[string]string `json:"subcategories"` // UUID string -> name
+// applyDisplayBoldFallback wraps the shared utils.ApplyDisplayBoldFallback
+// so a page of products whose own bold indices are NULL can inherit them
+// from the linked master saas_brand. See utils/display_bold.go for details.
+func (s *ProductService) applyDisplayBoldFallback(responses []*ProductResponse, products []models.Product) {
+	if len(responses) == 0 {
+		return
+	}
+	targets := make([]utils.DisplayBoldTarget, len(responses))
+	for i, p := range products {
+		targets[i] = utils.DisplayBoldTarget{
+			SaasBrandID: p.SaaSBrandID,
+			DisplayName: responses[i].DisplayName,
+			BoldStart:   responses[i].DisplayNameBoldStart,
+			BoldLength:  responses[i].DisplayNameBoldLength,
+		}
+	}
+	utils.ApplyDisplayBoldFallback(s.db.DB, targets, func(i int, dn string, bs, bl *int) {
+		responses[i].DisplayName = dn
+		responses[i].DisplayNameBoldStart = bs
+		responses[i].DisplayNameBoldLength = bl
+	})
 }
 
-// getSaaSCategoryMaps fetches SaaS categories and subcategories and returns lookup maps
-// Results are cached for 10 minutes to reduce SaaS API calls
-func (s *ProductService) getSaaSCategoryMaps() (map[uuid.UUID]string, map[uuid.UUID]string) {
-	categoryMap := make(map[uuid.UUID]string)
-	subcategoryMap := make(map[uuid.UUID]string)
-
-	if s.saasClient == nil {
-		return categoryMap, subcategoryMap
-	}
-
-	ctx := context.Background()
-	cacheKey := "saas_category_maps"
-
-	// Try to get from cache first
-	var cached CachedCategoryMaps
-	if err := s.cache.Get(ctx, cacheKey, &cached); err == nil {
-		// Convert string keys back to UUIDs
-		for idStr, name := range cached.Categories {
-			if id, err := uuid.Parse(idStr); err == nil {
-				categoryMap[id] = name
-			}
-		}
-		for idStr, name := range cached.Subcategories {
-			if id, err := uuid.Parse(idStr); err == nil {
-				subcategoryMap[id] = name
-			}
-		}
-		return categoryMap, subcategoryMap
-	}
-
-	// Fetch SaaS categories
-	categories, err := s.saasClient.GetCategories()
-	if err == nil {
-		for _, cat := range categories {
-			categoryMap[cat.ID] = cat.Name
-		}
-	}
-
-	// Fetch SaaS subcategories
-	subcategories, err := s.saasClient.GetSubcategories()
-	if err == nil {
-		for _, subcat := range subcategories {
-			subcategoryMap[subcat.ID] = subcat.Name
-		}
-	}
-
-	// Cache the result (convert UUID keys to strings for JSON serialization)
-	toCache := CachedCategoryMaps{
-		Categories:    make(map[string]string),
-		Subcategories: make(map[string]string),
-	}
-	for id, name := range categoryMap {
-		toCache.Categories[id.String()] = name
-	}
-	for id, name := range subcategoryMap {
-		toCache.Subcategories[id.String()] = name
-	}
-	_ = s.cache.Set(ctx, cacheKey, toCache, saasCategoryMapCacheTTL)
-
-	return categoryMap, subcategoryMap
-}
-
-// mapProductToResponseWithSaaS converts model to response format with SaaS category fallback
-func (s *ProductService) mapProductToResponseWithSaaS(product *models.Product, currentStock int, saasCategoryMap map[uuid.UUID]string, saasSubcategoryMap map[uuid.UUID]string) *ProductResponse {
+// mapProductToResponse converts model to response format
+func (s *ProductService) mapProductToResponse(product *models.Product, currentStock int) *ProductResponse {
 	response := &ProductResponse{
 		ID:             product.ID,
 		Name:           product.Name,
 		CategoryID:     product.CategoryID,
-		SubcategoryID:  product.SubcategoryID,
 		BrandID:        product.BrandID,
 		Size:           product.Size,
 		AlcoholContent: product.AlcoholContent,
 		Description:    product.Description,
 		Barcode:        product.Barcode,
 		SKU:            product.SKU,
-		ImageURL:       product.ImageURL,
 		CostPrice:      product.CostPrice,
-		DutyFee:        product.DutyFee,
 		SellingPrice:   product.SellingPrice,
 		MRP:            product.MRP,
+		Price:                 product.SellingPrice,
+		DisplayName:           product.DisplayName,
+		DisplayNameBoldStart:  product.DisplayNameBoldStart,
+		DisplayNameBoldLength: product.DisplayNameBoldLength,
 		IsActive:       product.IsActive,
 		CurrentStock:   currentStock,
+		SaasBrandID:    product.SaaSBrandID,
 		CreatedAt:      product.CreatedAt,
 		UpdatedAt:      product.UpdatedAt,
+		// v1.0.250 — Front/Back photo verification fields. When set, Flutter
+		// renders thumbnails on inventory list / Manual Purchase picker / etc.
+		FrontImageURL:         product.FrontImageURL,
+		BackImageURL:          product.BackImageURL,
+		BackImageMRP:          product.BackImageMRP,
+		VerifiedViaImageFront: product.VerifiedViaImageFront,
+		VerifiedViaImageBack:  product.VerifiedViaImageBack,
+		PhotoVerifiedAt:       product.PhotoVerifiedAt,
 	}
 
-	// Try local category first, then fall back to SaaS category
+	// Price = selling price, fall back to MRP if not set
+	if response.Price == 0 {
+		response.Price = product.MRP
+	}
+
 	if product.Category != nil {
 		response.CategoryName = product.Category.Name
-	} else if name, ok := saasCategoryMap[product.CategoryID]; ok {
-		response.CategoryName = name
-	}
-
-	// Try local subcategory first, then fall back to SaaS subcategory
-	if product.Subcategory != nil {
-		response.SubcategoryName = product.Subcategory.Name
-	} else if product.SubcategoryID != nil {
-		if name, ok := saasSubcategoryMap[*product.SubcategoryID]; ok {
-			response.SubcategoryName = name
-		}
 	}
 
 	if product.Brand != nil {
@@ -755,11 +1021,6 @@ func (s *ProductService) mapProductToResponseWithSaaS(product *models.Product, c
 	}
 
 	return response
-}
-
-// mapProductToResponse converts model to response format
-func (s *ProductService) mapProductToResponse(product *models.Product, currentStock int) *ProductResponse {
-	return s.mapProductToResponseWithSaaS(product, currentStock, nil, nil)
 }
 
 // mapBrandToResponse converts model to response format
@@ -773,12 +1034,6 @@ func (s *ProductService) mapBrandToResponse(brand *models.Brand, productCount in
 	}
 }
 
-// normalizeSize normalizes size to uppercase for consistency
-// This ensures "500ml" and "500ML" are treated as the same size
-func normalizeSize(size string) string {
-	return strings.ToUpper(strings.TrimSpace(size))
-}
-
 // generateSKU generates SKU for product
 func (s *ProductService) generateSKU(brandName, size string) string {
 	timestamp := time.Now().Format("060102")
@@ -790,71 +1045,7 @@ func (s *ProductService) generateSKU(brandName, size string) string {
 	return fmt.Sprintf("%s-%s-%s-%s", brandCode, size, timestamp, random)
 }
 
-// processProductImage processes base64 image data and saves it to disk
-// Returns the URL for the saved image or error
-// If imageBase64 is empty but imageURL is provided, returns imageURL unchanged
-func (s *ProductService) processProductImage(tenantID uuid.UUID, imageBase64, existingImageURL string) (string, error) {
-	// If no base64 image provided, use existing URL (passthrough)
-	if imageBase64 == "" {
-		return existingImageURL, nil
-	}
-
-	// Decode base64 data
-	imageBytes, err := base64.StdEncoding.DecodeString(imageBase64)
-	if err != nil {
-		return "", fmt.Errorf("invalid base64 image data: %w", err)
-	}
-
-	// Validate image size (max 5MB for product images)
-	const maxImageSize = 5 * 1024 * 1024 // 5MB
-	if len(imageBytes) > maxImageSize {
-		return "", fmt.Errorf("image too large: %d bytes (max %d bytes)", len(imageBytes), maxImageSize)
-	}
-
-	// Minimum size check to detect corrupted data
-	if len(imageBytes) < 100 {
-		return "", fmt.Errorf("image too small: %d bytes (likely corrupted or invalid)", len(imageBytes))
-	}
-
-	// Detect content type from image bytes
-	contentType := http.DetectContentType(imageBytes)
-
-	// Validate content type and determine extension
-	var ext string
-	switch contentType {
-	case "image/jpeg":
-		ext = ".jpg"
-	case "image/png":
-		ext = ".png"
-	default:
-		return "", fmt.Errorf("unsupported image type: %s (allowed: image/jpeg, image/png)", contentType)
-	}
-
-	// Generate unique filename with UUID
-	fileUUID := uuid.New().String()
-	yearMonth := time.Now().Format("2006-01")
-	filename := fileUUID + ext
-
-	// Create directory path: /var/www/liquorpro/uploads/product-images/{tenant_id}/{YYYY-MM}/
-	uploadDir := filepath.Join("/var/www/liquorpro/uploads/product-images", tenantID.String(), yearMonth)
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create upload directory: %w", err)
-	}
-
-	// Save file to disk
-	destPath := filepath.Join(uploadDir, filename)
-	if err := os.WriteFile(destPath, imageBytes, 0644); err != nil {
-		return "", fmt.Errorf("failed to save image file: %w", err)
-	}
-
-	// Generate URL for the saved image
-	relativePath := fmt.Sprintf("/uploads/product-images/%s/%s/%s", tenantID.String(), yearMonth, filename)
-	imageURL := fmt.Sprintf("https://new.v2.floelife.in%s", relativePath)
-
-	return imageURL, nil
-}
-
-// getStockLevels gets stock levels for products (all shops)
+// getStockLevels gets stock levels for products
 func (s *ProductService) getStockLevels(tenantID uuid.UUID, products []models.Product) map[uuid.UUID]int {
 	stockMap := make(map[uuid.UUID]int)
 
@@ -885,54 +1076,10 @@ func (s *ProductService) getStockLevels(tenantID uuid.UUID, products []models.Pr
 	return stockMap
 }
 
-// getStockLevelsForShop gets stock levels for products filtered by shop
-func (s *ProductService) getStockLevelsForShop(tenantID uuid.UUID, shopID uuid.UUID, products []models.Product) map[uuid.UUID]int {
-	stockMap := make(map[uuid.UUID]int)
-
-	if len(products) == 0 {
-		return stockMap
-	}
-
-	productIDs := make([]uuid.UUID, len(products))
-	for i, p := range products {
-		productIDs[i] = p.ID
-	}
-
-	var stockLevels []struct {
-		ProductID uuid.UUID
-		Total     int
-	}
-
-	query := s.db.Model(&models.Stock{}).
-		Select("product_id, COALESCE(SUM(quantity), 0) as total").
-		Where("product_id IN ? AND tenant_id = ?", productIDs, tenantID)
-
-	// Filter by shop if provided
-	if shopID != uuid.Nil {
-		query = query.Where("shop_id = ?", shopID)
-	}
-
-	query.Group("product_id").Scan(&stockLevels)
-
-	for _, sl := range stockLevels {
-		stockMap[sl.ProductID] = sl.Total
-	}
-
-	return stockMap
-}
-
-// clearProductCache clears product-related cache including sizes cache
+// clearProductCache clears product-related cache
 func (s *ProductService) clearProductCache(ctx context.Context, tenantID uuid.UUID) {
-	// Clear main products cache
 	cacheKey := fmt.Sprintf("products:%s", tenantID.String())
 	s.cache.Delete(ctx, cacheKey)
-
-	// Clear sizes cache (products change affects sizes)
-	sizesKey := fmt.Sprintf("sizes:%s", tenantID.String())
-	s.cache.Delete(ctx, sizesKey)
-
-	// Note: Category-specific sizes caches (sizes:{tenant}:{category}) will expire naturally
-	// A full cache clear would require tracking all category IDs, which adds complexity
 }
 
 // clearBrandCache clears brand-related cache
@@ -1006,353 +1153,306 @@ func (s *ProductService) GetSubcategories(ctx context.Context, tenantID, categor
 	return subcategories, nil
 }
 
-// BatchValidateItem represents a single item to validate
-type BatchValidateItem struct {
-	ProductID uuid.UUID `json:"product_id"`
-	Quantity  int       `json:"quantity"`
+// SizeWithCount represents a product size and the number of products with that size
+type SizeWithCount struct {
+	Size         string `json:"SIZE"`
+	ProductCount int64  `json:"PRODUCT_COUNT"`
 }
 
-// BatchValidateRequest represents a batch validation request
-type BatchValidateRequest struct {
-	ShopID uuid.UUID           `json:"shop_id" binding:"required"`
-	Items  []BatchValidateItem `json:"items" binding:"required,min=1"`
+// GetProductSizes returns distinct product sizes with counts
+// Supports multiple category IDs (comma-separated category_ids param) for combined filters like English = Whisky+Rum+Vodka
+// Falls back to predefined standard sizes when no products exist yet (new tenant/shop setup)
+// SizeRangeConfig defines a size range bucket
+type SizeRangeConfig struct {
+	Label string
+	MinML int
+	MaxML int
+	Sort  int
 }
 
-// ValidatedItem represents a validated product item
-type ValidatedItem struct {
-	ProductID    uuid.UUID `json:"product_id"`
-	ProductName  string    `json:"product_name"`
-	BrandName    string    `json:"brand_name"`
-	Size         string    `json:"size"`
-	UnitPrice    float64   `json:"unit_price"`
-	CurrentStock int       `json:"current_stock"`
-	IsValid      bool      `json:"is_valid"`
-	Error        string    `json:"error,omitempty"`
+var beerSizeRanges = []SizeRangeConfig{
+	{Label: "330ml & Below", MinML: 0, MaxML: 400, Sort: 1},
+	{Label: "500ml", MinML: 401, MaxML: 550, Sort: 2},
+	{Label: "650ml", MinML: 551, MaxML: 999, Sort: 3},
+	{Label: "Keg/Bulk", MinML: 1000, MaxML: 999999, Sort: 4},
 }
 
-// BatchValidateResponse represents the batch validation response
-type BatchValidateResponse struct {
-	Valid  bool            `json:"valid"`
-	Items  []ValidatedItem `json:"items"`
-	Errors []string        `json:"errors,omitempty"`
+var nonBeerSizeRanges = []SizeRangeConfig{
+	{Label: "90ml (Nip)", MinML: 0, MaxML: 100, Sort: 1},
+	{Label: "180ml (Quarter)", MinML: 101, MaxML: 250, Sort: 2},
+	{Label: "375ml (Half)", MinML: 251, MaxML: 400, Sort: 3},
+	{Label: "750ml (Full)", MinML: 401, MaxML: 999, Sort: 4},
+	{Label: "1L+ (Large)", MinML: 1000, MaxML: 999999, Sort: 5},
 }
 
-// BatchValidateProducts validates multiple products and their stock levels in a single call
-// This reduces API calls from N (one per product) to 1 (batch validation)
-func (s *ProductService) BatchValidateProducts(ctx context.Context, tenantID uuid.UUID, req BatchValidateRequest) (*BatchValidateResponse, error) {
-	response := &BatchValidateResponse{
-		Valid:  true,
-		Items:  make([]ValidatedItem, 0, len(req.Items)),
-		Errors: make([]string, 0),
-	}
-
-	if len(req.Items) == 0 {
-		return response, nil
-	}
-
-	// Collect all product IDs
-	productIDs := make([]uuid.UUID, len(req.Items))
-	quantityMap := make(map[uuid.UUID]int)
-	for i, item := range req.Items {
-		productIDs[i] = item.ProductID
-		quantityMap[item.ProductID] = item.Quantity
-	}
-
-	// Fetch all products in a single query
-	var products []models.Product
-	if err := s.db.Where("id IN ? AND tenant_id = ?", productIDs, tenantID).
-		Preload("Brand").
-		Find(&products).Error; err != nil {
-		return nil, fmt.Errorf("failed to fetch products: %w", err)
-	}
-
-	// Create a map of found products
-	productMap := make(map[uuid.UUID]models.Product)
-	for _, p := range products {
-		productMap[p.ID] = p
-	}
-
-	// Fetch all stock levels for these products in the specified shop in a single query
-	var stockLevels []struct {
-		ProductID uuid.UUID
-		Quantity  int
-	}
-	s.db.Model(&models.Stock{}).
-		Select("product_id, COALESCE(quantity, 0) as quantity").
-		Where("product_id IN ? AND shop_id = ? AND tenant_id = ?", productIDs, req.ShopID, tenantID).
-		Scan(&stockLevels)
-
-	// Create stock map
-	stockMap := make(map[uuid.UUID]int)
-	for _, sl := range stockLevels {
-		stockMap[sl.ProductID] = sl.Quantity
-	}
-
-	// Validate each item
-	for _, item := range req.Items {
-		validatedItem := ValidatedItem{
-			ProductID: item.ProductID,
-			IsValid:   true,
+func extractML(size string) int {
+	size = strings.ToUpper(strings.TrimSpace(size))
+	numStr := ""
+	for _, c := range size {
+		if c >= '0' && c <= '9' {
+			numStr += string(c)
 		}
-
-		// Check if product exists
-		product, exists := productMap[item.ProductID]
-		if !exists {
-			validatedItem.IsValid = false
-			validatedItem.Error = "Product not found"
-			response.Valid = false
-			response.Errors = append(response.Errors, fmt.Sprintf("Product %s not found", item.ProductID))
-		} else {
-			validatedItem.ProductName = product.Name
-			validatedItem.Size = product.Size
-			validatedItem.UnitPrice = product.SellingPrice
-			if product.Brand != nil {
-				validatedItem.BrandName = product.Brand.Name
-			}
-
-			// Check if product is active
-			if !product.IsActive {
-				validatedItem.IsValid = false
-				validatedItem.Error = "Product is inactive"
-				response.Valid = false
-				response.Errors = append(response.Errors, fmt.Sprintf("Product %s is inactive", product.Name))
-			}
-		}
-
-		// Check stock level
-		currentStock := stockMap[item.ProductID]
-		validatedItem.CurrentStock = currentStock
-
-		if item.Quantity > currentStock {
-			validatedItem.IsValid = false
-			if validatedItem.Error != "" {
-				validatedItem.Error += "; "
-			}
-			validatedItem.Error += fmt.Sprintf("Insufficient stock: requested %d, available %d", item.Quantity, currentStock)
-			response.Valid = false
-			response.Errors = append(response.Errors, fmt.Sprintf("Insufficient stock for %s: requested %d, available %d",
-				validatedItem.ProductName, item.Quantity, currentStock))
-		}
-
-		response.Items = append(response.Items, validatedItem)
 	}
-
-	return response, nil
+	num := 0
+	if numStr != "" {
+		if n, err := strconv.Atoi(numStr); err == nil {
+			num = n
+		}
+	}
+	// Handle "1L" = 1000ml
+	if strings.Contains(size, "L") && !strings.Contains(size, "ML") && num < 100 {
+		return num * 1000
+	}
+	return num
 }
 
-// SizeInfo represents a size option with product count and total stock
-type SizeInfo struct {
-	Size         string `json:"size"`
-	ProductCount int64  `json:"product_count"`
-	TotalStock   int64  `json:"total_stock"`
-}
+func (s *ProductService) GetProductSizes(ctx context.Context, tenantID uuid.UUID, categoryIDs []uuid.UUID, shopID ...uuid.UUID) ([]SizeWithCount, error) {
+	// First get individual sizes
+	var rawResults []SizeWithCount
 
-// GetProductsByIDsRequest represents the request for fetching products by IDs
-type GetProductsByIDsRequest struct {
-	IDs    []uuid.UUID `json:"ids" binding:"required"`
-	ShopID *uuid.UUID  `json:"shop_id"`
-}
+	query := s.db.WithContext(ctx).
+		Table("products").
+		Select("UPPER(products.size) as size, COUNT(*) as product_count").
+		Where("products.tenant_id = ? AND products.deleted_at IS NULL AND products.is_active = ? AND products.size IS NOT NULL AND products.size != ''", tenantID, true).
+		Group("UPPER(products.size)").
+		Order("product_count DESC")
 
-// ProductWithStockResponse represents a product with optional stock data
-type ProductWithStockResponse struct {
-	*ProductResponse
-	Stock *StockInfo `json:"stock,omitempty"`
-}
-
-// StockInfo represents stock information for a product
-type StockInfo struct {
-	Quantity int       `json:"quantity"`
-	ShopID   uuid.UUID `json:"shop_id"`
-}
-
-// GetProductsByIDs fetches multiple products by their IDs in a single query
-// This is more efficient than multiple individual GetProductByID calls
-func (s *ProductService) GetProductsByIDs(ctx context.Context, tenantID uuid.UUID, productIDs []uuid.UUID, shopID *uuid.UUID) ([]*ProductWithStockResponse, error) {
-	if len(productIDs) == 0 {
-		return []*ProductWithStockResponse{}, nil
+	// Shop filter: only count products that have stock in the specified shop
+	if len(shopID) > 0 && shopID[0] != uuid.Nil {
+		query = query.Where("products.id IN (SELECT product_id FROM stocks WHERE shop_id = ? AND deleted_at IS NULL)", shopID[0])
 	}
 
-	// Fetch all products in a single query
-	var products []models.Product
-	if err := s.db.Where("id IN ? AND tenant_id = ? AND is_active = true", productIDs, tenantID).
-		Preload("Category").
-		Preload("Subcategory").
-		Preload("Brand").
-		Find(&products).Error; err != nil {
-		return nil, fmt.Errorf("failed to fetch products: %w", err)
-	}
-
-	// Get stock levels - either for specific shop or all shops
-	var stockMap map[uuid.UUID]int
-	var shopStockMap map[uuid.UUID]uuid.UUID // maps productID to shopID
-
-	if shopID != nil && *shopID != uuid.Nil {
-		// Get shop-specific stock
-		var stockLevels []struct {
-			ProductID uuid.UUID
-			Quantity  int
-			ShopID    uuid.UUID
-		}
-		s.db.Model(&models.Stock{}).
-			Select("product_id, COALESCE(quantity, 0) as quantity, shop_id").
-			Where("product_id IN ? AND shop_id = ? AND tenant_id = ?", productIDs, *shopID, tenantID).
-			Scan(&stockLevels)
-
-		stockMap = make(map[uuid.UUID]int)
-		shopStockMap = make(map[uuid.UUID]uuid.UUID)
-		for _, sl := range stockLevels {
-			stockMap[sl.ProductID] = sl.Quantity
-			shopStockMap[sl.ProductID] = sl.ShopID
-		}
-	} else {
-		// Get total stock across all shops
-		stockMap = s.getStockLevels(tenantID, products)
-	}
-
-	// Build SaaS category/subcategory lookup maps
-	saasCategoryMap, saasSubcategoryMap := s.getSaaSCategoryMaps()
-
-	// Convert to response format
-	responses := make([]*ProductWithStockResponse, len(products))
-	for i, product := range products {
-		stock := stockMap[product.ID]
-		productResponse := s.mapProductToResponseWithSaaS(&product, stock, saasCategoryMap, saasSubcategoryMap)
-
-		response := &ProductWithStockResponse{
-			ProductResponse: productResponse,
-		}
-
-		// Add shop-specific stock info if shop was provided
-		if shopID != nil && *shopID != uuid.Nil {
-			response.Stock = &StockInfo{
-				Quantity: stockMap[product.ID],
-				ShopID:   *shopID,
-			}
-		}
-
-		responses[i] = response
-	}
-
-	return responses, nil
-}
-
-// Cache TTL for sizes (5 minutes - sizes rarely change)
-const sizesCacheTTL = 5 * time.Minute
-
-// GetDistinctSizes returns all distinct sizes for a tenant, filtered by category
-// Shows ALL sizes in catalog regardless of stock status, so users can add stock to products with 0 stock
-// If shopID is provided, returns total_stock for that specific shop; otherwise returns total across all shops
-// Results are cached for 5 minutes to reduce database load
-func (s *ProductService) GetDistinctSizes(ctx context.Context, tenantID uuid.UUID, categoryID *uuid.UUID, shopID *uuid.UUID) ([]SizeInfo, error) {
-	// Build cache key including shopID
-	cacheKey := fmt.Sprintf("sizes:%s", tenantID.String())
-	if categoryID != nil {
-		cacheKey = fmt.Sprintf("%s:cat:%s", cacheKey, categoryID.String())
-	}
-	if shopID != nil {
-		cacheKey = fmt.Sprintf("%s:shop:%s", cacheKey, shopID.String())
-	}
-
-	// Try to get from cache first
-	var cachedSizes []SizeInfo
-	if err := s.cache.Get(ctx, cacheKey, &cachedSizes); err == nil {
-		return cachedSizes, nil
-	}
-
-	var sizes []SizeInfo
-
-	// Build query to get ALL sizes in catalog with stock totals
-	// Join with stocks table to get total quantity
-	query := s.db.Model(&models.Product{}).
-		Select("UPPER(products.size) as size, COUNT(DISTINCT products.id) as product_count, COALESCE(SUM(stocks.quantity), 0) as total_stock").
-		Joins("LEFT JOIN stocks ON stocks.product_id = products.id AND stocks.deleted_at IS NULL").
-		Where("products.tenant_id = ? AND products.deleted_at IS NULL AND products.size IS NOT NULL AND products.size <> ''", tenantID)
-
-	// Filter by category if provided
-	if categoryID != nil {
-		query = query.Where("products.category_id = ?", *categoryID)
-	}
-
-	// Filter stocks by shop if provided
-	if shopID != nil {
-		query = query.Where("(stocks.shop_id = ? OR stocks.shop_id IS NULL)", *shopID)
-	}
-
-	// Get all sizes in catalog with stock totals
-	err := query.Group("UPPER(products.size)").
-		Order("size ASC").
-		Scan(&sizes).Error
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to get distinct sizes: %w", err)
-	}
-
-	// Cache the result
-	_ = s.cache.Set(ctx, cacheKey, sizes, sizesCacheTTL)
-
-	return sizes, nil
-}
-
-// GetDistinctSizesMultiCategory returns all distinct sizes for a tenant, filtered by multiple categories
-// Shows ALL sizes in catalog regardless of stock status, so users can add stock to products with 0 stock
-// If shopID is provided, returns total_stock for that specific shop; otherwise returns total across all shops
-// Results are cached for 5 minutes to reduce database load
-func (s *ProductService) GetDistinctSizesMultiCategory(ctx context.Context, tenantID uuid.UUID, categoryIDs []uuid.UUID, shopID *uuid.UUID) ([]SizeInfo, error) {
-	// Build cache key including all category IDs and shopID
-	cacheKey := fmt.Sprintf("sizes:%s", tenantID.String())
-	if len(categoryIDs) > 0 {
-		catIDStrs := make([]string, len(categoryIDs))
-		for i, catID := range categoryIDs {
-			catIDStrs[i] = catID.String()
-		}
-		cacheKey = fmt.Sprintf("%s:cats:%s", cacheKey, strings.Join(catIDStrs, "_"))
-	}
-	if shopID != nil {
-		cacheKey = fmt.Sprintf("%s:shop:%s", cacheKey, shopID.String())
-	}
-
-	// Try to get from cache first
-	var cachedSizes []SizeInfo
-	if err := s.cache.Get(ctx, cacheKey, &cachedSizes); err == nil {
-		return cachedSizes, nil
-	}
-
-	var sizes []SizeInfo
-
-	// Build query to get ALL sizes in catalog with stock totals
-	// Join with stocks table to get total quantity
-	// IMPORTANT: Shop filter must be in JOIN condition (not WHERE) to preserve LEFT JOIN behavior
-	// Otherwise products with stock in other shops but not the requested shop would be excluded
-	var query *gorm.DB
-	if shopID != nil {
-		// Filter stocks by shop IN the JOIN condition to preserve all products
-		query = s.db.Model(&models.Product{}).
-			Select("UPPER(products.size) as size, COUNT(DISTINCT products.id) as product_count, COALESCE(SUM(stocks.quantity), 0) as total_stock").
-			Joins("LEFT JOIN stocks ON stocks.product_id = products.id AND stocks.deleted_at IS NULL AND stocks.shop_id = ?", *shopID).
-			Where("products.tenant_id = ? AND products.deleted_at IS NULL AND products.size IS NOT NULL AND products.size <> ''", tenantID)
-	} else {
-		query = s.db.Model(&models.Product{}).
-			Select("UPPER(products.size) as size, COUNT(DISTINCT products.id) as product_count, COALESCE(SUM(stocks.quantity), 0) as total_stock").
-			Joins("LEFT JOIN stocks ON stocks.product_id = products.id AND stocks.deleted_at IS NULL").
-			Where("products.tenant_id = ? AND products.deleted_at IS NULL AND products.size IS NOT NULL AND products.size <> ''", tenantID)
-	}
-
-	// Filter by multiple categories if provided (using IN clause)
-	if len(categoryIDs) > 0 {
+	if len(categoryIDs) == 1 {
+		query = query.Where("products.category_id = ?", categoryIDs[0])
+	} else if len(categoryIDs) > 1 {
 		query = query.Where("products.category_id IN ?", categoryIDs)
 	}
 
-	// Get all sizes in catalog with stock totals
-	err := query.Group("UPPER(products.size)").
-		Order("size ASC").
-		Scan(&sizes).Error
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to get distinct sizes: %w", err)
+	if err := query.Find(&rawResults).Error; err != nil {
+		return nil, fmt.Errorf("failed to get product sizes: %w", err)
 	}
 
-	// Cache the result
-	_ = s.cache.Set(ctx, cacheKey, sizes, sizesCacheTTL)
+	// Determine if this is beer category
+	isBeer := false
+	if len(categoryIDs) > 0 {
+		var catName string
+		s.db.WithContext(ctx).Table("categories").Select("LOWER(name)").Where("id = ?", categoryIDs[0]).Scan(&catName)
+		isBeer = strings.Contains(catName, "beer")
+	}
 
-	return sizes, nil
+	// Group individual sizes into ranges
+	ranges := nonBeerSizeRanges
+	if isBeer {
+		ranges = beerSizeRanges
+	}
+
+	rangeMap := make(map[string]int64) // label -> total product count
+	for _, r := range rawResults {
+		ml := extractML(r.Size)
+		for _, rng := range ranges {
+			if ml >= rng.MinML && ml <= rng.MaxML {
+				rangeMap[rng.Label] += r.ProductCount
+				break
+			}
+		}
+	}
+
+	// Build result in sort order, only include ranges with products
+	var results []SizeWithCount
+	for _, rng := range ranges {
+		if count, ok := rangeMap[rng.Label]; ok && count > 0 {
+			results = append(results, SizeWithCount{Size: rng.Label, ProductCount: count})
+		}
+	}
+
+	// Fallback: if no products, return standard ranges
+	if len(results) == 0 && len(categoryIDs) > 0 {
+		for _, rng := range ranges {
+			results = append(results, SizeWithCount{Size: rng.Label, ProductCount: 0})
+		}
+	}
+
+	return results, nil
+}
+
+// getStandardSizesForCategories returns predefined sizes based on category name
+func (s *ProductService) getStandardSizesForCategories(ctx context.Context, categoryIDs []uuid.UUID) []SizeWithCount {
+	// Look up category name to determine which standard sizes to return
+	var categoryName string
+	if err := s.db.WithContext(ctx).Table("categories").Select("LOWER(name)").Where("id = ?", categoryIDs[0]).Scan(&categoryName).Error; err != nil {
+		return nil
+	}
+
+	var sizes []string
+	if categoryName == "beer" {
+		sizes = []string{"330ML", "500ML", "650ML"}
+	} else {
+		// Spirits: Whisky, Rum, Vodka, Brandy, etc.
+		sizes = []string{"90ML", "180ML", "375ML", "750ML", "1L"}
+	}
+
+	results := make([]SizeWithCount, len(sizes))
+	for i, size := range sizes {
+		results[i] = SizeWithCount{Size: size, ProductCount: 0}
+	}
+	return results
+}
+
+// findMasterLinkage looks up the master catalog (saas_brands + brand_variants) for a
+// product being created manually and returns (saas_brand_id, saas_variant_id) pointers
+// when a confident match exists. Returns (nil, nil) when no good match is found —
+// product will be created unlinked and can be linked later via Smart Stock Setup.
+//
+// Strategy: normalize the user's name + brand, look up brand_variants of the same
+// normalized size in the tenant's state, score each candidate's saas_brands.name vs.
+// the user input using simple token overlap. Accept only when ≥2 distinctive tokens
+// (≥4 chars, non-generic) overlap — avoids false positives like "Whisky" matching
+// every whisky in the catalog. The goal is precision, not recall; when in doubt, skip.
+func (s *ProductService) findMasterLinkage(tenantID uuid.UUID, productName, brandName, size string, mrp float64) (*uuid.UUID, *uuid.UUID) {
+	nameForMatch := strings.TrimSpace(productName)
+	if nameForMatch == "" {
+		nameForMatch = strings.TrimSpace(brandName)
+	}
+	if nameForMatch == "" || size == "" {
+		return nil, nil
+	}
+	sizeUpper := strings.ToUpper(strings.TrimSpace(size))
+	if !strings.HasSuffix(sizeUpper, "ML") && !strings.HasSuffix(sizeUpper, "L") {
+		sizeUpper = sizeUpper + "ML"
+	}
+
+	// Resolve tenant state (defaults to UP for historical reasons)
+	var st struct{ State string }
+	_ = s.db.Raw(`SELECT COALESCE(state, 'UP') AS state FROM tenants WHERE id = ?`, tenantID).Scan(&st).Error
+	state := st.State
+	if state == "" {
+		state = "UP"
+	}
+
+	type row struct {
+		VariantID uuid.UUID `gorm:"column:variant_id"`
+		BrandID   uuid.UUID `gorm:"column:brand_id"`
+		Name      string    `gorm:"column:name"`
+		MRP       float64   `gorm:"column:mrp"`
+	}
+	var rows []row
+	if err := s.db.Raw(`
+		SELECT bv.id AS variant_id, sb.id AS brand_id, sb.name AS name, bv.mrp AS mrp
+		FROM brand_variants bv
+		JOIN saas_brands sb ON bv.brand_id = sb.id AND sb.deleted_at IS NULL
+		WHERE bv.deleted_at IS NULL
+		  AND UPPER(bv.size) = UPPER(?)
+		  AND COALESCE(bv.state, 'UP') = ?
+	`, sizeUpper, state).Scan(&rows).Error; err != nil || len(rows) == 0 {
+		return nil, nil
+	}
+
+	// Distinctive-token scoring
+	generic := map[string]bool{
+		"whisky": true, "whiskey": true, "vodka": true, "rum": true, "gin": true, "brandy": true,
+		"wine": true, "premium": true, "reserve": true, "rare": true, "superior": true,
+		"deluxe": true, "select": true, "blend": true, "blended": true, "grain": true,
+		"spirits": true, "scotch": true, "bourbon": true, "indian": true, "international": true,
+	}
+	tokenize := func(s string) []string {
+		lower := strings.ToLower(s)
+		fields := strings.FieldsFunc(lower, func(r rune) bool {
+			return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+		})
+		out := make([]string, 0, len(fields))
+		for _, f := range fields {
+			if len(f) >= 4 && !generic[f] {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	userTokens := tokenize(nameForMatch + " " + brandName)
+	if len(userTokens) == 0 {
+		return nil, nil
+	}
+
+	bestMatches := 0
+	bestMRPDiff := 1e18
+	var bestBrandID, bestVariantID *uuid.UUID
+	for i := range rows {
+		r := &rows[i]
+		masterTokens := tokenize(r.Name)
+		overlap := 0
+		for _, ut := range userTokens {
+			for _, mt := range masterTokens {
+				if ut == mt || strings.HasPrefix(mt, ut) || strings.HasPrefix(ut, mt) {
+					overlap++
+					break
+				}
+			}
+		}
+		if overlap < 2 {
+			continue
+		}
+		diff := 1e18
+		if mrp > 0 && r.MRP > 0 {
+			diff = mrp - r.MRP
+			if diff < 0 {
+				diff = -diff
+			}
+		}
+		if overlap > bestMatches || (overlap == bestMatches && diff < bestMRPDiff) {
+			bestMatches = overlap
+			bestMRPDiff = diff
+			bid := r.BrandID
+			vid := r.VariantID
+			bestBrandID = &bid
+			bestVariantID = &vid
+		}
+	}
+	return bestBrandID, bestVariantID
+}
+
+// sanitizeBoldLength clamps an incoming display_name_bold_length value so it
+// never exceeds the characters available in displayName. Returns nil when the
+// input is nil or out of range — the column is nullable and NULL means "no
+// special styling" (the whole display name renders in the default style).
+func sanitizeBoldLength(raw *int, displayName string) *int {
+	if raw == nil {
+		return nil
+	}
+	n := *raw
+	runeLen := len([]rune(displayName))
+	if n <= 0 || runeLen == 0 {
+		return nil
+	}
+	if n > runeLen {
+		n = runeLen
+	}
+	return &n
+}
+
+// sanitizeBoldRange clamps the incoming (start, length) pair so the bold range
+// stays inside displayName: 0 ≤ start ≤ runeLen, 1 ≤ length ≤ runeLen-start.
+// Returns (nil, nil) when length is invalid; (nil, length) when only length is
+// valid (preserves the legacy prefix-bold behaviour where Start is implicit 0).
+func sanitizeBoldRange(rawStart, rawLength *int, displayName string) (*int, *int) {
+	length := sanitizeBoldLength(rawLength, displayName)
+	if length == nil {
+		return nil, nil
+	}
+	runeLen := len([]rune(displayName))
+	start := 0
+	if rawStart != nil && *rawStart > 0 {
+		start = *rawStart
+	}
+	if start >= runeLen {
+		// Whole range is out of bounds → drop styling rather than rendering nothing.
+		return nil, nil
+	}
+	// Clamp length so start+length never exceeds runeLen.
+	if start+*length > runeLen {
+		newLen := runeLen - start
+		length = &newLen
+	}
+	if start == 0 {
+		return nil, length
+	}
+	return &start, length
 }

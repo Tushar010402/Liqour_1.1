@@ -1,0 +1,452 @@
+package graphql
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"github.com/99designs/gqlgen/graphql"
+	"github.com/99designs/gqlgen/graphql/handler"
+	"github.com/99designs/gqlgen/graphql/handler/extension"
+	"github.com/99designs/gqlgen/graphql/handler/lru"
+	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/liquorpro/go-backend/pkg/observability"
+	"github.com/liquorpro/go-backend/pkg/resilience"
+	"github.com/liquorpro/go-backend/pkg/security"
+	"github.com/liquorpro/go-backend/pkg/shared/models"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+)
+
+// GraphQLServer manages the GraphQL server
+type GraphQLServer struct {
+	handler         *handler.Server
+	resolver        *Resolver
+	dataLoaders     *DataLoaders
+	db              *gorm.DB
+	redis           *redis.Client
+	logger          *zap.Logger
+	tracer          *observability.TracingProvider
+	rateLimiter     *resilience.RateLimiter
+	securityManager *security.SecurityManager
+	config          *GraphQLConfig
+}
+
+// GraphQLConfig contains GraphQL server configuration
+type GraphQLConfig struct {
+	EnablePlayground   bool          `yaml:"enable_playground"`
+	EnableIntrospection bool          `yaml:"enable_introspection"`
+	MaxComplexity      int           `yaml:"max_complexity"`
+	MaxDepth           int           `yaml:"max_depth"`
+	QueryCacheTTL      time.Duration `yaml:"query_cache_ttl"`
+	RateLimitPerMinute int           `yaml:"rate_limit_per_minute"`
+	UploadMaxSize      int64         `yaml:"upload_max_size"`
+	WebSocketEnabled   bool          `yaml:"websocket_enabled"`
+}
+
+// NewGraphQLServer creates a new GraphQL server
+func NewGraphQLServer(
+	db *gorm.DB,
+	redis *redis.Client,
+	logger *zap.Logger,
+	config *GraphQLConfig,
+) (*GraphQLServer, error) {
+	// Create data loaders
+	dataLoaders := NewDataLoaders(db, logger)
+
+	// Create tracer
+	tracer := observability.NewTracingProvider(&observability.TracingConfig{
+		ServiceName: "graphql-server",
+		Enabled:     true,
+	}, logger)
+
+	// Create rate limiter
+	rateLimiter := resilience.NewRateLimiter(resilience.RateLimiterConfig{
+		Name:         "graphql",
+		Capacity:     config.RateLimitPerMinute,
+		RefillRate:   config.RateLimitPerMinute / 60,
+		RefillPeriod: time.Second,
+	})
+
+	// Create security manager
+	securityManager := security.NewSecurityManager(&security.SecurityConfig{
+		EnableCSRF:      true,
+		EnableRateLimit: true,
+		MaxLoginAttempts: 5,
+	}, logger)
+
+	// Create resolver
+	resolver := &Resolver{
+		DB:              db,
+		Redis:           redis,
+		DataLoaders:     dataLoaders,
+		Logger:          logger,
+		Tracer:          tracer,
+		SecurityManager: securityManager,
+	}
+
+	// Create GraphQL server
+	srv := handler.NewDefaultServer(NewExecutableSchema(Config{Resolvers: resolver}))
+
+	// Configure server
+	srv.AddTransport(&transport.Websocket{
+		Upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				// Configure origin checking
+				return config.WebSocketEnabled
+			},
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+		},
+		InitFunc: func(ctx context.Context, initPayload transport.InitPayload) (context.Context, error) {
+			// Extract auth token from connection params
+			token, ok := initPayload["Authorization"].(string)
+			if !ok {
+				token = initPayload.Authorization()
+			}
+
+			// Validate token and add user to context
+			userID, tenantID, role, err := securityManager.ValidateToken(token)
+			if err != nil {
+				return nil, err
+			}
+
+			ctx = context.WithValue(ctx, "user_id", userID)
+			ctx = context.WithValue(ctx, "tenant_id", tenantID)
+			ctx = context.WithValue(ctx, "role", role)
+
+			return ctx, nil
+		},
+		KeepAlivePingInterval: 10 * time.Second,
+	})
+
+	srv.AddTransport(transport.Options{})
+	srv.AddTransport(transport.GET{})
+	srv.AddTransport(transport.POST{})
+	srv.AddTransport(transport.MultipartForm{
+		MaxUploadSize: config.UploadMaxSize,
+		MaxMemory:     32 << 20, // 32 MB
+	})
+
+	// Add extensions
+	srv.Use(extension.Introspection{})
+	srv.Use(extension.AutomaticPersistedQuery{
+		Cache: lru.New(1000),
+	})
+
+	// Add complexity limits
+	srv.Use(extension.FixedComplexityLimit(config.MaxComplexity))
+
+	// Add middleware
+	srv.AroundOperations(func(ctx context.Context, next graphql.OperationHandler) graphql.ResponseHandler {
+		// Add tracing
+		ctx, span := tracer.StartSpan(ctx, "graphql.operation")
+		defer span.End()
+
+		// Add data loaders to context
+		ctx = WithLoaders(ctx, dataLoaders)
+
+		// Extract operation name
+		oc := graphql.GetOperationContext(ctx)
+		span.SetName(oc.OperationName)
+
+		return next(ctx)
+	})
+
+	srv.AroundFields(func(ctx context.Context, next graphql.Resolver) (interface{}, error) {
+		// Field-level tracing
+		fc := graphql.GetFieldContext(ctx)
+		ctx, span := tracer.StartSpan(ctx, "graphql.field."+fc.Field.Name)
+		defer span.End()
+
+		// Field-level caching
+		if directive := fc.Field.Definition.Directives.ForName("cache"); directive != nil {
+			if ttl := directive.Arguments.ForName("ttl"); ttl != nil {
+				// Implement caching logic
+				cacheKey := getCacheKey(fc)
+				if cached, found := getCachedValue(ctx, cacheKey); found {
+					return cached, nil
+				}
+
+				result, err := next(ctx)
+				if err == nil && ttl.Value.Raw != nil {
+					setCachedValue(ctx, cacheKey, result, time.Duration(ttl.Value.Raw.(int))*time.Second)
+				}
+				return result, err
+			}
+		}
+
+		// Field-level rate limiting
+		if directive := fc.Field.Definition.Directives.ForName("rateLimit"); directive != nil {
+			if !rateLimiter.Allow(1) {
+				return nil, &RateLimitError{Message: "Rate limit exceeded"}
+			}
+		}
+
+		// Field-level authorization
+		if directive := fc.Field.Definition.Directives.ForName("auth"); directive != nil {
+			if err := checkAuth(ctx, directive); err != nil {
+				return nil, err
+			}
+		}
+
+		return next(ctx)
+	})
+
+	srv.SetErrorPresenter(func(ctx context.Context, e error) *gqlerror.Error {
+		err := graphql.DefaultErrorPresenter(ctx, e)
+
+		// Log errors
+		logger.Error("GraphQL error",
+			zap.String("message", err.Message),
+			zap.String("path", err.Path.String()),
+			zap.Any("extensions", err.Extensions))
+
+		// Sanitize error messages for production
+		if !config.EnablePlayground {
+			err.Message = "Internal server error"
+			err.Extensions = nil
+		}
+
+		return err
+	})
+
+	srv.SetRecoverFunc(func(ctx context.Context, err interface{}) error {
+		logger.Error("GraphQL panic recovered",
+			zap.Any("error", err))
+
+		// Send alert
+		if am := observability.GetAlertManager(ctx); am != nil {
+			am.ManualAlert(observability.SeverityCritical, "graphql_panic",
+				fmt.Sprintf("GraphQL panic: %v", err))
+		}
+
+		return fmt.Errorf("internal server error")
+	})
+
+	return &GraphQLServer{
+		handler:         srv,
+		resolver:        resolver,
+		dataLoaders:     dataLoaders,
+		db:              db,
+		redis:           redis,
+		logger:          logger,
+		tracer:          tracer,
+		rateLimiter:     rateLimiter,
+		securityManager: securityManager,
+		config:          config,
+	}, nil
+}
+
+// RegisterRoutes registers GraphQL routes with Gin
+func (s *GraphQLServer) RegisterRoutes(router *gin.RouterGroup) {
+	// GraphQL endpoint
+	router.POST("/graphql", s.graphqlHandler())
+	router.GET("/graphql", s.graphqlHandler())
+
+	// GraphQL Playground
+	if s.config.EnablePlayground {
+		router.GET("/playground", s.playgroundHandler())
+	}
+
+	// GraphQL subscriptions via WebSocket
+	if s.config.WebSocketEnabled {
+		router.GET("/graphql/ws", s.websocketHandler())
+	}
+
+	// Schema endpoint
+	if s.config.EnableIntrospection {
+		router.GET("/schema", s.schemaHandler())
+	}
+}
+
+func (s *GraphQLServer) graphqlHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Add context values
+		ctx := c.Request.Context()
+
+		// Extract auth from header
+		if auth := c.GetHeader("Authorization"); auth != "" {
+			userID, tenantID, role, err := s.securityManager.ValidateToken(auth)
+			if err == nil {
+				ctx = context.WithValue(ctx, "user_id", userID)
+				ctx = context.WithValue(ctx, "tenant_id", tenantID)
+				ctx = context.WithValue(ctx, "role", role)
+			}
+		}
+
+		// Add request ID for tracing
+		requestID := c.GetHeader("X-Request-ID")
+		if requestID == "" {
+			requestID = generateRequestID()
+		}
+		ctx = context.WithValue(ctx, "request_id", requestID)
+
+		// Update request context
+		c.Request = c.Request.WithContext(ctx)
+
+		// Serve GraphQL
+		s.handler.ServeHTTP(c.Writer, c.Request)
+	}
+}
+
+func (s *GraphQLServer) playgroundHandler() gin.HandlerFunc {
+	h := playground.Handler("GraphQL Playground", "/api/graphql")
+	return func(c *gin.Context) {
+		h.ServeHTTP(c.Writer, c.Request)
+	}
+}
+
+func (s *GraphQLServer) websocketHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		s.handler.ServeHTTP(c.Writer, c.Request)
+	}
+}
+
+func (s *GraphQLServer) schemaHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		schema := s.resolver.Schema()
+		c.JSON(200, gin.H{
+			"schema": schema,
+		})
+	}
+}
+
+// Helper functions
+
+func getCacheKey(fc *graphql.FieldContext) string {
+	// Generate cache key based on field and arguments
+	args, _ := json.Marshal(fc.Args)
+	return fmt.Sprintf("gql:%s:%s:%s", fc.Object, fc.Field.Name, string(args))
+}
+
+func getCachedValue(ctx context.Context, key string) (interface{}, bool) {
+	// Get from Redis or in-memory cache
+	if loaders := GetLoaders(ctx); loaders != nil {
+		return loaders.cache.Get(key)
+	}
+	return nil, false
+}
+
+func setCachedValue(ctx context.Context, key string, value interface{}, ttl time.Duration) {
+	// Set in Redis or in-memory cache
+	if loaders := GetLoaders(ctx); loaders != nil {
+		loaders.cache.Set(key, value, ttl)
+	}
+}
+
+func checkAuth(ctx context.Context, directive *ast.Directive) error {
+	// Extract required role from directive
+	var requiredRole models.Role
+	if arg := directive.Arguments.ForName("requires"); arg != nil {
+		requiredRole = models.Role(arg.Value.Raw.(string))
+	}
+
+	// Check user role from context
+	userRole, ok := ctx.Value("role").(models.Role)
+	if !ok {
+		return &AuthorizationError{Message: "Unauthorized"}
+	}
+
+	// Check if user has required role
+	if !hasRequiredRole(userRole, requiredRole) {
+		return &AuthorizationError{Message: "Insufficient permissions"}
+	}
+
+	return nil
+}
+
+func hasRequiredRole(userRole, requiredRole models.Role) bool {
+	// Role hierarchy: SUPER_ADMIN > ADMIN > MANAGER > SALESMAN > USER
+	roleHierarchy := map[models.Role]int{
+		models.RoleSuperAdmin: 5,
+		models.RoleAdmin:      4,
+		models.RoleManager:    3,
+		models.RoleSalesman:   2,
+		models.RoleUser:       1,
+	}
+
+	return roleHierarchy[userRole] >= roleHierarchy[requiredRole]
+}
+
+func generateRequestID() string {
+	return fmt.Sprintf("req_%s", time.Now().Format("20060102150405"))
+}
+
+// Custom error types
+
+type RateLimitError struct {
+	Message string
+}
+
+func (e *RateLimitError) Error() string {
+	return e.Message
+}
+
+type AuthorizationError struct {
+	Message string
+}
+
+func (e *AuthorizationError) Error() string {
+	return e.Message
+}
+
+// Metrics for GraphQL
+
+func (s *GraphQLServer) RecordMetrics() {
+	// Record GraphQL metrics
+	metrics := &GraphQLMetrics{
+		QueriesPerSecond:      s.calculateQPS(),
+		MutationsPerSecond:    s.calculateMPS(),
+		SubscriptionsActive:   s.countActiveSubscriptions(),
+		AverageQueryTime:      s.calculateAvgQueryTime(),
+		CacheHitRate:          s.calculateCacheHitRate(),
+		ErrorRate:             s.calculateErrorRate(),
+	}
+
+	// Send to Prometheus
+	observability.RecordGraphQLMetrics(metrics)
+}
+
+type GraphQLMetrics struct {
+	QueriesPerSecond    float64
+	MutationsPerSecond  float64
+	SubscriptionsActive int
+	AverageQueryTime    time.Duration
+	CacheHitRate        float64
+	ErrorRate           float64
+}
+
+func (s *GraphQLServer) calculateQPS() float64 {
+	// Implementation would track queries per second
+	return 0.0
+}
+
+func (s *GraphQLServer) calculateMPS() float64 {
+	// Implementation would track mutations per second
+	return 0.0
+}
+
+func (s *GraphQLServer) countActiveSubscriptions() int {
+	// Implementation would count active WebSocket subscriptions
+	return 0
+}
+
+func (s *GraphQLServer) calculateAvgQueryTime() time.Duration {
+	// Implementation would calculate average query execution time
+	return 0
+}
+
+func (s *GraphQLServer) calculateCacheHitRate() float64 {
+	// Implementation would calculate cache hit rate
+	return 0.0
+}
+
+func (s *GraphQLServer) calculateErrorRate() float64 {
+	// Implementation would calculate error rate
+	return 0.0
+}

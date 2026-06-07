@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
@@ -93,16 +92,7 @@ func (s *CategoryService) CreateCategory(ctx context.Context, req CategoryReques
 }
 
 func (s *CategoryService) GetCategories(ctx context.Context, tenantID uuid.UUID, includeInactive bool) ([]CategoryResponse, error) {
-	return s.GetCategoriesWithShopFilter(ctx, tenantID, includeInactive, nil)
-}
-
-// GetCategoriesWithShopFilter returns categories, optionally filtered by shop (only categories with products that have stock in that shop)
-func (s *CategoryService) GetCategoriesWithShopFilter(ctx context.Context, tenantID uuid.UUID, includeInactive bool, shopID *uuid.UUID) ([]CategoryResponse, error) {
-	// Build cache key
 	cacheKey := fmt.Sprintf("categories:tenant:%s:inactive:%t", tenantID.String(), includeInactive)
-	if shopID != nil {
-		cacheKey = fmt.Sprintf("categories:tenant:%s:inactive:%t:shop:%s", tenantID.String(), includeInactive, shopID.String())
-	}
 
 	// Try to get from cache
 	var cachedCategories []CategoryResponse
@@ -111,47 +101,22 @@ func (s *CategoryService) GetCategoriesWithShopFilter(ctx context.Context, tenan
 	}
 
 	var categories []models.Category
+	query := s.db.Where("tenant_id = ?", tenantID)
 
-	if shopID != nil {
-		// Filter to only categories that have products (regardless of stock)
-		query := s.db.Model(&models.Category{}).
-			Select("DISTINCT categories.*").
-			Joins("INNER JOIN products ON products.category_id = categories.id AND products.tenant_id = categories.tenant_id").
-			Where("categories.tenant_id = ?", tenantID)
-
-		if !includeInactive {
-			query = query.Where("categories.is_active = ?", true)
-		}
-
-		if err := query.Order("categories.name ASC").Find(&categories).Error; err != nil {
-			return nil, fmt.Errorf("failed to get categories with shop filter: %w", err)
-		}
-	} else {
-		// Return all categories (existing behavior)
-		query := s.db.Where("tenant_id = ?", tenantID)
-
-		if !includeInactive {
-			query = query.Where("is_active = ?", true)
-		}
-
-		if err := query.Order("name ASC").Find(&categories).Error; err != nil {
-			return nil, fmt.Errorf("failed to get categories: %w", err)
-		}
+	if !includeInactive {
+		query = query.Where("is_active = ?", true)
 	}
 
-	// Get product counts for all categories in one query (eliminates N+1)
+	if err := query.Order("name ASC").Find(&categories).Error; err != nil {
+		return nil, fmt.Errorf("failed to get categories: %w", err)
+	}
+
+	// Get product counts for each category
 	productCounts := make(map[uuid.UUID]int64)
-	var countResults []struct {
-		CategoryID uuid.UUID `gorm:"column:category_id"`
-		Count      int64     `gorm:"column:count"`
-	}
-	s.db.Model(&models.Product{}).
-		Select("category_id, COUNT(*) as count").
-		Where("tenant_id = ?", tenantID).
-		Group("category_id").
-		Scan(&countResults)
-	for _, cr := range countResults {
-		productCounts[cr.CategoryID] = cr.Count
+	for _, category := range categories {
+		var count int64
+		s.db.Model(&models.Product{}).Where("category_id = ? AND tenant_id = ?", category.ID, tenantID).Count(&count)
+		productCounts[category.ID] = count
 	}
 
 	// Build hierarchical response
@@ -178,12 +143,8 @@ func (s *CategoryService) GetCategoriesWithShopFilter(ctx context.Context, tenan
 		}
 	}
 
-	// Cache the result (shorter cache for shop-filtered results)
-	cacheDuration := time.Duration(300) * time.Second // 5 minutes
-	if shopID != nil {
-		cacheDuration = time.Duration(60) * time.Second // 1 minute for shop-specific cache
-	}
-	s.cache.Set(ctx, cacheKey, rootCategories, cacheDuration)
+	// Cache the result
+	s.cache.Set(ctx, cacheKey, rootCategories, 300) // Cache for 5 minutes
 
 	return rootCategories, nil
 }
@@ -334,19 +295,12 @@ func (s *CategoryService) GetBrands(ctx context.Context, tenantID uuid.UUID, inc
 		return nil, fmt.Errorf("failed to get brands: %w", err)
 	}
 
-	// Get product counts for all brands in one query (eliminates N+1)
+	// Get product counts for each brand
 	productCounts := make(map[uuid.UUID]int64)
-	var countResults []struct {
-		BrandID uuid.UUID `gorm:"column:brand_id"`
-		Count   int64     `gorm:"column:count"`
-	}
-	s.db.Model(&models.Product{}).
-		Select("brand_id, COUNT(*) as count").
-		Where("tenant_id = ?", tenantID).
-		Group("brand_id").
-		Scan(&countResults)
-	for _, cr := range countResults {
-		productCounts[cr.BrandID] = cr.Count
+	for _, brand := range brands {
+		var count int64
+		s.db.Model(&models.Product{}).Where("brand_id = ? AND tenant_id = ?", brand.ID, tenantID).Count(&count)
+		productCounts[brand.ID] = count
 	}
 
 	var responses []BrandResponse

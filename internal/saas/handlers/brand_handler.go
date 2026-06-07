@@ -13,12 +13,14 @@ import (
 // BrandHandler handles brand management API endpoints
 type BrandHandler struct {
 	brandService *services.BrandService
+	excelService *services.BrandExcelService
 }
 
 // NewBrandHandler creates a new brand handler
-func NewBrandHandler(brandService *services.BrandService) *BrandHandler {
+func NewBrandHandler(brandService *services.BrandService, excelService *services.BrandExcelService) *BrandHandler {
 	return &BrandHandler{
 		brandService: brandService,
+		excelService: excelService,
 	}
 }
 
@@ -575,7 +577,6 @@ func (h *BrandHandler) CreateBrandCategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"success": true,
 		"message": "Brand category created successfully",
 		"data":    category,
 	})
@@ -603,7 +604,6 @@ func (h *BrandHandler) CreateBrandSubcategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"success": true,
 		"message": "Brand subcategory created successfully",
 		"data":    subcategory,
 	})
@@ -611,14 +611,18 @@ func (h *BrandHandler) CreateBrandSubcategory(c *gin.Context) {
 
 // GetAllBrandCategories gets all brand categories
 // @Summary Get all brand categories
-// @Description Get all active brand categories
+// @Description Get all brand categories with optional active filter
 // @Tags Brands
 // @Produce json
+// @Param active_only query bool false "Show only active categories (default: false for admin)"
 // @Success 200 {array} services.BrandCategoryResponse
 // @Failure 500 {object} map[string]interface{}
 // @Router /api/super-admin/brands/categories [get]
 func (h *BrandHandler) GetAllBrandCategories(c *gin.Context) {
-	categories, err := h.brandService.GetAllBrandCategories()
+	// For admin dashboard, default to showing all categories (active + inactive) for management
+	activeOnly := c.Query("active_only") == "true"
+
+	categories, err := h.brandService.GetAllBrandCategoriesWithFilter(activeOnly)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to fetch brand categories",
@@ -627,27 +631,40 @@ func (h *BrandHandler) GetAllBrandCategories(c *gin.Context) {
 		return
 	}
 
+	// Count active and inactive categories
+	activeCount := 0
+	inactiveCount := 0
+	for _, category := range categories {
+		if category.IsActive {
+			activeCount++
+		} else {
+			inactiveCount++
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Brand categories retrieved successfully",
-		"data":    categories,
-		"count":   len(categories),
+		"message":        "Brand categories retrieved successfully",
+		"data":           categories,
+		"count":          len(categories),
+		"active_count":   activeCount,
+		"inactive_count": inactiveCount,
 	})
 }
 
-// GetBrandSubcategories gets brand subcategories
+// GetBrandSubcategories gets brand subcategories (independent of categories)
 // @Summary Get brand subcategories
-// @Description Get brand subcategories, optionally filtered by category
+// @Description Get all brand subcategories with optional active filter (independent of categories)
 // @Tags Brands
 // @Produce json
-// @Param category_id query string false "Filter by category ID"
+// @Param active_only query bool false "Show only active subcategories (default: false for admin)"
 // @Success 200 {array} services.BrandSubcategoryResponse
 // @Failure 500 {object} map[string]interface{}
 // @Router /api/super-admin/brands/subcategories [get]
 func (h *BrandHandler) GetBrandSubcategories(c *gin.Context) {
-	categoryID := c.Query("category_id")
+	// For admin dashboard, default to showing all subcategories (active + inactive) for management
+	activeOnly := c.Query("active_only") == "true"
 
-	subcategories, err := h.brandService.GetBrandSubcategories(categoryID)
+	subcategories, err := h.brandService.GetBrandSubcategoriesWithFilter(activeOnly)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to fetch brand subcategories",
@@ -656,11 +673,23 @@ func (h *BrandHandler) GetBrandSubcategories(c *gin.Context) {
 		return
 	}
 
+	// Count active and inactive subcategories
+	activeCount := 0
+	inactiveCount := 0
+	for _, subcategory := range subcategories {
+		if subcategory.IsActive {
+			activeCount++
+		} else {
+			inactiveCount++
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Brand subcategories retrieved successfully",
-		"data":    subcategories,
-		"count":   len(subcategories),
+		"message":        "Brand subcategories retrieved successfully",
+		"data":           subcategories,
+		"count":          len(subcategories),
+		"active_count":   activeCount,
+		"inactive_count": inactiveCount,
 	})
 }
 
@@ -692,7 +721,6 @@ func (h *BrandHandler) DeleteBrandVariant(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
 		"message": "Brand variant deleted successfully",
 	})
 }
@@ -736,7 +764,6 @@ func (h *BrandHandler) UpdateBrandCategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
 		"message": "Brand category updated successfully",
 		"data":    category,
 	})
@@ -770,7 +797,6 @@ func (h *BrandHandler) DeleteBrandCategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
 		"message": "Brand category deleted successfully",
 	})
 }
@@ -814,7 +840,6 @@ func (h *BrandHandler) UpdateBrandSubcategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
 		"message": "Brand subcategory updated successfully",
 		"data":    subcategory,
 	})
@@ -848,7 +873,6 @@ func (h *BrandHandler) DeleteBrandSubcategory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
 		"message": "Brand subcategory deleted successfully",
 	})
 }
@@ -992,4 +1016,172 @@ func (h *BrandHandler) CleanupSoftDeletedRecords(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Soft-deleted records cleaned up successfully",
 	})
+}
+
+// DownloadBrandTemplate generates and downloads an Excel template for brand onboarding
+// @Summary Download brand onboarding template
+// @Description Download an Excel template with instructions for bulk brand import
+// @Tags Brands
+// @Produce application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+// @Success 200 {file} application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+// @Failure 500 {object} map[string]interface{}
+// @Router /api/super-admin/brands/template/download [get]
+func (h *BrandHandler) DownloadBrandTemplate(c *gin.Context) {
+	buf, err := h.excelService.GenerateBrandOnboardingTemplate()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to generate Excel template",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Set headers for file download
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", "attachment; filename=brand_onboarding_template.xlsx")
+	c.Header("Content-Length", strconv.Itoa(buf.Len()))
+
+	// Write buffer to response
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buf.Bytes())
+}
+
+// BulkImportBrandsFromExcel imports brands from an uploaded Excel file
+// @Summary Bulk import brands from Excel
+// @Description Upload an Excel file to bulk import brands and variants with shop-specific stock initialization
+// @Tags Brands
+// @Accept multipart/form-data
+// @Produce json
+// @Param file formData file true "Excel file containing brand data"
+// @Param shop_id formData string false "Shop ID for initial stock setup"
+// @Param tenant_id formData string false "Tenant ID for brand assignment"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /api/super-admin/brands/bulk-import [post]
+func (h *BrandHandler) BulkImportBrandsFromExcel(c *gin.Context) {
+	// Get shop ID and tenant ID from form data (optional)
+	shopIDStr := c.PostForm("shop_id")
+	tenantIDStr := c.PostForm("tenant_id")
+
+	// Get uploaded file
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "No file uploaded",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Validate file extension
+	if !isExcelFile(fileHeader.Filename) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid file format. Please upload an Excel file (.xlsx)",
+		})
+		return
+	}
+
+	// Open the uploaded file
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to open uploaded file",
+			"details": err.Error(),
+		})
+		return
+	}
+	defer file.Close()
+
+	// Read file contents
+	fileBytes := make([]byte, fileHeader.Size)
+	_, err = file.Read(fileBytes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to read uploaded file",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Parse Excel file
+	parseResult, err := h.excelService.ParseBrandExcelFile(fileBytes)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Failed to parse Excel file",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// If there are parsing errors, return them without proceeding to import
+	if parseResult.ErrorCount > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message":         "Excel file has validation errors",
+			"filename":        fileHeader.Filename,
+			"total_rows":      parseResult.TotalRows,
+			"success_count":   parseResult.SuccessCount,
+			"error_count":     parseResult.ErrorCount,
+			"errors":          parseResult.Errors,
+			"imported_brands": []interface{}{}, // Empty array for frontend compatibility
+		})
+		return
+	}
+
+	// Parse shop ID if provided
+	var shopID *uuid.UUID
+	if shopIDStr != "" {
+		parsed, err := uuid.Parse(shopIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid shop ID format",
+				"details": err.Error(),
+			})
+			return
+		}
+		shopID = &parsed
+	}
+
+	// Parse tenant ID if provided
+	var tenantID *uuid.UUID
+	if tenantIDStr != "" {
+		parsed, err := uuid.Parse(tenantIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid tenant ID format",
+				"details": err.Error(),
+			})
+			return
+		}
+		tenantID = &parsed
+	}
+
+	// Import brands to database
+	importResult, err := h.brandService.ImportBrandsFromExcel(parseResult.ImportedBrands, shopID, tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to import brands to database",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Return successful import results
+	c.JSON(http.StatusOK, gin.H{
+		"message":            "Brands imported successfully",
+		"filename":           fileHeader.Filename,
+		"total_rows":         parseResult.TotalRows,
+		"success_count":      importResult.BrandsCreated,
+		"error_count":        0,
+		"brands_created":     importResult.BrandsCreated,
+		"variants_created":   importResult.VariantsCreated,
+		"stock_initialized":  importResult.StockInitialized,
+		"shop_id":            shopID,
+		"tenant_id":          tenantID,
+		"imported_brands":    importResult.ImportedBrands,
+	})
+}
+
+// isExcelFile checks if the filename has a valid Excel extension
+func isExcelFile(filename string) bool {
+	return len(filename) > 5 && filename[len(filename)-5:] == ".xlsx"
 }

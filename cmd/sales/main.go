@@ -11,17 +11,52 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	notifservices "github.com/liquorpro/go-backend/internal/notifications/services"
+	"github.com/liquorpro/go-backend/internal/sales/backfill"
 	"github.com/liquorpro/go-backend/internal/sales/handlers"
 	"github.com/liquorpro/go-backend/internal/sales/routes"
 	"github.com/liquorpro/go-backend/internal/sales/services"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
+	"github.com/liquorpro/go-backend/pkg/shared/alias"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
+	"github.com/sirupsen/logrus"
 )
 
 func main() {
+	// v1.0.140 — CLI subcommand for retrospective digit-training-data backfill.
+	// Mines existing approved daily_sales_records into digit_training_samples
+	// without booting the gin server. Idempotent + dry-run-safe.
+	if len(os.Args) > 1 && os.Args[1] == "--backfill-training-data" {
+		runBackfillSubcommand()
+		return
+	}
+
+	// v1.0.165 — pipeline bench harness. Re-feeds historical job images
+	// through alternative OCR pipelines (current cache, PaddleOCR cv-sidecar,
+	// AWS Textract Tables when creds available) and emits a CSV diff against
+	// the operator-confirmed truth. Zero prod impact: read-only, no writes.
+	//
+	// Usage: /root/sales --pipeline-bench --jobs <id1,id2,...> --out /tmp/x.csv
+	if len(os.Args) > 1 && os.Args[1] == "--pipeline-bench" {
+		runPipelineBench()
+		return
+	}
+
+	// v1.0.165 — end-to-end Textract+matching bench. Same flag pattern.
+	// Usage: /tmp/sales --textract-match --jobs <id1,id2,...> --out /tmp/x.csv
+	if len(os.Args) > 1 && os.Args[1] == "--textract-match" {
+		runTextractMatchBench()
+		return
+	}
+
+	// v1.0.167 D4 — bootstrap alias table from approved daily_sales_items.
+	// Usage: /tmp/sales-bench --alias-backfill --tenant <uuid> [--dry-run]
+	if len(os.Args) > 1 && os.Args[1] == "--alias-backfill" {
+		runAliasBackfill()
+		return
+	}
+
 	// Load configuration
 	cfg, err := config.LoadConfig("config")
 	if err != nil {
@@ -52,6 +87,13 @@ func main() {
 	}
 	defer db.Close()
 
+	// Run database migrations
+	log.Println("Running database migrations...")
+	if err := db.Migrate(); err != nil {
+		log.Printf("Migration warning: %v", err)
+		// Continue anyway as some migrations might be optional
+	}
+
 	// Initialize cache
 	cacheConfig := cache.Config{
 		Host:     cfg.Redis.Host,
@@ -66,44 +108,28 @@ func main() {
 	}
 	defer redisCache.Close()
 
-	// Initialize notification services for workflow notifications
-	notificationService := notifservices.NewNotificationService(db, redisCache)
-	workflowNotificationService := notifservices.NewWorkflowNotificationService(db, notificationService)
-
 	// Initialize services
 	dailySalesService := services.NewDailySalesService(db, redisCache)
 	salesService := services.NewSalesService(db, redisCache)
 	returnsService := services.NewReturnsService(db, redisCache)
 	dashboardService := services.NewDashboardService(db, redisCache)
+	dayClosingService := services.NewDayClosingService(db, redisCache)
 
-	// Wire up workflow notifications for sales approval workflows
-	salesService.SetWorkflowNotificationService(workflowNotificationService)
-	dailySalesService.SetWorkflowNotificationService(workflowNotificationService)
-	log.Println("Workflow notifications initialized for sales service")
+	// Initialize OCR service with Vision API
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
 
-	// Initialize and start pending sales reminder scheduler
-	pendingSalesScheduler := services.NewPendingSalesScheduler(db, workflowNotificationService)
-	pendingSalesScheduler.Start()
-	defer pendingSalesScheduler.Stop()
-
-	// Initialize OCR service with Gemini AI
-	ocrService, err := services.NewOCRService(db)
+	ocrService, err := services.NewSimpleOCRService(db, redisCache, logger)
 	if err != nil {
-		log.Printf("Warning: Failed to initialize OCR service: %v", err)
-		log.Println("OCR endpoints will not be available")
-	}
-	if ocrService != nil {
-		defer ocrService.Close()
+		log.Printf("Warning: OCR service initialization failed: %v", err)
+		// Continue without OCR service - it will run in mock mode
 	}
 
-	// Initialize AI Validation service (requires OCR service for auto-validation)
-	var validationService *services.ValidationService
-	if ocrService != nil {
-		validationService = services.NewValidationService(db, redisCache, ocrService)
-		log.Println("AI Validation service initialized for daily sales records")
-	} else {
-		log.Println("Warning: AI Validation service not available (OCR service required)")
-	}
+	// Initialize alias service for AI learning (with Redis cache for scale).
+	// Created BEFORE salesHandlers so the v1.0.175 Brand Shortcuts CRUD can
+	// share the same singleton — ensures cache invalidation is consistent
+	// between manual operator edits and the auto-learning loop.
+	aliasService := alias.NewAliasService(db, alias.WithRedis(redisCache.Client()))
 
 	// Initialize handlers
 	salesHandlers := handlers.NewSalesHandlers(
@@ -111,65 +137,76 @@ func main() {
 		salesService,
 		returnsService,
 		dashboardService,
+		dayClosingService,
+		aliasService,
+		db,
 	)
 
-	// Wire up validation service for AI-powered validation
-	if validationService != nil {
-		salesHandlers.SetValidationService(validationService)
-	}
-
-	// Initialize OCR handlers (nil-safe)
+	// Initialize OCR handlers if service is available
 	var ocrHandlers *handlers.OCRHandlers
 	if ocrService != nil {
-		ocrHandlers = handlers.NewOCRHandlers(ocrService)
+		ocrHandlers = handlers.NewOCRHandlers(ocrService, logger)
 	}
 
-	// Initialize draft service and handlers (backend-based draft persistence)
-	draftService := services.NewDraftService(db, dailySalesService)
-	draftHandlers := handlers.NewDraftHandlers(draftService)
-	log.Println("Draft persistence service initialized for daily sales")
+	// Initialize Smart Sale service and handlers.
+	var smartSaleHandlers *handlers.SmartSaleHandlers
+	var smartSaleJobHandlers *handlers.SmartSaleJobHandlers
+	var smartSaleJobService *services.SmartSaleJobService
+	if ocrService != nil && ocrService.GetGeminiService() != nil {
+		smartSaleService := services.NewSmartSaleService(db, redisCache, ocrService.GetGeminiService(), logger, aliasService)
+		smartSaleHandlers = handlers.NewSmartSaleHandlers(smartSaleService, aliasService, db, logger)
 
-	// Initialize purcha report service and handlers (daily sales register)
-	purchaReportService := services.NewPurchaReportService(db, redisCache)
-	purchaReportHandler := handlers.NewPurchaReportHandler(purchaReportService)
-	log.Println("Purcha report service initialized for daily sales register")
-
-	// Initialize training image service and handlers (AI training data preparation)
-	trainingImageService := services.NewTrainingImageService(db)
-	trainingHandlers := handlers.NewTrainingHandlers(trainingImageService)
-	log.Println("Training image service initialized for AI training data preparation")
-
-	// Initialize AI Training V2 service and handlers (generic document extraction training)
-	var aiTrainingHandlers *handlers.AITrainingHandlers
-	aiTrainingService, err := services.NewAITrainingService(db)
-	if err != nil {
-		log.Printf("Warning: Failed to initialize AI Training V2 service: %v", err)
-		log.Println("AI Training V2 endpoints will not be available")
+		// Smart Sale async job queue — mirrors the Smart Stock Setup pattern:
+		// submit returns 202 + job_id, a Postgres-backed worker polls the
+		// queue and runs ProcessSmartSale in the background, clients poll
+		// for the result. Survives app backgrounding and transient vendor
+		// failures (3x retry) that the sync handler can't recover from.
+		smartSaleJobService = services.NewSmartSaleJobService(db, smartSaleService)
+		smartSaleJobHandlers = handlers.NewSmartSaleJobHandlers(smartSaleJobService, logger)
+		log.Println("Smart Sale service initialized successfully with AI learning (sync + async job queue)")
 	} else {
-		aiTrainingHandlers = handlers.NewAITrainingHandlers(aiTrainingService)
-		log.Println("AI Training V2 service initialized for generic document extraction training")
+		log.Println("Warning: Smart Sale service not available (Gemini API not configured)")
 	}
+
+	// Initialize AI Feedback handlers
+	aiFeedbackHandlers := handlers.NewAIFeedbackHandlers(db)
 
 	// Create router
 	router := gin.New()
 
+	// Configure max multipart memory for OCR and Smart Sale image uploads
+	// Allow up to 64MB for image uploads (Smart Sale supports up to 5 images at 10MB each)
+	router.MaxMultipartMemory = 64 << 20 // 64 MiB
+
 	// Add middleware
 	router.Use(gin.Recovery())
 	router.Use(middleware.LoggingMiddleware())
-	router.Use(middleware.RequestIDMiddleware())
+	// router.Use(middleware.RequestIDMiddleware()) // Not implemented yet
 	router.Use(middleware.CORSMiddleware())
 
-	// Setup routes
-	// Use SetupProtectedRoutes since this service is behind the API Gateway
-	// The gateway handles authentication and forwards user context via headers
-	routes.SetupProtectedRoutes(router, cfg, redisCache, salesHandlers, ocrHandlers, draftHandlers, purchaReportHandler, trainingHandlers, aiTrainingHandlers)
+	// Serve uploaded images (receipt photos, etc.)
+	router.Static("/uploads", "/app/uploads")
 
-	// Start server
+	// Setup routes - Use SetupProtectedRoutes for gateway-style routing
+	// Gateway strips /api/sales prefix, so we need routes without /api prefix
+	routes.SetupProtectedRoutes(router, cfg, redisCache, salesHandlers, ocrHandlers, smartSaleHandlers, aiFeedbackHandlers, smartSaleJobHandlers)
+
+	// Start server.
+	// v1.0.131 — bump WriteTimeout to 600s. Smart Sale eval / Smart Sale full
+	// pipeline (Claude main + voting + recovery + page-rescue + handwritten-
+	// band) can take 90-180s end-to-end on dense multi-page handwritten
+	// registers. Pre-v1.0.131 the 120s default truncated long requests with
+	// "empty reply from server" — admin retried + thought the eval was broken.
+	// Read timeout stays at config default (image upload size hasn't changed).
+	writeTimeout := cfg.Server.WriteTimeout
+	if writeTimeout < 600 {
+		writeTimeout = 600
+	}
 	srv := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Services.Sales.Port),
 		Handler:      router,
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
-		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
+		WriteTimeout: time.Duration(writeTimeout) * time.Second,
 		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
 	}
 
@@ -180,6 +217,15 @@ func main() {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
+
+	// Start the Smart Sale background-job worker if wired. Worker context is
+	// canceled on SIGINT/SIGTERM so an in-flight job can complete (or give
+	// up at its own timeout) rather than being hard-killed mid-DB-write.
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	if smartSaleJobService != nil {
+		smartSaleJobService.StartWorker(workerCtx)
+	}
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -196,4 +242,32 @@ func main() {
 	}
 
 	log.Println("Sales service stopped")
+}
+
+// runBackfillSubcommand wires up DB + cache + logger and hands off to the
+// backfill package. Keeps main() lean and avoids a second binary target.
+func runBackfillSubcommand() {
+	cfg, err := config.LoadConfig("config")
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+	db, err := database.NewDatabase(database.Config{
+		Host: cfg.Database.Host, Port: cfg.Database.Port,
+		User: cfg.Database.User, Password: cfg.Database.Password,
+		DBName: cfg.Database.DBName, SSLMode: cfg.Database.SSLMode, TimeZone: cfg.Database.TimeZone,
+	})
+	if err != nil {
+		log.Fatalf("backfill: db connect: %v", err)
+	}
+	defer db.Close()
+	redisCache, err := cache.NewCache(cache.Config{
+		Host: cfg.Redis.Host, Port: cfg.Redis.Port, Password: cfg.Redis.Password, DB: cfg.Redis.DB,
+	})
+	if err != nil {
+		log.Fatalf("backfill: redis connect: %v", err)
+	}
+	defer redisCache.Close()
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	backfill.ParseFlagsAndRun(db, redisCache, logger)
 }

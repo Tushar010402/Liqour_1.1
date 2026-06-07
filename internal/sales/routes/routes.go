@@ -3,24 +3,15 @@ package routes
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/sales/handlers"
-	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
-	"github.com/liquorpro/go-backend/pkg/shared/logger"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
 )
 
 // SetupRoutes configures all sales service routes
-func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, draftHandlers *handlers.DraftHandlers, purchaReportHandler *handlers.PurchaReportHandler, trainingHandlers *handlers.TrainingHandlers, aiTrainingHandlers *handlers.AITrainingHandlers) {
-	// Prometheus metrics
-	router.Use(monitoring.PrometheusMiddleware("sales"))
-	router.GET("/metrics", monitoring.PrometheusHandler())
-
+func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, smartSaleHandlers *handlers.SmartSaleHandlers, aiFeedbackHandlers *handlers.AIFeedbackHandlers) {
 	// Health check
 	router.GET("/health", salesHandlers.Health)
-
-	// WebSocket endpoint for real-time updates (handles auth via query params)
-	router.GET("/ws", handlers.HandleWebSocket(logger.Logger, cfg.JWT.Secret))
 
 	// All routes require authentication and tenant isolation
 	api := router.Group("/api")
@@ -28,104 +19,96 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, sal
 	api.Use(middleware.TenantMiddleware())
 
 	// Daily Sales Routes (Critical for bulk entry workflow)
+	// All authenticated tenant users can create/update daily sales
 	dailySales := api.Group("/daily-records")
 	{
 		dailySales.GET("", salesHandlers.GetDailySalesRecords)
-		dailySales.POST("", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.CreateDailySalesRecord)
-		dailySales.GET("/exists", salesHandlers.CheckDailySalesRecordExists) // Check record existence (SINGLE SOURCE OF TRUTH for drafts)
+		dailySales.POST("", salesHandlers.CreateDailySalesRecord) // All tenant users can create
 		dailySales.GET("/:id", salesHandlers.GetDailySalesRecordByID)
-		dailySales.PUT("/:id", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.UpdateDailySalesRecord)
-		dailySales.PATCH("/:id/change-date", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.ChangeDailySalesRecordDate) // Change date only
-		dailySales.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin"), salesHandlers.ApproveDailySalesRecord)
-		dailySales.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin"), salesHandlers.RejectDailySalesRecord)
-		dailySales.POST("/:id/copy", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.CopyDailySalesRecord) // Copy for rejected record recovery
-		dailySales.POST("/upload-image", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.UploadDailySalesImages)
-
-		// AI Validation endpoints
-		dailySales.GET("/:id/validation", salesHandlers.GetValidation)
-		dailySales.POST("/:id/validation/trigger", middleware.RoleMiddleware("manager", "admin"), salesHandlers.TriggerValidation)
-		dailySales.POST("/:id/validation/confirm", middleware.RoleMiddleware("manager", "admin"), salesHandlers.ConfirmValidation)
+		dailySales.PUT("/:id", salesHandlers.UpdateDailySalesRecord) // All tenant users can update
+		// v1.0.121: dedicated date-only PATCH so admin can correct a wrong date
+		// from the list page without re-submitting the entire record. Restricted
+		// to admin/manager/owner because date drift affects reports + dashboards.
+		dailySales.PATCH("/:id/record-date", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.UpdateDailySalesRecordDate)
+		dailySales.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.ApproveDailySalesRecord)
+		dailySales.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.RejectDailySalesRecord)
+		// v1.0.133 — within-7-days reapply for approved sales. Snaps stock back
+		// to the closing_stock recorded on each item, undoing any drift since
+		// approval. Returns 410 Gone past the 7-day window.
+		dailySales.POST("/:id/reapply", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.ReapplyDailySalesRecord)
+		// v1.0.149 — operator-driven row reorder on Sales Summary. Bulk update
+		// daily_sales_items.position so every other view (web admin, daily
+		// entry summary, mobile sales history) renders the same order.
+		dailySales.PATCH("/:id/items/reorder", salesHandlers.ReorderDailySalesItems)
 	}
 
-	// Validation accuracy dashboard (global endpoint)
-	api.GET("/sales/validation/accuracy", middleware.RoleMiddleware("manager", "admin"), salesHandlers.GetAccuracyDashboard)
-
-	// Industrial-grade Learning & Analytics endpoints
-	learning := api.Group("/sales/learning")
-	{
-		learning.GET("/stats", middleware.RoleMiddleware("manager", "admin"), salesHandlers.GetLearningStats)
-		learning.GET("/accuracy-trend", middleware.RoleMiddleware("manager", "admin"), salesHandlers.GetAccuracyTrend)
-		learning.POST("/batch-process", middleware.RoleMiddleware("admin"), salesHandlers.TriggerBatchLearning)
-	}
-
-	// Alias: daily-sales routes (for Flutter app compatibility)
+	// Alias: /daily-sales routes (for Flutter app compatibility)
 	dailySalesAlias := api.Group("/daily-sales")
 	{
 		dailySalesAlias.GET("", salesHandlers.GetDailySalesRecords)
-		dailySalesAlias.POST("", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.CreateDailySalesRecord)
-		dailySalesAlias.GET("/exists", salesHandlers.CheckDailySalesRecordExists) // Check record existence (SINGLE SOURCE OF TRUTH for drafts)
+		dailySalesAlias.POST("", salesHandlers.CreateDailySalesRecord)
 		dailySalesAlias.GET("/:id", salesHandlers.GetDailySalesRecordByID)
-		dailySalesAlias.PUT("/:id", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.UpdateDailySalesRecord)
-		dailySalesAlias.PATCH("/:id/change-date", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.ChangeDailySalesRecordDate) // Change date only
-		dailySalesAlias.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin"), salesHandlers.ApproveDailySalesRecord)
-		dailySalesAlias.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin"), salesHandlers.RejectDailySalesRecord)
-		dailySalesAlias.POST("/:id/copy", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.CopyDailySalesRecord) // Copy for rejected record recovery
-		dailySalesAlias.POST("/upload-image", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.UploadDailySalesImages)
+		dailySalesAlias.PUT("/:id", salesHandlers.UpdateDailySalesRecord)
+		dailySalesAlias.PATCH("/:id/record-date", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.UpdateDailySalesRecordDate)
+		dailySalesAlias.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.ApproveDailySalesRecord)
+		dailySalesAlias.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.RejectDailySalesRecord)
+		dailySalesAlias.POST("/:id/reapply", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.ReapplyDailySalesRecord)
+		dailySalesAlias.PATCH("/:id/items/reorder", salesHandlers.ReorderDailySalesItems)
+		dailySalesAlias.POST("/upload-image", salesHandlers.UploadDailySalesImage)
+	}
 
-		// AI Validation endpoints (alias)
-		dailySalesAlias.GET("/:id/validation", salesHandlers.GetValidation)
-		dailySalesAlias.POST("/:id/validation/trigger", middleware.RoleMiddleware("manager", "admin"), salesHandlers.TriggerValidation)
-		dailySalesAlias.POST("/:id/validation/confirm", middleware.RoleMiddleware("manager", "admin"), salesHandlers.ConfirmValidation)
+	// v1.0.162 — admin-only data-heal endpoints.
+	salesAdmin := api.Group("/sales/admin")
+	salesAdmin.Use(middleware.RoleMiddleware("admin", "owner"))
+	{
+		salesAdmin.POST("/heal-approve-corruption", salesHandlers.HealApproveCorruption)
+	}
 
-		// Daily Sales Revert with dual OTP verification (admin/owner only)
-		dailySalesAlias.POST("/:id/revert/request-otp", middleware.RoleMiddleware("admin", "owner"), salesHandlers.RequestDailySalesRevertOTP)
-		dailySalesAlias.POST("/:id/revert", middleware.RoleMiddleware("admin", "owner"), salesHandlers.RevertDailySalesRecordWithOTP)
-
-		// Draft persistence endpoints (backend-based, replaces Hive local storage)
-		if draftHandlers != nil {
-			dailySalesAlias.GET("/draft", middleware.RoleMiddleware("salesman", "manager", "admin"), draftHandlers.GetDraft)
-			dailySalesAlias.POST("/draft", middleware.RoleMiddleware("salesman", "manager", "admin"), draftHandlers.SaveDraft)
-			dailySalesAlias.DELETE("/draft", middleware.RoleMiddleware("salesman", "manager", "admin"), draftHandlers.DiscardDraft)
-			dailySalesAlias.POST("/draft/submit", middleware.RoleMiddleware("salesman", "manager", "admin"), draftHandlers.SubmitDraft)
-			dailySalesAlias.GET("/drafts", middleware.RoleMiddleware("salesman", "manager", "admin"), draftHandlers.GetUserDrafts)
-		}
+	// v1.0.175 — Brand Shortcuts. Lets operators see / add / remove the
+	// alias rows the Smart Sale + Stock Setup matchers already consume.
+	// Same auth + tenant middleware as the rest of /api/sales (inherited
+	// from the `api` group above). All authenticated tenant users can
+	// list/create/delete; tenant_id scoping enforced server-side.
+	aliases := api.Group("/sales/aliases")
+	{
+		aliases.GET("", salesHandlers.ListBrandAliases)
+		aliases.POST("", salesHandlers.CreateBrandAlias)
+		aliases.DELETE("/:id", salesHandlers.DeleteBrandAlias)
 	}
 
 	// Individual Sales Routes
+	// All authenticated tenant users can create sales
 	sales := api.Group("/sales")
 	{
 		sales.GET("", salesHandlers.GetSales)
-		sales.POST("", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.CreateSale)
+		sales.POST("", salesHandlers.CreateSale) // All tenant users can create
 		sales.GET("/:id", salesHandlers.GetSaleByID)
-		sales.PUT("/:id", middleware.RoleMiddleware("salesman", "manager", "assistant_manager", "admin"), salesHandlers.UpdateSale)
-		sales.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin"), salesHandlers.ApproveSale)
-		sales.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin"), salesHandlers.RejectSale)
-		// Sale Revert with dual OTP verification (admin/owner only)
-		sales.POST("/:id/revert/request-otp", middleware.RoleMiddleware("admin", "owner"), salesHandlers.RequestRevertOTP)
-		sales.POST("/:id/revert", middleware.RoleMiddleware("admin", "owner"), salesHandlers.RevertSaleWithOTP)
+		sales.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.ApproveSale)
+		sales.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.RejectSale)
 	}
 
 	// Sale Returns Routes
+	// All authenticated tenant users can create returns
 	returns := api.Group("/returns")
 	{
 		returns.GET("", salesHandlers.GetSaleReturns)
-		returns.POST("", middleware.RoleMiddleware("salesman", "manager", "admin"), salesHandlers.CreateSaleReturn)
+		returns.POST("", salesHandlers.CreateSaleReturn) // All tenant users can create
 		returns.GET("/:id", salesHandlers.GetSaleReturnByID)
-		returns.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin"), salesHandlers.ApproveSaleReturn)
-		returns.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin"), salesHandlers.RejectSaleReturn)
+		returns.POST("/:id/approve", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.ApproveSaleReturn)
+		returns.POST("/:id/reject", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.RejectSaleReturn)
 	}
 
 	// Pending Items (for approval workflows)
 	pending := api.Group("/pending")
 	{
-		pending.GET("/sales", middleware.RoleMiddleware("manager", "admin"), salesHandlers.GetPendingSales)
-		pending.GET("/returns", middleware.RoleMiddleware("manager", "admin"), salesHandlers.GetPendingReturns)
+		pending.GET("/sales", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.GetPendingSales)
+		pending.GET("/returns", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.GetPendingReturns)
 	}
 
 	// Financial Reports
 	financial := api.Group("/financial")
 	{
-		financial.GET("/uncollected", middleware.RoleMiddleware("executive", "manager", "admin"), salesHandlers.GetUncollectedSales)
+		financial.GET("/uncollected", middleware.RoleMiddleware("executive", "manager", "admin", "owner"), salesHandlers.GetUncollectedSales)
 	}
 
 	// Dashboard and Summary Routes
@@ -134,197 +117,79 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, sal
 		dashboard.GET("/summary", salesHandlers.GetDashboardSummary)
 	}
 
-	// Purcha Report Routes (Daily Sales Register)
-	if purchaReportHandler != nil {
-		reports := api.Group("/reports")
-		{
-			reports.GET("/purcha/preview", purchaReportHandler.GetPurchaReportPreview)
-			reports.GET("/purcha/pdf", purchaReportHandler.GetPurchaReportPDF)
-		}
-	}
-
-	// OCR and Image Processing Routes with Gemini AI Integration
-	if ocrHandlers != nil {
-		ocr := api.Group("/ocr")
-		ocr.Use(middleware.RoleMiddleware("owner", "saas_admin", "salesman", "manager", "admin"))
-		{
-			// Batch OCR Processing
-			ocr.POST("/batch/sessions", ocrHandlers.CreateBatchSession)
-			ocr.GET("/batch/sessions/:id", ocrHandlers.GetBatchSession)
-			ocr.POST("/batch/deduplicate", ocrHandlers.DeduplicateItems)
-			ocr.POST("/batch/import", ocrHandlers.ImportReviewedItems)
-
-			// Brand Matching with Gemini AI
-			ocr.POST("/brands/match", ocrHandlers.FindBrandMatches)
-			ocr.POST("/brands/create", ocrHandlers.AutoCreateBrand)
-
-			// Metrics endpoints
-			ocr.GET("/metrics", ocrHandlers.GetOCRMetrics)
-			ocr.POST("/metrics/reset", ocrHandlers.ResetOCRMetrics)
-
-			// Phase 5: Comprehensive Validation Endpoints
-			ocr.POST("/batch/validate/:id", ocrHandlers.ValidateBatchSession)
-			ocr.POST("/batch/validate-row", ocrHandlers.ValidateRow)
-			ocr.POST("/batch/validate-comprehensive/:id", ocrHandlers.ValidateBatchComprehensive)
-			ocr.GET("/accuracy/dashboard", ocrHandlers.GetAccuracyDashboard)
-		}
-	}
-
-	// Smart Sale Routes (AI-assisted sale creation from images)
-	// - POST /process → ProcessSmartSaleV2 (GPT-5.2, DEFAULT)
-	// - POST /v2/process → ProcessSmartSaleV2 (explicit V2)
-	// - POST /v1/process → ProcessSmartSale (legacy, Vision API - DEPRECATED)
-	smartSale := api.Group("/smart-sale")
-	smartSale.Use(middleware.RoleMiddleware("owner", "saas_admin", "salesman", "manager", "admin"))
+	// Day Closing Routes (end-of-day reconciliation)
+	dayClosing := api.Group("/day-closing")
 	{
-		if ocrHandlers != nil {
-			smartSale.POST("/process", ocrHandlers.ProcessSmartSaleV2)      // Default: GPT-5.2
-			smartSale.POST("/v2/process", ocrHandlers.ProcessSmartSaleV2)   // Explicit V2
-			smartSale.POST("/v1/process", ocrHandlers.ProcessSmartSale)     // Legacy (deprecated)
-		}
-		smartSale.POST("/finalize", salesHandlers.FinalizeSmartSale)
+		dayClosing.POST("", salesHandlers.SaveDayClosing)
+		dayClosing.GET("", salesHandlers.GetDayClosing)
 	}
 
-	// AI Training Data Routes - for preparing ground truth training data
-	if trainingHandlers != nil {
-		training := api.Group("/training")
-		training.Use(middleware.RoleMiddleware("owner", "saas_admin", "manager", "admin"))
+	// OCR and Quick Sale Routes - Receipt Scanning for Automated Sales Entry
+	ocr := api.Group("/ocr")
+	{
+		// Create and manage OCR sessions (all authenticated users can use)
+		ocr.POST("/sessions", ocrHandlers.CreateOCRSession)
+		ocr.GET("/sessions/:id", ocrHandlers.GetOCRSession)
+		ocr.GET("/sessions/:id/status", ocrHandlers.GetOCRSessionStatus)
+
+		// Batch OCR for multi-image processing (manager/admin only for stock initialization)
+		ocr.POST("/batch/sessions", middleware.RoleMiddleware("manager", "admin"), ocrHandlers.CreateBatchOCRSession)
+		ocr.GET("/batch/sessions/:id", middleware.RoleMiddleware("manager", "admin"), ocrHandlers.GetBatchOCRSession)
+		ocr.POST("/batch/deduplicate", middleware.RoleMiddleware("manager", "admin"), ocrHandlers.GetDeduplicatedItems)
+
+		// Stock initialization from OCR (manager/admin only)
+		ocr.POST("/stock/initialize", middleware.RoleMiddleware("manager", "admin"), ocrHandlers.InitializeStockFromOCR)
+
+		// Confirm extracted items and create sale
+		ocr.POST("/sessions/confirm", ocrHandlers.ConfirmOCRItems)
+		ocr.POST("/quick-sale", ocrHandlers.CreateQuickSaleFromOCR)
+
+		// Brand alias management (manager/admin only)
+		ocr.POST("/brand-aliases", middleware.RoleMiddleware("manager", "admin"), ocrHandlers.CreateBrandAlias)
+		ocr.GET("/brands/:brand_id/aliases", ocrHandlers.GetBrandAliases)
+
+		// OCR configuration and feedback
+		ocr.GET("/config", ocrHandlers.GetOCRConfig)
+		ocr.POST("/feedback", ocrHandlers.SubmitOCRFeedback)
+	}
+
+	// Smart Sale Routes - AI-powered automated sales entry from receipt images
+	if smartSaleHandlers != nil {
+		smartSale := api.Group("/smart-sale")
 		{
-			// V1 endpoints (backward compatibility)
-			training.GET("/images", trainingHandlers.GetTrainingImages)
-			training.GET("/images/export", trainingHandlers.ExportTrainingData)
-			training.GET("/images/:filename", trainingHandlers.GetImageSaleData)
-			training.GET("/debug/records", trainingHandlers.GetRecordsWithImages)
-
-			// V2 endpoints - Size-based training images
-			training.GET("/images/v2", trainingHandlers.GetTrainingImagesV2)
-			training.GET("/images/export-v2", trainingHandlers.ExportTrainingDataV2)
-			training.POST("/images/process/:filename", trainingHandlers.ProcessImage)
-			training.POST("/images/process-all", trainingHandlers.ProcessAllImages)
-			training.POST("/images/detect-size/:filename", trainingHandlers.DetectImageSize)
-
-			// Size mappings
-			training.GET("/mappings/:record_id", trainingHandlers.GetSizeMappings)
-			training.POST("/mappings/:id/verify", trainingHandlers.VerifySizeMapping)
-
-			// Size-filtered items
-			training.GET("/items/:record_id/:size", trainingHandlers.GetSizeFilteredItems)
+			// Process images and create daily sales entries (all authenticated users)
+			smartSale.POST("/process", smartSaleHandlers.ProcessSmartSale)
+			smartSale.POST("/apply", smartSaleHandlers.ApplySmartSale)
+			smartSale.GET("/history", smartSaleHandlers.GetSmartSaleHistory)
+			smartSale.POST("/:id/retry", smartSaleHandlers.RetrySmartSale)
+			smartSale.POST("/learn", smartSaleHandlers.LearnFromSmartSale)
+			// v1.0.183 Track C2 — operator answers ONE doubted cell from the
+			// popup queue. Captures (raw → corrected) into ocr_digit_corrections
+			// immediately so the next extraction at this shop benefits even if
+			// the apply later fails or is abandoned.
+			smartSale.POST("/doubt/resolve", smartSaleHandlers.ResolveDoubt)
+			// v1.0.147 — apple-to-apple page grid for the verification screen.
+			// Returns per-cell crops + AI-suggested values so the operator
+			// can verify the image→spreadsheet conversion BEFORE proceeding
+			// to the Sales Summary. Order is preserved row-for-row to the
+			// image (NOT MRP-sorted).
+			smartSale.POST("/page-grid", smartSaleHandlers.GetPageGrid)
 		}
 	}
 
-	// AI Training V2 Routes - Generic document training (any logged-in user)
-	if aiTrainingHandlers != nil {
-		aiTraining := api.Group("/ai-training")
-		// Any logged-in user can access (already authenticated via api group middleware)
-		{
-			aiTraining.POST("/upload", aiTrainingHandlers.Upload)
-			aiTraining.GET("/images", aiTrainingHandlers.ListImages)
-			aiTraining.GET("/images/:id", aiTrainingHandlers.GetImage)
-			aiTraining.PUT("/images/:id/verify", aiTrainingHandlers.VerifyImage)
-			aiTraining.DELETE("/images/:id", aiTrainingHandlers.DeleteImage)
-			aiTraining.GET("/export", aiTrainingHandlers.ExportTraining)
-		}
-	}
-
-	// Gateway-compatible routes (without /api prefix for proxy forwarding)
-	// These routes are needed when requests come through the Gateway proxy
-	router.Use(middleware.AuthMiddleware(cfg.JWT, cache))
-	router.Use(middleware.TenantMiddleware())
-
-	router.GET("/daily-records", salesHandlers.GetDailySalesRecords)
-	router.POST("/daily-records", salesHandlers.CreateDailySalesRecord)
-	router.GET("/daily-records/exists", salesHandlers.CheckDailySalesRecordExists) // Check record existence
-	router.GET("/daily-records/:id", salesHandlers.GetDailySalesRecordByID)
-	router.PUT("/daily-records/:id", salesHandlers.UpdateDailySalesRecord)
-	router.PATCH("/daily-records/:id/change-date", salesHandlers.ChangeDailySalesRecordDate) // Change date only
-	router.POST("/daily-records/:id/approve", salesHandlers.ApproveDailySalesRecord)
-	router.POST("/daily-records/:id/reject", salesHandlers.RejectDailySalesRecord)
-	router.POST("/daily-records/:id/copy", salesHandlers.CopyDailySalesRecord) // Copy for rejected record recovery
-	router.POST("/daily-records/upload-image", salesHandlers.UploadDailySalesImages)
-
-	// Alias: daily-sales routes (for Flutter app compatibility)
-	router.GET("/daily-sales", salesHandlers.GetDailySalesRecords)
-	router.POST("/daily-sales", salesHandlers.CreateDailySalesRecord)
-	router.GET("/daily-sales/exists", salesHandlers.CheckDailySalesRecordExists) // Check record existence
-	router.GET("/daily-sales/:id", salesHandlers.GetDailySalesRecordByID)
-	router.PUT("/daily-sales/:id", salesHandlers.UpdateDailySalesRecord)
-	router.PATCH("/daily-sales/:id/change-date", salesHandlers.ChangeDailySalesRecordDate) // Change date only
-	router.POST("/daily-sales/:id/approve", salesHandlers.ApproveDailySalesRecord)
-	router.POST("/daily-sales/:id/reject", salesHandlers.RejectDailySalesRecord)
-	router.POST("/daily-sales/:id/copy", salesHandlers.CopyDailySalesRecord) // Copy for rejected record recovery
-	router.POST("/daily-sales/upload-image", salesHandlers.UploadDailySalesImages)
-	// Daily Sales Revert with dual OTP verification (gateway-compatible)
-	router.POST("/daily-sales/:id/revert/request-otp", salesHandlers.RequestDailySalesRevertOTP)
-	router.POST("/daily-sales/:id/revert", salesHandlers.RevertDailySalesRecordWithOTP)
-
-	// Draft persistence routes (gateway-compatible)
-	if draftHandlers != nil {
-		router.GET("/daily-sales/draft", draftHandlers.GetDraft)
-		router.POST("/daily-sales/draft", draftHandlers.SaveDraft)
-		router.DELETE("/daily-sales/draft", draftHandlers.DiscardDraft)
-		router.POST("/daily-sales/draft/submit", draftHandlers.SubmitDraft)
-		router.GET("/daily-sales/drafts", draftHandlers.GetUserDrafts)
-	}
-
-	router.GET("/sales", salesHandlers.GetSales)
-	router.POST("/sales", salesHandlers.CreateSale)
-	router.GET("/sales/:id", salesHandlers.GetSaleByID)
-	router.POST("/sales/:id/approve", salesHandlers.ApproveSale)
-	router.POST("/sales/:id/reject", salesHandlers.RejectSale)
-
-	router.GET("/returns", salesHandlers.GetSaleReturns)
-	router.POST("/returns", salesHandlers.CreateSaleReturn)
-	router.GET("/returns/:id", salesHandlers.GetSaleReturnByID)
-	router.POST("/returns/:id/approve", salesHandlers.ApproveSaleReturn)
-	router.POST("/returns/:id/reject", salesHandlers.RejectSaleReturn)
-
-	router.GET("/pending/sales", salesHandlers.GetPendingSales)
-	router.GET("/pending/returns", salesHandlers.GetPendingReturns)
-	router.GET("/uncollected", salesHandlers.GetUncollectedSales)
-	router.GET("/dashboard/summary", salesHandlers.GetDashboardSummary)
-
-	// OCR Routes (gateway-compatible, without /api prefix)
-	if ocrHandlers != nil {
-		ocrGroup := router.Group("/ocr")
-		ocrGroup.Use(middleware.RoleMiddleware("owner", "saas_admin", "salesman", "manager", "admin"))
-		{
-			// Batch OCR Processing
-			ocrGroup.POST("/batch/sessions", ocrHandlers.CreateBatchSession)
-			ocrGroup.GET("/batch/sessions/:id", ocrHandlers.GetBatchSession)
-			ocrGroup.POST("/batch/deduplicate", ocrHandlers.DeduplicateItems)
-			ocrGroup.POST("/batch/import", ocrHandlers.ImportReviewedItems)
-
-			// Brand Matching with Gemini AI
-			ocrGroup.POST("/brands/match", ocrHandlers.FindBrandMatches)
-			ocrGroup.POST("/brands/create", ocrHandlers.AutoCreateBrand)
-
-			// Metrics endpoints
-			ocrGroup.GET("/metrics", ocrHandlers.GetOCRMetrics)
-			ocrGroup.POST("/metrics/reset", ocrHandlers.ResetOCRMetrics)
-
-			// Phase 5: Comprehensive Validation Endpoints
-			ocrGroup.POST("/batch/validate/:id", ocrHandlers.ValidateBatchSession)
-			ocrGroup.POST("/batch/validate-row", ocrHandlers.ValidateRow)
-			ocrGroup.POST("/batch/validate-comprehensive/:id", ocrHandlers.ValidateBatchComprehensive)
-			ocrGroup.GET("/accuracy/dashboard", ocrHandlers.GetAccuracyDashboard)
-		}
+	// AI Feedback Routes
+	if aiFeedbackHandlers != nil {
+		api.POST("/ai-feedback", aiFeedbackHandlers.SubmitAIFeedback)
+		api.GET("/ai-feedback", middleware.RoleMiddleware("manager", "admin", "owner"), aiFeedbackHandlers.GetAIFeedback)
 	}
 }
 
-// SetupProtectedRoutes sets up routes with gateway-style auth handling
-func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, draftHandlers *handlers.DraftHandlers, purchaReportHandler *handlers.PurchaReportHandler, trainingHandlers *handlers.TrainingHandlers, aiTrainingHandlers *handlers.AITrainingHandlers) {
-	// Prometheus metrics
-	router.Use(monitoring.PrometheusMiddleware("sales"))
-	router.GET("/metrics", monitoring.PrometheusHandler())
-
+// SetupProtectedRoutes sets up routes with gateway-style auth handling.
+// smartSaleJobHandlers is optional (nil skips the async-job endpoints) so
+// we can roll back the job flow without touching the sync handler wiring.
+func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, salesHandlers *handlers.SalesHandlers, ocrHandlers *handlers.OCRHandlers, smartSaleHandlers *handlers.SmartSaleHandlers, aiFeedbackHandlers *handlers.AIFeedbackHandlers, smartSaleJobHandlers *handlers.SmartSaleJobHandlers) {
 	// Health check (no auth required)
 	router.GET("/health", salesHandlers.Health)
-
-	// Debug endpoint for database diagnostics (temporary)
-	router.GET("/debug/database", salesHandlers.DebugDatabase)
-
-	// WebSocket endpoint for real-time updates (handles auth via query params)
-	router.GET("/ws", handlers.HandleWebSocket(logger.Logger, cfg.JWT.Secret))
 
 	// Extract user context from headers (set by API Gateway)
 	router.Use(func(c *gin.Context) {
@@ -343,65 +208,50 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	// Daily Sales Routes (Critical bulk entry endpoints)
 	router.GET("/daily-records", salesHandlers.GetDailySalesRecords)
 	router.POST("/daily-records", salesHandlers.CreateDailySalesRecord)
-	router.GET("/daily-records/exists", salesHandlers.CheckDailySalesRecordExists) // Check record existence
 	router.GET("/daily-records/:id", salesHandlers.GetDailySalesRecordByID)
 	router.PUT("/daily-records/:id", salesHandlers.UpdateDailySalesRecord)
-	router.PATCH("/daily-records/:id/change-date", salesHandlers.ChangeDailySalesRecordDate) // Change date only
+	// v1.0.121: dedicated date-only PATCH so admin can correct a wrong sale
+	// date from the list page without re-submitting items. Server-side
+	// RoleMiddleware enforces admin/manager/owner — UI mirrors the same gate.
+	router.PATCH("/daily-records/:id/record-date", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.UpdateDailySalesRecordDate)
 	router.POST("/daily-records/:id/approve", salesHandlers.ApproveDailySalesRecord)
 	router.POST("/daily-records/:id/reject", salesHandlers.RejectDailySalesRecord)
-	router.POST("/daily-records/:id/copy", salesHandlers.CopyDailySalesRecord) // Copy for rejected record recovery
-	router.POST("/daily-records/upload-image", salesHandlers.UploadDailySalesImages)
-	// AI Validation endpoints (daily-records)
-	router.GET("/daily-records/:id/validation", salesHandlers.GetValidation)
-	router.POST("/daily-records/:id/validation/trigger", salesHandlers.TriggerValidation)
-	router.POST("/daily-records/:id/validation/confirm", salesHandlers.ConfirmValidation)
+	router.POST("/daily-records/:id/reapply", salesHandlers.ReapplyDailySalesRecord)
 
-	// Alias: daily-sales routes (for Flutter app compatibility)
+	// Alias: /daily-sales routes (for Flutter app compatibility)
 	router.GET("/daily-sales", salesHandlers.GetDailySalesRecords)
 	router.POST("/daily-sales", salesHandlers.CreateDailySalesRecord)
-	router.GET("/daily-sales/exists", salesHandlers.CheckDailySalesRecordExists) // Check record existence
 	router.GET("/daily-sales/:id", salesHandlers.GetDailySalesRecordByID)
 	router.PUT("/daily-sales/:id", salesHandlers.UpdateDailySalesRecord)
-	router.PATCH("/daily-sales/:id/change-date", salesHandlers.ChangeDailySalesRecordDate) // Change date only
+	router.PATCH("/daily-sales/:id/record-date", middleware.RoleMiddleware("manager", "admin", "owner"), salesHandlers.UpdateDailySalesRecordDate)
 	router.POST("/daily-sales/:id/approve", salesHandlers.ApproveDailySalesRecord)
 	router.POST("/daily-sales/:id/reject", salesHandlers.RejectDailySalesRecord)
-	router.POST("/daily-sales/:id/copy", salesHandlers.CopyDailySalesRecord) // Copy for rejected record recovery
-	router.POST("/daily-sales/upload-image", salesHandlers.UploadDailySalesImages)
-	// AI Validation endpoints (daily-sales alias)
-	router.GET("/daily-sales/:id/validation", salesHandlers.GetValidation)
-	router.POST("/daily-sales/:id/validation/trigger", salesHandlers.TriggerValidation)
-	router.POST("/daily-sales/:id/validation/confirm", salesHandlers.ConfirmValidation)
-	// Daily Sales Revert with dual OTP verification (protected routes)
-	router.POST("/daily-sales/:id/revert/request-otp", salesHandlers.RequestDailySalesRevertOTP)
-	router.POST("/daily-sales/:id/revert", salesHandlers.RevertDailySalesRecordWithOTP)
+	router.POST("/daily-sales/:id/reapply", salesHandlers.ReapplyDailySalesRecord)
+	router.POST("/daily-sales/upload-image", salesHandlers.UploadDailySalesImage)
 
-	// Draft persistence routes (protected, for Flutter app)
-	if draftHandlers != nil {
-		router.GET("/daily-sales/draft", draftHandlers.GetDraft)
-		router.POST("/daily-sales/draft", draftHandlers.SaveDraft)
-		router.DELETE("/daily-sales/draft", draftHandlers.DiscardDraft)
-		router.POST("/daily-sales/draft/submit", draftHandlers.SubmitDraft)
-		router.GET("/daily-sales/drafts", draftHandlers.GetUserDrafts)
-	}
+	// v1.0.162 — admin-only data-heal endpoints (gateway-stripped path).
+	router.POST("/sales/admin/heal-approve-corruption", middleware.RoleMiddleware("admin", "owner"), salesHandlers.HealApproveCorruption)
 
-	// Validation accuracy dashboard
-	router.GET("/sales/validation/accuracy", salesHandlers.GetAccuracyDashboard)
-
-	// Industrial-grade Learning & Analytics endpoints (legacy routes)
-	router.GET("/sales/learning/stats", salesHandlers.GetLearningStats)
-	router.GET("/sales/learning/accuracy-trend", salesHandlers.GetAccuracyTrend)
-	router.POST("/sales/learning/batch-process", salesHandlers.TriggerBatchLearning)
+	// v1.0.175 — Brand Shortcuts (gateway-stripped path).
+	router.GET("/sales/aliases", salesHandlers.ListBrandAliases)
+	router.POST("/sales/aliases", salesHandlers.CreateBrandAlias)
+	router.DELETE("/sales/aliases/:id", salesHandlers.DeleteBrandAlias)
+	// v1.0.182 — D2 suggested-aliases. OCR strings stuck on not_found in last
+	// 30d that don't have a learned alias yet. Powers Brand Shortcuts'
+	// "Recent OCR misses" panel.
+	router.GET("/sales/aliases/suggested", salesHandlers.ListSuggestedAliases)
+	// v1.0.256 — gateway strips /api/sales/ → /, so the web admin's
+	// /api/sales/aliases/suggested arrives as /aliases/suggested. Register
+	// that alias (same compat pattern as the /daily-sales alias routes
+	// above) so the "Recent OCR misses" panel stops 404ing.
+	router.GET("/aliases/suggested", salesHandlers.ListSuggestedAliases)
 
 	// Individual Sales Routes
 	router.GET("/sales", salesHandlers.GetSales)
 	router.POST("/sales", salesHandlers.CreateSale)
 	router.GET("/sales/:id", salesHandlers.GetSaleByID)
-	router.PUT("/sales/:id", salesHandlers.UpdateSale)
 	router.POST("/sales/:id/approve", salesHandlers.ApproveSale)
 	router.POST("/sales/:id/reject", salesHandlers.RejectSale)
-	// Sale Revert with dual OTP verification (admin/owner only)
-	router.POST("/sales/:id/revert/request-otp", salesHandlers.RequestRevertOTP)
-	router.POST("/sales/:id/revert", salesHandlers.RevertSaleWithOTP)
 
 	// Sale Returns Routes
 	router.GET("/returns", salesHandlers.GetSaleReturns)
@@ -418,92 +268,80 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	// Dashboard
 	router.GET("/dashboard/summary", salesHandlers.GetDashboardSummary)
 
-	// Purcha Report Routes (Daily Sales Register)
-	if purchaReportHandler != nil {
-		router.GET("/reports/purcha/preview", purchaReportHandler.GetPurchaReportPreview)
-		router.GET("/reports/purcha/pdf", purchaReportHandler.GetPurchaReportPDF)
+	// Day Closing (end-of-day reconciliation)
+	router.POST("/day-closing", salesHandlers.SaveDayClosing)
+	router.GET("/day-closing", salesHandlers.GetDayClosing)
+
+	// OCR and Quick Sale Routes
+	router.POST("/ocr/sessions", ocrHandlers.CreateOCRSession)
+	router.GET("/ocr/sessions/:id", ocrHandlers.GetOCRSession)
+	router.GET("/ocr/sessions/:id/status", ocrHandlers.GetOCRSessionStatus)
+
+	// Batch OCR endpoints
+	router.POST("/ocr/batch/sessions", ocrHandlers.CreateBatchOCRSession)
+	router.GET("/ocr/batch/sessions/:id", ocrHandlers.GetBatchOCRSession)
+	router.POST("/ocr/batch/deduplicate", ocrHandlers.GetDeduplicatedItems)
+
+	// Stock initialization from OCR
+	router.POST("/ocr/stock/initialize", ocrHandlers.InitializeStockFromOCR)
+
+	router.POST("/ocr/sessions/confirm", ocrHandlers.ConfirmOCRItems)
+	router.POST("/ocr/quick-sale", ocrHandlers.CreateQuickSaleFromOCR)
+	router.POST("/ocr/brand-aliases", ocrHandlers.CreateBrandAlias)
+	router.GET("/ocr/brands/:brand_id/aliases", ocrHandlers.GetBrandAliases)
+	router.GET("/ocr/config", ocrHandlers.GetOCRConfig)
+	router.POST("/ocr/feedback", ocrHandlers.SubmitOCRFeedback)
+
+	// Smart Sale Routes - AI-powered automated sales entry
+	if smartSaleHandlers != nil {
+		router.POST("/smart-sale/process", smartSaleHandlers.ProcessSmartSale)
+		router.POST("/smart-sale/apply", smartSaleHandlers.ApplySmartSale)
+		router.GET("/smart-sale/history", smartSaleHandlers.GetSmartSaleHistory)
+		router.POST("/smart-sale/:id/retry", smartSaleHandlers.RetrySmartSale)
+		router.POST("/smart-sale/learn", smartSaleHandlers.LearnFromSmartSale)
+		// v1.0.183 Track C2 — doubt resolution write
+		router.POST("/smart-sale/doubt/resolve", smartSaleHandlers.ResolveDoubt)
+		// v1.0.147 — apple-to-apple page grid for the verification screen
+		router.POST("/smart-sale/page-grid", smartSaleHandlers.GetPageGrid)
+		// v1.0.178 — image-quality preflight (Flutter calls before /process so
+		// blurry/tilted photos hit the modal instead of the AI bill). Shared by
+		// Smart Sale and AI Stock Setup; lives under /sales/* to keep the
+		// cv-sidecar URL off the mobile client.
+		router.POST("/smart-sale/preflight/quality-check", smartSaleHandlers.PreflightQualityCheck)
 	}
 
-	// OCR Routes (if OCR handlers are available)
-	if ocrHandlers != nil {
-		ocrGroup := router.Group("/ocr")
-		ocrGroup.Use(middleware.RoleMiddleware("owner", "saas_admin", "salesman", "manager", "admin"))
-		{
-			// Batch OCR Processing
-			ocrGroup.POST("/batch/sessions", ocrHandlers.CreateBatchSession)
-			ocrGroup.GET("/batch/sessions/:id", ocrHandlers.GetBatchSession)
-			ocrGroup.POST("/batch/deduplicate", ocrHandlers.DeduplicateItems)
-			ocrGroup.POST("/batch/import", ocrHandlers.ImportReviewedItems)
-
-			// Brand Matching with Gemini AI
-			ocrGroup.POST("/brands/match", ocrHandlers.FindBrandMatches)
-			ocrGroup.POST("/brands/create", ocrHandlers.AutoCreateBrand)
-
-			// Metrics endpoints
-			ocrGroup.GET("/metrics", ocrHandlers.GetOCRMetrics)
-			ocrGroup.POST("/metrics/reset", ocrHandlers.ResetOCRMetrics)
-
-			// Phase 5: Comprehensive Validation Endpoints
-			ocrGroup.POST("/batch/validate/:id", ocrHandlers.ValidateBatchSession)
-			ocrGroup.POST("/batch/validate-row", ocrHandlers.ValidateRow)
-			ocrGroup.POST("/batch/validate-comprehensive/:id", ocrHandlers.ValidateBatchComprehensive)
-			ocrGroup.GET("/accuracy/dashboard", ocrHandlers.GetAccuracyDashboard)
-		}
+	// Smart Sale Job Routes — async submit-and-poll flow that supplants
+	// the blocking /smart-sale/process endpoint for the Flutter app. Clients
+	// submit images, receive job_id, poll status, and apply the result once
+	// the worker finishes. Order before the :id/retry route above would
+	// conflict; the /jobs prefix keeps them separate. Registered LAST so
+	// static paths ("jobs") are matched before the "/smart-sale/:id/retry"
+	// wildcard-style route Gin registered above.
+	if smartSaleJobHandlers != nil {
+		router.POST("/smart-sale/jobs", smartSaleJobHandlers.SubmitJob)
+		router.GET("/smart-sale/jobs", smartSaleJobHandlers.ListJobs)
+		router.GET("/smart-sale/jobs/:id", smartSaleJobHandlers.GetJob)
+		router.DELETE("/smart-sale/jobs/:id", smartSaleJobHandlers.CancelJob)
+	}
+	// A/B eval — replays a Smart Sale job through the current OCR pipeline and
+	// returns fresh-vs-original. Tenant-scoped. Mirrors the Stock Setup eval.
+	if smartSaleHandlers != nil {
+		router.POST("/smart-sale/jobs/:id/eval", smartSaleHandlers.EvaluateJob)
+		// v1.0.133 — admin replay-learning. Mirrors the Stock Setup endpoint;
+		// re-runs alias / negative-alias / shop-rate learning against a job's
+		// review-screen state without writing any sale rows. Used to recover
+		// learning signal from past apply failures.
+		router.POST("/smart-sale/jobs/:id/replay-learning", smartSaleHandlers.ReplayJobLearning)
+		// v1.0.181 — per-shop accuracy aggregate. Tenant-scoped via auth
+		// context; optional ?shop_id and ?days query params (days defaults
+		// to 30, capped at 365). Operational health metrics for an admin
+		// dashboard, NOT true accuracy — no ground truth available here.
+		router.GET("/smart-sale/accuracy/shop", smartSaleHandlers.AccuracyShopSummary)
 	}
 
-	// Smart Sale Routes (AI-assisted sale creation - gateway compatible)
-	// All routes use GPT-5.2 by default. V1 is deprecated but kept for backward compatibility.
-	// - POST /process → ProcessSmartSaleV2 (GPT-5.2, DEFAULT)
-	// - POST /v2/process → ProcessSmartSaleV2 (explicit V2)
-	// - POST /v1/process → ProcessSmartSale (legacy, Vision API - DEPRECATED)
-	smartSaleGroup := router.Group("/smart-sale")
-	smartSaleGroup.Use(middleware.RoleMiddleware("owner", "saas_admin", "salesman", "manager", "admin"))
-	{
-		if ocrHandlers != nil {
-			smartSaleGroup.POST("/process", ocrHandlers.ProcessSmartSaleV2)      // Default: GPT-5.2
-			smartSaleGroup.POST("/v2/process", ocrHandlers.ProcessSmartSaleV2)   // Explicit V2
-			smartSaleGroup.POST("/v1/process", ocrHandlers.ProcessSmartSale)     // Legacy (deprecated)
-		}
-		smartSaleGroup.POST("/finalize", salesHandlers.FinalizeSmartSale)
-	}
-
-	// AI Training Data Routes (internal tool - no auth, secured at nginx level)
-	// Uses /api/training path to match gateway proxy path
-	if trainingHandlers != nil {
-		trainingGroup := router.Group("/api/training")
-		{
-			// V1 endpoints (backward compatibility)
-			trainingGroup.GET("/images", trainingHandlers.GetTrainingImages)
-			trainingGroup.GET("/images/export", trainingHandlers.ExportTrainingData)
-			trainingGroup.GET("/images/:filename", trainingHandlers.GetImageSaleData)
-			trainingGroup.GET("/debug/records", trainingHandlers.GetRecordsWithImages)
-
-			// V2 endpoints - Size-based training images
-			trainingGroup.GET("/images/v2", trainingHandlers.GetTrainingImagesV2)
-			trainingGroup.GET("/images/export-v2", trainingHandlers.ExportTrainingDataV2)
-			trainingGroup.POST("/images/process/:filename", trainingHandlers.ProcessImage)
-			trainingGroup.POST("/images/process-all", trainingHandlers.ProcessAllImages)
-			trainingGroup.POST("/images/detect-size/:filename", trainingHandlers.DetectImageSize)
-
-			// Size mappings
-			trainingGroup.GET("/mappings/:record_id", trainingHandlers.GetSizeMappings)
-			trainingGroup.POST("/mappings/:id/verify", trainingHandlers.VerifySizeMapping)
-
-			// Size-filtered items
-			trainingGroup.GET("/items/:record_id/:size", trainingHandlers.GetSizeFilteredItems)
-		}
-	}
-
-	// AI Training V2 Routes - Generic document training (protected routes)
-	if aiTrainingHandlers != nil {
-		aiTrainingGroup := router.Group("/api/ai-training")
-		{
-			aiTrainingGroup.POST("/upload", aiTrainingHandlers.Upload)
-			aiTrainingGroup.GET("/images", aiTrainingHandlers.ListImages)
-			aiTrainingGroup.GET("/images/:id", aiTrainingHandlers.GetImage)
-			aiTrainingGroup.PUT("/images/:id/verify", aiTrainingHandlers.VerifyImage)
-			aiTrainingGroup.DELETE("/images/:id", aiTrainingHandlers.DeleteImage)
-			aiTrainingGroup.GET("/export", aiTrainingHandlers.ExportTraining)
-		}
+	// AI Feedback Routes
+	if aiFeedbackHandlers != nil {
+		router.POST("/ai-feedback", aiFeedbackHandlers.SubmitAIFeedback)
+		router.GET("/ai-feedback", aiFeedbackHandlers.GetAIFeedback)
 	}
 }

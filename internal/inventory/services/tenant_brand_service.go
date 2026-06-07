@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/google/uuid"
@@ -22,6 +23,13 @@ type TenantBrandService struct {
 	config *config.Config
 }
 
+func getSaaSServiceURL() string {
+	if url := os.Getenv("SAAS_SERVICE_URL"); url != "" {
+		return url
+	}
+	return "http://localhost:8095"
+}
+
 // NewTenantBrandService creates a new tenant brand service
 func NewTenantBrandService(db *database.DB, cache *cache.Cache, config *config.Config) *TenantBrandService {
 	return &TenantBrandService{
@@ -35,6 +43,7 @@ func NewTenantBrandService(db *database.DB, cache *cache.Cache, config *config.C
 type SaasBrandResponse struct {
 	ID            uuid.UUID                  `json:"id"`
 	Name          string                     `json:"name"`
+	DisplayName   string                     `json:"display_name"`
 	Description   string                     `json:"description"`
 	Picture       string                     `json:"picture"`
 	IsActive      bool                       `json:"is_active"`
@@ -71,7 +80,7 @@ type SaasBrandVariantResponse struct {
 // GetAvailableBrands gets all available brands from SaaS service
 func (s *TenantBrandService) GetAvailableBrands() ([]SaasBrandResponse, error) {
 	// Make HTTP request to SaaS service to get available brands (internal endpoint)
-	saasURL := fmt.Sprintf("http://saas:8095/api/internal/brands?include_variants=true&active_only=true")
+	saasURL := fmt.Sprintf("%s/api/internal/brands?include_variants=true&active_only=true", getSaaSServiceURL())
 
 	resp, err := http.Get(saasURL)
 	if err != nil {
@@ -116,7 +125,7 @@ func min(a, b int) int {
 // GetTenantBrands gets brands assigned to a specific tenant
 func (s *TenantBrandService) GetTenantBrands(tenantID uuid.UUID) ([]SaasBrandResponse, error) {
 	// Make HTTP request to SaaS service to get tenant brands (internal endpoint)
-	saasURL := fmt.Sprintf("http://saas:8095/api/internal/tenants/%s/brands", tenantID.String())
+	saasURL := fmt.Sprintf("%s/api/internal/tenants/%s/brands", getSaaSServiceURL(), tenantID.String())
 
 	resp, err := http.Get(saasURL)
 	if err != nil {
@@ -404,7 +413,7 @@ func (s *TenantBrandService) SelectBrandsForTenant(tenantID uuid.UUID, brandIDs 
 		return fmt.Errorf("failed to encode assignment request: %w", err)
 	}
 
-	saasURL := "http://saas:8095/api/super-admin/brands/assign"
+	saasURL := getSaaSServiceURL() + "/api/super-admin/brands/assign"
 	resp, err := http.Post(saasURL, "application/json", bytes.NewReader(reqBytes))
 	if err != nil {
 		return fmt.Errorf("failed to call SaaS brand assignment API: %w", err)
@@ -460,12 +469,12 @@ func (s *TenantBrandService) GetBrandCatalogWithFilters(categoryID *uuid.UUID, s
 	for _, brand := range brands {
 		shouldInclude := true
 
-		// Search term filter
+		// Search term filter — match both name and display_name
 		if searchTerm != "" {
-			// Simple case-insensitive search
 			searchLower := strings.ToLower(searchTerm)
 			brandNameLower := strings.ToLower(brand.Name)
-			if !strings.Contains(brandNameLower, searchLower) {
+			displayNameLower := strings.ToLower(brand.DisplayName)
+			if !strings.Contains(brandNameLower, searchLower) && !strings.Contains(displayNameLower, searchLower) {
 				shouldInclude = false
 			}
 		}

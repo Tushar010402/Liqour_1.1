@@ -11,10 +11,16 @@ import (
 type SaasBrand struct {
 	models.BaseModel
 	Name        string `json:"name" gorm:"not null;uniqueIndex"`
-	Description string `json:"description"`
-	Picture     string `json:"picture"` // URL to brand image/logo
-	IsActive    bool   `json:"is_active" gorm:"default:true"`
-	SortOrder   int    `json:"sort_order" gorm:"default:0"`
+	DisplayName string `json:"display_name"`
+	// DisplayNameBoldStart + DisplayNameBoldLength define an arbitrary
+	// [start, start+length) character range that the client renders in
+	// big/bold. Start defaults to 0 (prefix); length 0/NULL = no styling.
+	DisplayNameBoldStart  *int   `json:"display_name_bold_start,omitempty"`
+	DisplayNameBoldLength *int   `json:"display_name_bold_length,omitempty"`
+	Description           string `json:"description"`
+	Picture               string `json:"picture"` // URL to brand image/logo
+	IsActive              bool   `json:"is_active" gorm:"default:true"`
+	SortOrder             int    `json:"sort_order" gorm:"default:0"`
 
 	// Relationships
 	BrandVariants []BrandVariant `json:"brand_variants,omitempty" gorm:"foreignKey:BrandID"`
@@ -102,11 +108,12 @@ func (BrandCategory) TableName() string {
 }
 
 // BrandSubcategory represents predefined subcategories for brands
+// UPDATED: Added CategoryID to link subcategories to categories (industrial-grade relationship)
 type BrandSubcategory struct {
 	models.BaseModel
-	Name        string         `json:"name" gorm:"not null"`
-	CategoryID  uuid.UUID      `json:"category_id" gorm:"type:uuid;not null"`
+	CategoryID  *uuid.UUID     `json:"category_id" gorm:"type:uuid;index"` // ADDED: Link to parent category (nullable for backwards compatibility)
 	Category    *BrandCategory `json:"category,omitempty" gorm:"foreignKey:CategoryID"`
+	Name        string         `json:"name" gorm:"not null"` // CHANGED: Removed uniqueIndex to allow same name in different categories
 	Description string         `json:"description"`
 	IsActive    bool           `json:"is_active" gorm:"default:true"`
 	SortOrder   int            `json:"sort_order" gorm:"default:0"`

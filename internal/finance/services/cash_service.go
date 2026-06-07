@@ -97,23 +97,14 @@ func (s *CashService) GetTeamCashBalances(ctx context.Context, userID, shopID, t
 		return nil, fmt.Errorf("failed to get current user: %w", err)
 	}
 
-	// Define role hierarchy (higher index = lower in hierarchy)
-	roleHierarchy := map[string]int{
-		"admin":             1,
-		"manager":           2,
-		"assistant_manager": 3,
-		"executive":         4,
-		"salesman":          5,
-	}
-
-	currentRoleLevel, exists := roleHierarchy[currentUser.Role]
-	if !exists {
+	currentRoleLevel := models.GetRoleLevel(currentUser.Role)
+	if currentRoleLevel < 0 {
 		return nil, fmt.Errorf("unknown role: %s", currentUser.Role)
 	}
 
 	// Determine subordinate roles (roles with higher level numbers)
 	subordinateRoles := []string{}
-	for role, level := range roleHierarchy {
+	for role, level := range models.RoleHierarchy {
 		if level > currentRoleLevel {
 			subordinateRoles = append(subordinateRoles, role)
 		}
@@ -131,21 +122,22 @@ func (s *CashService) GetTeamCashBalances(ctx context.Context, userID, shopID, t
 		LastUpdatedAt  time.Time `gorm:"column:last_updated_at"`
 	}
 
-	// Query to aggregate balances by user (GROUP BY user_id, SUM balances)
+	// Query to get ALL subordinates with their aggregated balances (including zero balance)
 	var aggregatedBalances []AggregatedBalance
 	query := s.db.DB.WithContext(ctx).
-		Table("cash_holdings").
+		Table("users").
 		Select(`
-			cash_holdings.user_id,
-			SUM(cash_holdings.current_balance) as total_balance,
-			MAX(cash_holdings.last_updated_at) as last_updated_at
+			users.id as user_id,
+			COALESCE(SUM(cash_holdings.current_balance), 0) as total_balance,
+			COALESCE(MAX(cash_holdings.last_updated_at), users.created_at) as last_updated_at
 		`).
-		Joins("JOIN users ON users.id = cash_holdings.user_id").
-		Where("cash_holdings.tenant_id = ?", tenantID).
-		Where("cash_holdings.user_id != ?", userID).  // Exclude current user
-		Where("users.role IN ?", subordinateRoles).   // Only subordinate roles
-		Group("cash_holdings.user_id").
-		Having("SUM(cash_holdings.current_balance) > 0").
+		Joins("LEFT JOIN cash_holdings ON cash_holdings.user_id = users.id AND cash_holdings.tenant_id = ?", tenantID).
+		Where("users.tenant_id = ?", tenantID).
+		Where("users.id != ?", userID).               // Exclude current user
+		Where("users.role IN ?", subordinateRoles).    // Only subordinate roles
+		Where("users.deleted_at IS NULL").
+		Where("users.is_active = true").
+		Group("users.id, users.created_at").
 		Order("total_balance DESC")
 
 	err = query.Find(&aggregatedBalances).Error
@@ -431,7 +423,7 @@ func (s *CashService) UpdateCashBalance(
 type CollectionRequest struct {
 	FromUserID uuid.UUID
 	ToUserID   uuid.UUID
-	ShopID     uuid.UUID
+	ShopID     *uuid.UUID // Shop is now optional
 	TenantID   uuid.UUID
 	Amount     float64
 	Notes      string
@@ -454,7 +446,12 @@ func (s *CashService) CollectCash(ctx context.Context, req *CollectionRequest, c
 		// 2. Validate hierarchy (TODO: implement role checking)
 
 		// 3. Check sufficient balance (validation only, no balance change yet)
-		balance, err := s.GetCashBalance(ctx, req.FromUserID, req.ShopID, req.TenantID)
+		// Convert nullable ShopID to uuid.UUID for GetCashBalance
+		shopID := uuid.Nil
+		if req.ShopID != nil {
+			shopID = *req.ShopID
+		}
+		balance, err := s.GetCashBalance(ctx, req.FromUserID, shopID, req.TenantID)
 		if err != nil {
 			return fmt.Errorf("failed to check balance: %w", err)
 		}
@@ -525,7 +522,12 @@ func (s *CashService) ApproveCollection(ctx context.Context, collectionID, appro
 		}
 
 		// 4. Verify sufficient balance (may have changed since request)
-		balance, err := s.GetCashBalance(ctx, collection.FromUserID, collection.ShopID, *collection.TenantID)
+		// Convert nullable ShopID to uuid.UUID
+		shopID := uuid.Nil
+		if collection.ShopID != nil {
+			shopID = *collection.ShopID
+		}
+		balance, err := s.GetCashBalance(ctx, collection.FromUserID, shopID, *collection.TenantID)
 		if err != nil {
 			return fmt.Errorf("failed to check balance: %w", err)
 		}
@@ -537,7 +539,7 @@ func (s *CashService) ApproveCollection(ctx context.Context, collectionID, appro
 		// 5. Update balances with descriptive audit trail
 		// Deduct from source user
 		fromDesc := fmt.Sprintf("Collected by %s (%s)", collection.ToUser.FullName(), collection.ToUser.Role)
-		err = s.UpdateCashBalance(ctx, collection.FromUserID, collection.ShopID, *collection.TenantID,
+		err = s.UpdateCashBalance(ctx, collection.FromUserID, shopID, *collection.TenantID,
 			-collection.Amount, "collection_given", fromDesc, "collection", &collectionID, approverID)
 		if err != nil {
 			return fmt.Errorf("failed to deduct from source: %w", err)
@@ -545,7 +547,7 @@ func (s *CashService) ApproveCollection(ctx context.Context, collectionID, appro
 
 		// Add to destination user
 		toDesc := fmt.Sprintf("Collected from %s (%s)", collection.FromUser.FullName(), collection.FromUser.Role)
-		err = s.UpdateCashBalance(ctx, collection.ToUserID, collection.ShopID, *collection.TenantID,
+		err = s.UpdateCashBalance(ctx, collection.ToUserID, shopID, *collection.TenantID,
 			collection.Amount, "collection_received", toDesc, "collection", &collectionID, approverID)
 		if err != nil {
 			return fmt.Errorf("failed to add to destination: %w", err)
@@ -676,7 +678,7 @@ func (s *CashService) GetCollections(ctx context.Context, tenantID uuid.UUID, fi
 // SubmissionRequest represents a cash submission request
 type SubmissionRequest struct {
 	UserID          uuid.UUID
-	ShopID          uuid.UUID
+	ShopID          *uuid.UUID // Shop is now optional
 	TenantID        uuid.UUID
 	TotalAmount     float64
 	Notes500        int
@@ -707,7 +709,12 @@ func (s *CashService) SubmitCash(ctx context.Context, req *SubmissionRequest, cr
 
 	err := s.db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Check sufficient balance
-		balance, err := s.GetCashBalance(ctx, req.UserID, req.ShopID, req.TenantID)
+		// Convert nullable ShopID to uuid.UUID for GetCashBalance
+		shopID := uuid.Nil
+		if req.ShopID != nil {
+			shopID = *req.ShopID
+		}
+		balance, err := s.GetCashBalance(ctx, req.UserID, shopID, req.TenantID)
 		if err != nil {
 			return err
 		}
@@ -768,7 +775,12 @@ func (s *CashService) ApproveSubmission(ctx context.Context, submissionID, appro
 		}
 
 		// Deduct cash from user's balance
-		err := s.UpdateCashBalance(ctx, submission.UserID, submission.ShopID, tenantID,
+		// Convert nullable ShopID to uuid.UUID
+		shopID := uuid.Nil
+		if submission.ShopID != nil {
+			shopID = *submission.ShopID
+		}
+		err := s.UpdateCashBalance(ctx, submission.UserID, shopID, tenantID,
 			-submission.TotalAmount, "submission",
 			fmt.Sprintf("Cash submitted to bank - Slip %s", submission.BankSlipNumber),
 			"submission", &submissionID, approvedByID)

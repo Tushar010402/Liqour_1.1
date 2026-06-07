@@ -1,0 +1,657 @@
+package graphql
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/graph-gophers/dataloader/v7"
+	"github.com/liquorpro/go-backend/pkg/shared/models"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+)
+
+// DataLoaders contains all the data loaders for efficient batching
+type DataLoaders struct {
+	ProductByID      *dataloader.Loader[string, *models.Product]
+	BrandByID        *dataloader.Loader[string, *models.Brand]
+	CategoryByID     *dataloader.Loader[string, *models.Category]
+	SubcategoryByID  *dataloader.Loader[string, *models.Subcategory]
+	UserByID         *dataloader.Loader[string, *models.User]
+	ShopByID         *dataloader.Loader[string, *models.Shop]
+	CustomerByID     *dataloader.Loader[string, *models.Customer]
+	StockByProductID *dataloader.Loader[ProductShopKey, *models.Stock]
+	SalesByShopID    *dataloader.Loader[string, []*models.Sale]
+
+	// Batch loaders for related entities
+	ProductsByBrandID    *dataloader.Loader[string, []*models.Product]
+	ProductsByCategoryID *dataloader.Loader[string, []*models.Product]
+	StocksByShopID       *dataloader.Loader[string, []*models.Stock]
+	UsersByShopID        *dataloader.Loader[string, []*models.User]
+
+	db     *gorm.DB
+	logger *zap.Logger
+	cache  *LoaderCache
+}
+
+// ProductShopKey is a composite key for product-shop combinations
+type ProductShopKey struct {
+	ProductID string
+	ShopID    string
+}
+
+func (k ProductShopKey) String() string {
+	return fmt.Sprintf("%s:%s", k.ProductID, k.ShopID)
+}
+
+// LoaderCache provides caching for data loaders
+type LoaderCache struct {
+	data map[string]interface{}
+	ttl  map[string]time.Time
+	mu   sync.RWMutex
+}
+
+func NewLoaderCache() *LoaderCache {
+	return &LoaderCache{
+		data: make(map[string]interface{}),
+		ttl:  make(map[string]time.Time),
+	}
+}
+
+func (c *LoaderCache) Get(key string) (interface{}, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if expiry, exists := c.ttl[key]; exists {
+		if time.Now().After(expiry) {
+			return nil, false
+		}
+		if val, ok := c.data[key]; ok {
+			return val, true
+		}
+	}
+	return nil, false
+}
+
+func (c *LoaderCache) Set(key string, value interface{}, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.data[key] = value
+	c.ttl[key] = time.Now().Add(ttl)
+}
+
+// NewDataLoaders creates new data loaders with batching and caching
+func NewDataLoaders(db *gorm.DB, logger *zap.Logger) *DataLoaders {
+	loaders := &DataLoaders{
+		db:     db,
+		logger: logger,
+		cache:  NewLoaderCache(),
+	}
+
+	// Initialize individual entity loaders
+	loaders.ProductByID = dataloader.NewBatchedLoader(
+		loaders.productBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, *models.Product]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(100),
+	)
+
+	loaders.BrandByID = dataloader.NewBatchedLoader(
+		loaders.brandBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, *models.Brand]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.CategoryByID = dataloader.NewBatchedLoader(
+		loaders.categoryBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, *models.Category]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.SubcategoryByID = dataloader.NewBatchedLoader(
+		loaders.subcategoryBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, *models.Subcategory]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.UserByID = dataloader.NewBatchedLoader(
+		loaders.userBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, *models.User]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(100),
+	)
+
+	loaders.ShopByID = dataloader.NewBatchedLoader(
+		loaders.shopBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, *models.Shop]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.CustomerByID = dataloader.NewBatchedLoader(
+		loaders.customerBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, *models.Customer]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(100),
+	)
+
+	loaders.StockByProductID = dataloader.NewBatchedLoader(
+		loaders.stockBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[ProductShopKey, *models.Stock]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(100),
+	)
+
+	// Initialize collection loaders
+	loaders.ProductsByBrandID = dataloader.NewBatchedLoader(
+		loaders.productsByBrandBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, []*models.Product]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.ProductsByCategoryID = dataloader.NewBatchedLoader(
+		loaders.productsByCategoryBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, []*models.Product]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.StocksByShopID = dataloader.NewBatchedLoader(
+		loaders.stocksByShopBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, []*models.Stock]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.UsersByShopID = dataloader.NewBatchedLoader(
+		loaders.usersByShopBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, []*models.User]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	loaders.SalesByShopID = dataloader.NewBatchedLoader(
+		loaders.salesByShopBatchFunc,
+		dataloader.WithCache(&dataloader.InMemoryCache[string, []*models.Sale]{}),
+		dataloader.WithWait(10*time.Millisecond),
+		dataloader.WithBatch(50),
+	)
+
+	return loaders
+}
+
+// Batch functions for individual entities
+
+func (dl *DataLoaders) productBatchFunc(ctx context.Context, keys []string) []*dataloader.Result[*models.Product] {
+	results := make([]*dataloader.Result[*models.Product], len(keys))
+
+	// Query all products in one batch
+	var products []models.Product
+	if err := dl.db.WithContext(ctx).Where("id IN ?", keys).Find(&products).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.Product]{Error: err}
+		}
+		return results
+	}
+
+	// Create map for O(1) lookup
+	productMap := make(map[string]*models.Product)
+	for i := range products {
+		productMap[products[i].ID] = &products[i]
+	}
+
+	// Build results maintaining order
+	for i, key := range keys {
+		if product, ok := productMap[key]; ok {
+			results[i] = &dataloader.Result[*models.Product]{Data: product}
+			// Cache the result
+			dl.cache.Set(fmt.Sprintf("product:%s", key), product, 5*time.Minute)
+		} else {
+			results[i] = &dataloader.Result[*models.Product]{Error: fmt.Errorf("product not found: %s", key)}
+		}
+	}
+
+	dl.logger.Debug("Batch loaded products",
+		zap.Int("requested", len(keys)),
+		zap.Int("found", len(products)))
+
+	return results
+}
+
+func (dl *DataLoaders) brandBatchFunc(ctx context.Context, keys []string) []*dataloader.Result[*models.Brand] {
+	results := make([]*dataloader.Result[*models.Brand], len(keys))
+
+	var brands []models.Brand
+	if err := dl.db.WithContext(ctx).Where("id IN ?", keys).Find(&brands).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.Brand]{Error: err}
+		}
+		return results
+	}
+
+	brandMap := make(map[string]*models.Brand)
+	for i := range brands {
+		brandMap[brands[i].ID] = &brands[i]
+	}
+
+	for i, key := range keys {
+		if brand, ok := brandMap[key]; ok {
+			results[i] = &dataloader.Result[*models.Brand]{Data: brand}
+			dl.cache.Set(fmt.Sprintf("brand:%s", key), brand, 10*time.Minute)
+		} else {
+			results[i] = &dataloader.Result[*models.Brand]{Error: fmt.Errorf("brand not found: %s", key)}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) categoryBatchFunc(ctx context.Context, keys []string) []*dataloader.Result[*models.Category] {
+	results := make([]*dataloader.Result[*models.Category], len(keys))
+
+	var categories []models.Category
+	if err := dl.db.WithContext(ctx).Where("id IN ?", keys).Find(&categories).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.Category]{Error: err}
+		}
+		return results
+	}
+
+	categoryMap := make(map[string]*models.Category)
+	for i := range categories {
+		categoryMap[categories[i].ID] = &categories[i]
+	}
+
+	for i, key := range keys {
+		if category, ok := categoryMap[key]; ok {
+			results[i] = &dataloader.Result[*models.Category]{Data: category}
+			dl.cache.Set(fmt.Sprintf("category:%s", key), category, 15*time.Minute)
+		} else {
+			results[i] = &dataloader.Result[*models.Category]{Error: fmt.Errorf("category not found: %s", key)}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) subcategoryBatchFunc(ctx context.Context, keys []string) []*dataloader.Result[*models.Subcategory] {
+	results := make([]*dataloader.Result[*models.Subcategory], len(keys))
+
+	var subcategories []models.Subcategory
+	if err := dl.db.WithContext(ctx).Where("id IN ?", keys).Find(&subcategories).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.Subcategory]{Error: err}
+		}
+		return results
+	}
+
+	subcategoryMap := make(map[string]*models.Subcategory)
+	for i := range subcategories {
+		subcategoryMap[subcategories[i].ID] = &subcategories[i]
+	}
+
+	for i, key := range keys {
+		if subcategory, ok := subcategoryMap[key]; ok {
+			results[i] = &dataloader.Result[*models.Subcategory]{Data: subcategory}
+			dl.cache.Set(fmt.Sprintf("subcategory:%s", key), subcategory, 15*time.Minute)
+		} else {
+			results[i] = &dataloader.Result[*models.Subcategory]{Error: fmt.Errorf("subcategory not found: %s", key)}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) userBatchFunc(ctx context.Context, keys []string) []*dataloader.Result[*models.User] {
+	results := make([]*dataloader.Result[*models.User], len(keys))
+
+	var users []models.User
+	if err := dl.db.WithContext(ctx).Where("id IN ?", keys).Find(&users).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.User]{Error: err}
+		}
+		return results
+	}
+
+	userMap := make(map[string]*models.User)
+	for i := range users {
+		userMap[users[i].ID] = &users[i]
+	}
+
+	for i, key := range keys {
+		if user, ok := userMap[key]; ok {
+			results[i] = &dataloader.Result[*models.User]{Data: user}
+		} else {
+			results[i] = &dataloader.Result[*models.User]{Error: fmt.Errorf("user not found: %s", key)}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) shopBatchFunc(ctx context.Context, keys []string) []*dataloader.Result[*models.Shop] {
+	results := make([]*dataloader.Result[*models.Shop], len(keys))
+
+	var shops []models.Shop
+	if err := dl.db.WithContext(ctx).Where("id IN ?", keys).Find(&shops).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.Shop]{Error: err}
+		}
+		return results
+	}
+
+	shopMap := make(map[string]*models.Shop)
+	for i := range shops {
+		shopMap[shops[i].ID] = &shops[i]
+	}
+
+	for i, key := range keys {
+		if shop, ok := shopMap[key]; ok {
+			results[i] = &dataloader.Result[*models.Shop]{Data: shop}
+			dl.cache.Set(fmt.Sprintf("shop:%s", key), shop, 10*time.Minute)
+		} else {
+			results[i] = &dataloader.Result[*models.Shop]{Error: fmt.Errorf("shop not found: %s", key)}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) customerBatchFunc(ctx context.Context, keys []string) []*dataloader.Result[*models.Customer] {
+	results := make([]*dataloader.Result[*models.Customer], len(keys))
+
+	var customers []models.Customer
+	if err := dl.db.WithContext(ctx).Where("id IN ?", keys).Find(&customers).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.Customer]{Error: err}
+		}
+		return results
+	}
+
+	customerMap := make(map[string]*models.Customer)
+	for i := range customers {
+		customerMap[customers[i].ID] = &customers[i]
+	}
+
+	for i, key := range keys {
+		if customer, ok := customerMap[key]; ok {
+			results[i] = &dataloader.Result[*models.Customer]{Data: customer}
+		} else {
+			results[i] = &dataloader.Result[*models.Customer]{Error: fmt.Errorf("customer not found: %s", key)}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) stockBatchFunc(ctx context.Context, keys []ProductShopKey) []*dataloader.Result[*models.Stock] {
+	results := make([]*dataloader.Result[*models.Stock], len(keys))
+
+	// Build query conditions
+	var conditions []string
+	var args []interface{}
+	for _, key := range keys {
+		conditions = append(conditions, "(product_id = ? AND shop_id = ?)")
+		args = append(args, key.ProductID, key.ShopID)
+	}
+
+	query := "(" + conditions[0]
+	for i := 1; i < len(conditions); i++ {
+		query += " OR " + conditions[i]
+	}
+	query += ")"
+
+	var stocks []models.Stock
+	if err := dl.db.WithContext(ctx).Where(query, args...).Find(&stocks).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[*models.Stock]{Error: err}
+		}
+		return results
+	}
+
+	// Create map with composite key
+	stockMap := make(map[string]*models.Stock)
+	for i := range stocks {
+		key := fmt.Sprintf("%s:%s", stocks[i].ProductID, stocks[i].ShopID)
+		stockMap[key] = &stocks[i]
+	}
+
+	for i, key := range keys {
+		if stock, ok := stockMap[key.String()]; ok {
+			results[i] = &dataloader.Result[*models.Stock]{Data: stock}
+		} else {
+			results[i] = &dataloader.Result[*models.Stock]{
+				Data: &models.Stock{
+					ProductID: key.ProductID,
+					ShopID:    key.ShopID,
+					Quantity:  0,
+				},
+			}
+		}
+	}
+
+	return results
+}
+
+// Batch functions for collections
+
+func (dl *DataLoaders) productsByBrandBatchFunc(ctx context.Context, brandIDs []string) []*dataloader.Result[[]*models.Product] {
+	results := make([]*dataloader.Result[[]*models.Product], len(brandIDs))
+
+	var products []models.Product
+	if err := dl.db.WithContext(ctx).Where("brand_id IN ?", brandIDs).Find(&products).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[[]*models.Product]{Error: err}
+		}
+		return results
+	}
+
+	// Group products by brand
+	productsByBrand := make(map[string][]*models.Product)
+	for i := range products {
+		brandID := products[i].BrandID
+		productsByBrand[brandID] = append(productsByBrand[brandID], &products[i])
+	}
+
+	for i, brandID := range brandIDs {
+		if prods, ok := productsByBrand[brandID]; ok {
+			results[i] = &dataloader.Result[[]*models.Product]{Data: prods}
+		} else {
+			results[i] = &dataloader.Result[[]*models.Product]{Data: []*models.Product{}}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) productsByCategoryBatchFunc(ctx context.Context, categoryIDs []string) []*dataloader.Result[[]*models.Product] {
+	results := make([]*dataloader.Result[[]*models.Product], len(categoryIDs))
+
+	var products []models.Product
+	if err := dl.db.WithContext(ctx).Where("category_id IN ?", categoryIDs).Find(&products).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[[]*models.Product]{Error: err}
+		}
+		return results
+	}
+
+	productsByCategory := make(map[string][]*models.Product)
+	for i := range products {
+		categoryID := products[i].CategoryID
+		productsByCategory[categoryID] = append(productsByCategory[categoryID], &products[i])
+	}
+
+	for i, categoryID := range categoryIDs {
+		if prods, ok := productsByCategory[categoryID]; ok {
+			results[i] = &dataloader.Result[[]*models.Product]{Data: prods}
+		} else {
+			results[i] = &dataloader.Result[[]*models.Product]{Data: []*models.Product{}}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) stocksByShopBatchFunc(ctx context.Context, shopIDs []string) []*dataloader.Result[[]*models.Stock] {
+	results := make([]*dataloader.Result[[]*models.Stock], len(shopIDs))
+
+	var stocks []models.Stock
+	if err := dl.db.WithContext(ctx).
+		Preload("Product").
+		Where("shop_id IN ?", shopIDs).
+		Find(&stocks).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[[]*models.Stock]{Error: err}
+		}
+		return results
+	}
+
+	stocksByShop := make(map[string][]*models.Stock)
+	for i := range stocks {
+		shopID := stocks[i].ShopID
+		stocksByShop[shopID] = append(stocksByShop[shopID], &stocks[i])
+	}
+
+	for i, shopID := range shopIDs {
+		if stks, ok := stocksByShop[shopID]; ok {
+			results[i] = &dataloader.Result[[]*models.Stock]{Data: stks}
+		} else {
+			results[i] = &dataloader.Result[[]*models.Stock]{Data: []*models.Stock{}}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) usersByShopBatchFunc(ctx context.Context, shopIDs []string) []*dataloader.Result[[]*models.User] {
+	results := make([]*dataloader.Result[[]*models.User], len(shopIDs))
+
+	// Query users with their shop associations
+	var shopUsers []struct {
+		ShopID string
+		UserID string
+	}
+
+	if err := dl.db.WithContext(ctx).
+		Table("user_shops").
+		Where("shop_id IN ?", shopIDs).
+		Find(&shopUsers).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[[]*models.User]{Error: err}
+		}
+		return results
+	}
+
+	// Get unique user IDs
+	userIDSet := make(map[string]bool)
+	for _, su := range shopUsers {
+		userIDSet[su.UserID] = true
+	}
+
+	userIDs := make([]string, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
+	}
+
+	// Fetch all users
+	var users []models.User
+	if len(userIDs) > 0 {
+		if err := dl.db.WithContext(ctx).Where("id IN ?", userIDs).Find(&users).Error; err != nil {
+			for i := range results {
+				results[i] = &dataloader.Result[[]*models.User]{Error: err}
+			}
+			return results
+		}
+	}
+
+	// Create user map
+	userMap := make(map[string]*models.User)
+	for i := range users {
+		userMap[users[i].ID] = &users[i]
+	}
+
+	// Group users by shop
+	usersByShop := make(map[string][]*models.User)
+	for _, su := range shopUsers {
+		if user, ok := userMap[su.UserID]; ok {
+			usersByShop[su.ShopID] = append(usersByShop[su.ShopID], user)
+		}
+	}
+
+	for i, shopID := range shopIDs {
+		if usrs, ok := usersByShop[shopID]; ok {
+			results[i] = &dataloader.Result[[]*models.User]{Data: usrs}
+		} else {
+			results[i] = &dataloader.Result[[]*models.User]{Data: []*models.User{}}
+		}
+	}
+
+	return results
+}
+
+func (dl *DataLoaders) salesByShopBatchFunc(ctx context.Context, shopIDs []string) []*dataloader.Result[[]*models.Sale] {
+	results := make([]*dataloader.Result[[]*models.Sale], len(shopIDs))
+
+	// Query last 100 sales per shop
+	var sales []models.Sale
+	if err := dl.db.WithContext(ctx).
+		Preload("SaleItems").
+		Where("shop_id IN ?", shopIDs).
+		Order("created_at DESC").
+		Limit(100 * len(shopIDs)).
+		Find(&sales).Error; err != nil {
+		for i := range results {
+			results[i] = &dataloader.Result[[]*models.Sale]{Error: err}
+		}
+		return results
+	}
+
+	salesByShop := make(map[string][]*models.Sale)
+	for i := range sales {
+		shopID := sales[i].ShopID
+		if len(salesByShop[shopID]) < 100 {
+			salesByShop[shopID] = append(salesByShop[shopID], &sales[i])
+		}
+	}
+
+	for i, shopID := range shopIDs {
+		if sls, ok := salesByShop[shopID]; ok {
+			results[i] = &dataloader.Result[[]*models.Sale]{Data: sls}
+		} else {
+			results[i] = &dataloader.Result[[]*models.Sale]{Data: []*models.Sale{}}
+		}
+	}
+
+	return results
+}
+
+// Context helpers
+
+type loaderKey struct{}
+
+// WithLoaders returns a context with data loaders attached
+func WithLoaders(ctx context.Context, loaders *DataLoaders) context.Context {
+	return context.WithValue(ctx, loaderKey{}, loaders)
+}
+
+// GetLoaders retrieves data loaders from context
+func GetLoaders(ctx context.Context) *DataLoaders {
+	if loaders, ok := ctx.Value(loaderKey{}).(*DataLoaders); ok {
+		return loaders
+	}
+	return nil
+}
+
+// LoaderMiddleware creates middleware that attaches data loaders to the context
+func LoaderMiddleware(db *gorm.DB, logger *zap.Logger) func(context.Context) context.Context {
+	return func(ctx context.Context) context.Context {
+		loaders := NewDataLoaders(db, logger)
+		return WithLoaders(ctx, loaders)
+	}
+}

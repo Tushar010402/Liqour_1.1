@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -420,6 +419,503 @@ type TenantUsageStats struct {
 	LastUpdated   time.Time `json:"last_updated"`
 }
 
+// Admin Team Management methods
+
+func (s *AdminService) CreateAdminUser(ctx context.Context, req models.CreateAdminUserRequest, invitedBy uuid.UUID) (*models.AdminUser, error) {
+	// Check email uniqueness
+	var count int64
+	if err := s.db.Model(&models.AdminUser{}).Where("email = ?", req.Email).Count(&count).Error; err != nil {
+		return nil, fmt.Errorf("failed to check email uniqueness: %w", err)
+	}
+	if count > 0 {
+		return nil, fmt.Errorf("email already in use")
+	}
+
+	// Check mobile uniqueness
+	if err := s.db.Model(&models.AdminUser{}).Where("mobile = ?", req.Mobile).Count(&count).Error; err != nil {
+		return nil, fmt.Errorf("failed to check mobile uniqueness: %w", err)
+	}
+	if count > 0 {
+		return nil, fmt.Errorf("mobile number already in use")
+	}
+
+	department := req.Department
+	if department == "" {
+		department = "general"
+	}
+
+	adminUser := &models.AdminUser{
+		ID:          uuid.New(),
+		Email:       req.Email,
+		Mobile:      req.Mobile,
+		FirstName:   req.FirstName,
+		LastName:    req.LastName,
+		Name:        req.FirstName + " " + req.LastName,
+		Role:        req.Role,
+		Permissions: req.Permissions,
+		Department:  department,
+		InvitedBy:   &invitedBy,
+		Active:      true,
+	}
+
+	tx := s.db.Begin()
+
+	if err := tx.Create(adminUser).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to create admin user: %w", err)
+	}
+
+	// Audit log
+	newValues, _ := json.Marshal(map[string]interface{}{
+		"email": req.Email, "role": req.Role, "department": department,
+	})
+	auditLog := models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &invitedBy,
+		Action:      "create",
+		Resource:    "admin_user",
+		ResourceID:  adminUser.ID.String(),
+		NewValues:   string(newValues),
+		IPAddress:   "unknown",
+		UserAgent:   "admin-panel",
+	}
+	if err := tx.Create(&auditLog).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to create audit log: %w", err)
+	}
+
+	tx.Commit()
+	return adminUser, nil
+}
+
+func (s *AdminService) GetAdminUsers(ctx context.Context, page, limit int, search, role, department string) ([]models.AdminUser, int64, error) {
+	var admins []models.AdminUser
+	var total int64
+
+	query := s.db.Model(&models.AdminUser{})
+
+	if search != "" {
+		searchPattern := "%" + search + "%"
+		query = query.Where("name ILIKE ? OR email ILIKE ? OR mobile ILIKE ?", searchPattern, searchPattern, searchPattern)
+	}
+	if role != "" && role != "all" {
+		query = query.Where("role = ?", role)
+	}
+	if department != "" && department != "all" {
+		query = query.Where("department = ?", department)
+	}
+
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to count admin users: %w", err)
+	}
+
+	offset := (page - 1) * limit
+	if err := query.Order("created_at DESC").Limit(limit).Offset(offset).Find(&admins).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to get admin users: %w", err)
+	}
+
+	return admins, total, nil
+}
+
+func (s *AdminService) GetAdminUserByID(ctx context.Context, id uuid.UUID) (*models.AdminUser, error) {
+	var admin models.AdminUser
+	if err := s.db.First(&admin, id).Error; err != nil {
+		return nil, fmt.Errorf("admin user not found: %w", err)
+	}
+	return &admin, nil
+}
+
+func (s *AdminService) UpdateAdminUser(ctx context.Context, id uuid.UUID, req models.UpdateAdminUserRequest, updatedBy uuid.UUID) (*models.AdminUser, error) {
+	var admin models.AdminUser
+	if err := s.db.First(&admin, id).Error; err != nil {
+		return nil, fmt.Errorf("admin user not found: %w", err)
+	}
+
+	// Prevent self-demotion from super_admin
+	if id == updatedBy && req.Role != nil && *req.Role != admin.Role && admin.Role == "super_admin" {
+		return nil, fmt.Errorf("cannot demote your own super_admin role")
+	}
+
+	oldValues, _ := json.Marshal(map[string]interface{}{
+		"role": admin.Role, "active": admin.Active, "department": admin.Department,
+	})
+
+	if req.FirstName != nil {
+		admin.FirstName = *req.FirstName
+	}
+	if req.LastName != nil {
+		admin.LastName = *req.LastName
+	}
+	if req.FirstName != nil || req.LastName != nil {
+		admin.Name = admin.FirstName + " " + admin.LastName
+	}
+	if req.Email != nil {
+		// Check uniqueness
+		var count int64
+		s.db.Model(&models.AdminUser{}).Where("email = ? AND id != ?", *req.Email, id).Count(&count)
+		if count > 0 {
+			return nil, fmt.Errorf("email already in use")
+		}
+		admin.Email = *req.Email
+	}
+	if req.Role != nil {
+		admin.Role = *req.Role
+	}
+	if req.Permissions != nil {
+		admin.Permissions = req.Permissions
+	}
+	if req.Department != nil {
+		admin.Department = *req.Department
+	}
+	if req.Active != nil {
+		admin.Active = *req.Active
+	}
+	if req.AvatarURL != nil {
+		admin.AvatarURL = *req.AvatarURL
+	}
+
+	tx := s.db.Begin()
+
+	if err := tx.Save(&admin).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to update admin user: %w", err)
+	}
+
+	newValues, _ := json.Marshal(map[string]interface{}{
+		"role": admin.Role, "active": admin.Active, "department": admin.Department,
+	})
+	auditLog := models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &updatedBy,
+		Action:      "update",
+		Resource:    "admin_user",
+		ResourceID:  admin.ID.String(),
+		OldValues:   string(oldValues),
+		NewValues:   string(newValues),
+		IPAddress:   "unknown",
+		UserAgent:   "admin-panel",
+	}
+	tx.Create(&auditLog)
+	tx.Commit()
+
+	return &admin, nil
+}
+
+func (s *AdminService) DeactivateAdminUser(ctx context.Context, id uuid.UUID, deactivatedBy uuid.UUID) error {
+	var admin models.AdminUser
+	if err := s.db.First(&admin, id).Error; err != nil {
+		return fmt.Errorf("admin user not found: %w", err)
+	}
+
+	if id == deactivatedBy {
+		return fmt.Errorf("cannot deactivate your own account")
+	}
+
+	admin.Active = false
+	if err := s.db.Save(&admin).Error; err != nil {
+		return fmt.Errorf("failed to deactivate admin user: %w", err)
+	}
+
+	// Invalidate session in cache
+	sessionKey := fmt.Sprintf(cache.UserSessionKey, id.String())
+	s.cache.Delete(ctx, sessionKey)
+
+	// Audit log
+	newValues, _ := json.Marshal(map[string]interface{}{"active": false})
+	s.db.Create(&models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &deactivatedBy,
+		Action:      "deactivate",
+		Resource:    "admin_user",
+		ResourceID:  admin.ID.String(),
+		NewValues:   string(newValues),
+	})
+
+	return nil
+}
+
+func (s *AdminService) DeleteAdminUser(ctx context.Context, id uuid.UUID, deletedBy uuid.UUID) error {
+	if id == deletedBy {
+		return fmt.Errorf("cannot delete your own account")
+	}
+
+	result := s.db.Delete(&models.AdminUser{}, id)
+	if result.Error != nil {
+		return fmt.Errorf("failed to delete admin user: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("admin user not found")
+	}
+
+	// Invalidate session
+	sessionKey := fmt.Sprintf(cache.UserSessionKey, id.String())
+	s.cache.Delete(ctx, sessionKey)
+
+	s.db.Create(&models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &deletedBy,
+		Action:      "delete",
+		Resource:    "admin_user",
+		ResourceID:  id.String(),
+	})
+
+	return nil
+}
+
+func (s *AdminService) InviteAdminUser(ctx context.Context, req models.InviteAdminRequest, invitedBy uuid.UUID) (*models.AdminInvitation, error) {
+	// Check if email already exists as admin
+	var count int64
+	s.db.Model(&models.AdminUser{}).Where("email = ?", req.Email).Count(&count)
+	if count > 0 {
+		return nil, fmt.Errorf("email already registered as admin user")
+	}
+
+	// Check if there's already a pending invitation for this email
+	s.db.Model(&models.AdminInvitation{}).Where("email = ? AND status = 'pending' AND expires_at > ?", req.Email, time.Now()).Count(&count)
+	if count > 0 {
+		return nil, fmt.Errorf("pending invitation already exists for this email")
+	}
+
+	// Generate secure token
+	token, err := generateSecureToken(32)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate invitation token: %w", err)
+	}
+
+	department := req.Department
+	if department == "" {
+		department = "general"
+	}
+
+	invitation := &models.AdminInvitation{
+		ID:          uuid.New(),
+		Email:       req.Email,
+		Mobile:      req.Mobile,
+		Name:        req.Name,
+		Role:        req.Role,
+		Permissions: req.Permissions,
+		Department:  department,
+		InvitedByID: invitedBy,
+		Token:       token,
+		ExpiresAt:   time.Now().Add(72 * time.Hour), // 3 days
+		Status:      "pending",
+	}
+
+	if err := s.db.Create(invitation).Error; err != nil {
+		return nil, fmt.Errorf("failed to create invitation: %w", err)
+	}
+
+	// Audit log
+	s.db.Create(&models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &invitedBy,
+		Action:      "invite",
+		Resource:    "admin_invitation",
+		ResourceID:  invitation.ID.String(),
+		NewValues:   fmt.Sprintf(`{"email":"%s","role":"%s"}`, req.Email, req.Role),
+	})
+
+	return invitation, nil
+}
+
+func (s *AdminService) AcceptInvitation(ctx context.Context, token, mobile string) (*models.AdminUser, string, error) {
+	var invitation models.AdminInvitation
+	if err := s.db.Where("token = ? AND status = 'pending'", token).First(&invitation).Error; err != nil {
+		return nil, "", fmt.Errorf("invitation not found or already used")
+	}
+
+	if time.Now().After(invitation.ExpiresAt) {
+		s.db.Model(&invitation).Update("status", "expired")
+		return nil, "", fmt.Errorf("invitation has expired")
+	}
+
+	// Create admin user from invitation
+	adminUser := &models.AdminUser{
+		ID:          uuid.New(),
+		Email:       invitation.Email,
+		Mobile:      mobile,
+		FirstName:   invitation.Name,
+		LastName:    "",
+		Name:        invitation.Name,
+		Role:        invitation.Role,
+		Permissions: invitation.Permissions,
+		Department:  invitation.Department,
+		InvitedBy:   &invitation.InvitedByID,
+		Active:      true,
+	}
+
+	// Split name if possible
+	parts := splitName(invitation.Name)
+	adminUser.FirstName = parts[0]
+	if len(parts) > 1 {
+		adminUser.LastName = parts[1]
+	}
+
+	tx := s.db.Begin()
+
+	if err := tx.Create(adminUser).Error; err != nil {
+		tx.Rollback()
+		return nil, "", fmt.Errorf("failed to create admin user: %w", err)
+	}
+
+	// Mark invitation as accepted
+	now := time.Now()
+	if err := tx.Model(&invitation).Updates(map[string]interface{}{
+		"status":      "accepted",
+		"accepted_at": &now,
+	}).Error; err != nil {
+		tx.Rollback()
+		return nil, "", fmt.Errorf("failed to update invitation: %w", err)
+	}
+
+	tx.Commit()
+
+	// Generate JWT token
+	jwtToken, err := s.GenerateAdminToken(ctx, mobile)
+	if err != nil {
+		return adminUser, "", fmt.Errorf("user created but failed to generate token: %w", err)
+	}
+
+	return adminUser, jwtToken, nil
+}
+
+func (s *AdminService) RevokeInvitation(ctx context.Context, invitationID uuid.UUID, revokedBy uuid.UUID) error {
+	result := s.db.Model(&models.AdminInvitation{}).Where("id = ? AND status = 'pending'", invitationID).Update("status", "revoked")
+	if result.Error != nil {
+		return fmt.Errorf("failed to revoke invitation: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("invitation not found or not in pending status")
+	}
+
+	s.db.Create(&models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &revokedBy,
+		Action:      "revoke",
+		Resource:    "admin_invitation",
+		ResourceID:  invitationID.String(),
+	})
+
+	return nil
+}
+
+func (s *AdminService) GetPendingInvitations(ctx context.Context, page, limit int) ([]models.AdminInvitation, int64, error) {
+	var invitations []models.AdminInvitation
+	var total int64
+
+	query := s.db.Model(&models.AdminInvitation{}).Where("status = 'pending' AND expires_at > ?", time.Now())
+
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to count invitations: %w", err)
+	}
+
+	offset := (page - 1) * limit
+	if err := query.Preload("InvitedBy").Order("created_at DESC").Limit(limit).Offset(offset).Find(&invitations).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to get invitations: %w", err)
+	}
+
+	return invitations, total, nil
+}
+
+func (s *AdminService) LogAdminActivity(ctx context.Context, adminID uuid.UUID, activityType, description, ip, userAgent string, metadata map[string]interface{}) error {
+	metadataJSON := ""
+	if metadata != nil {
+		bytes, _ := json.Marshal(metadata)
+		metadataJSON = string(bytes)
+	}
+
+	activity := &models.AdminActivityLog{
+		ID:           uuid.New(),
+		AdminUserID:  adminID,
+		ActivityType: activityType,
+		Description:  description,
+		IPAddress:    ip,
+		UserAgent:    userAgent,
+		Metadata:     metadataJSON,
+	}
+
+	return s.db.Create(activity).Error
+}
+
+func (s *AdminService) GetAdminActivity(ctx context.Context, adminID uuid.UUID, page, limit int) ([]models.AdminActivityLog, int64, error) {
+	var activities []models.AdminActivityLog
+	var total int64
+
+	query := s.db.Model(&models.AdminActivityLog{}).Where("admin_user_id = ?", adminID)
+
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to count activities: %w", err)
+	}
+
+	offset := (page - 1) * limit
+	if err := query.Order("created_at DESC").Limit(limit).Offset(offset).Find(&activities).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to get activities: %w", err)
+	}
+
+	return activities, total, nil
+}
+
+func (s *AdminService) GetMyProfile(ctx context.Context, adminID uuid.UUID) (*models.AdminUser, error) {
+	var admin models.AdminUser
+	if err := s.db.First(&admin, adminID).Error; err != nil {
+		return nil, fmt.Errorf("admin user not found: %w", err)
+	}
+	return &admin, nil
+}
+
+func (s *AdminService) UpdateMyProfile(ctx context.Context, adminID uuid.UUID, req models.UpdateProfileRequest) (*models.AdminUser, error) {
+	var admin models.AdminUser
+	if err := s.db.First(&admin, adminID).Error; err != nil {
+		return nil, fmt.Errorf("admin user not found: %w", err)
+	}
+
+	if req.FirstName != nil {
+		admin.FirstName = *req.FirstName
+	}
+	if req.LastName != nil {
+		admin.LastName = *req.LastName
+	}
+	if req.FirstName != nil || req.LastName != nil {
+		admin.Name = admin.FirstName + " " + admin.LastName
+	}
+	if req.AvatarURL != nil {
+		admin.AvatarURL = *req.AvatarURL
+	}
+
+	if err := s.db.Save(&admin).Error; err != nil {
+		return nil, fmt.Errorf("failed to update profile: %w", err)
+	}
+
+	return &admin, nil
+}
+
+// Helper functions
+
+func generateSecureToken(length int) (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	token := make([]byte, length)
+	for i := range token {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			return "", err
+		}
+		token[i] = charset[num.Int64()]
+	}
+	return string(token), nil
+}
+
+func splitName(name string) []string {
+	parts := make([]string, 0, 2)
+	for i, r := range name {
+		if r == ' ' && i > 0 {
+			parts = append(parts, name[:i])
+			parts = append(parts, name[i+1:])
+			return parts
+		}
+	}
+	return []string{name}
+}
+
 // SaaS Admin Authentication methods
 
 type OTPRecord struct {
@@ -433,11 +929,6 @@ type OTPRecord struct {
 var otpStore = make(map[string]*OTPRecord)
 
 func (s *AdminService) IsSaaSAdmin(ctx context.Context, mobile string) (bool, error) {
-	// For demo purposes, allow the demo mobile number
-	if mobile == "+918630668488" {
-		return true, nil
-	}
-
 	// Check if mobile number exists in AdminUser table
 	var count int64
 	err := s.db.Model(&models.AdminUser{}).Where("mobile = ? AND active = true", mobile).Count(&count).Error
@@ -508,28 +999,16 @@ func (s *AdminService) GenerateAdminToken(ctx context.Context, mobile string) (s
 	err := s.db.Where("mobile = ?", mobile).First(&adminUser).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			// Create new admin user with specific details for +918630668488
-			if mobile == "+918630668488" {
-				adminUser = models.AdminUser{
-					ID:        uuid.New(),
-					Mobile:    mobile,
-					FirstName: "Tushar",
-					LastName:  "Agrawal",
-					Name:      "Tushar Agrawal",
-					Email:     "tusharagrawal0104@gmail.com",
-					Role:      "saas_admin",
-					Active:    true,
-				}
-			} else {
-				adminUser = models.AdminUser{
-					ID:        uuid.New(),
-					Mobile:    mobile,
-					FirstName: "Admin",
-					LastName:  "User",
-					Name:      "Admin User",
-					Role:      "saas_admin",
-					Active:    true,
-				}
+			// Auto-create admin user on first login
+			adminUser = models.AdminUser{
+				ID:          uuid.New(),
+				Mobile:      mobile,
+				FirstName:   "Admin",
+				LastName:    "User",
+				Name:        "Admin User",
+				Role:        "super_admin",
+				Permissions: models.GetDefaultPermissions("super_admin"),
+				Active:      true,
 			}
 			if err := s.db.Create(&adminUser).Error; err != nil {
 				return "", fmt.Errorf("failed to create admin user: %w", err)
@@ -541,14 +1020,28 @@ func (s *AdminService) GenerateAdminToken(ctx context.Context, mobile string) (s
 
 	userID := adminUser.ID.String()
 
+	// Ensure permissions are populated — assign role defaults if empty
+	permissions := adminUser.Permissions
+	if len(permissions) == 0 {
+		permissions = models.GetDefaultPermissions(adminUser.Role)
+		adminUser.Permissions = permissions
+		s.db.Model(&adminUser).Update("permissions", permissions)
+	}
+
+	// Update last login
+	now := time.Now()
+	s.db.Model(&adminUser).Update("last_login_at", &now)
+
 	// Create JWT claims
 	claims := jwt.MapClaims{
-		"mobile":  mobile,
-		"role":    "saas_admin",
-		"user_id": userID,
-		"exp":     time.Now().Add(24 * time.Hour).Unix(),
-		"iat":     time.Now().Unix(),
-		"iss":     "saas-admin-service",
+		"mobile":      mobile,
+		"role":        adminUser.Role,
+		"user_id":     userID,
+		"permissions": permissions,
+		"department":  adminUser.Department,
+		"exp":         time.Now().Add(24 * time.Hour).Unix(),
+		"iat":         time.Now().Unix(),
+		"iss":         "saas-admin-service",
 	}
 
 	// Create token
@@ -584,239 +1077,40 @@ func (s *AdminService) GenerateAdminToken(ctx context.Context, mobile string) (s
 }
 
 func (s *AdminService) GetAdminByMobile(ctx context.Context, mobile string) (map[string]interface{}, error) {
-	// For specific SaaS admin mobile number
-	if mobile == "+918630668488" {
-		return map[string]interface{}{
-			"mobile":     mobile,
-			"first_name": "Tushar",
-			"last_name":  "Agrawal",
-			"email":      "tusharagrawal0104@gmail.com",
-			"name":       "Tushar Agrawal",
-			"role":       "saas_admin",
-			"active":     true,
-		}, nil
-	}
-
-	// Get from database for real mobile numbers
+	// Get from database
 	var adminUser models.AdminUser
 	err := s.db.Where("mobile = ? AND active = true", mobile).First(&adminUser).Error
 	if err != nil {
+		// Fallback for demo admin if not yet in DB
+		if mobile == "+918630668488" {
+			return map[string]interface{}{
+				"mobile":      mobile,
+				"first_name":  "Tushar",
+				"last_name":   "Agrawal",
+				"email":       "tusharagrawal0104@gmail.com",
+				"name":        "Tushar Agrawal",
+				"role":        "super_admin",
+				"permissions": models.GetDefaultPermissions("super_admin"),
+				"department":  "general",
+				"active":      true,
+			}, nil
+		}
 		return nil, fmt.Errorf("admin user not found: %w", err)
 	}
 
 	return map[string]interface{}{
-		"id":         adminUser.ID,
-		"mobile":     adminUser.Mobile,
-		"first_name": adminUser.FirstName,
-		"last_name":  adminUser.LastName,
-		"email":      adminUser.Email,
-		"role":       adminUser.Role,
-		"active":     adminUser.Active,
+		"id":          adminUser.ID,
+		"mobile":      adminUser.Mobile,
+		"first_name":  adminUser.FirstName,
+		"last_name":   adminUser.LastName,
+		"email":       adminUser.Email,
+		"name":        adminUser.Name,
+		"role":        adminUser.Role,
+		"permissions": adminUser.Permissions,
+		"department":  adminUser.Department,
+		"avatar_url":  adminUser.AvatarURL,
+		"active":      adminUser.Active,
 	}, nil
-}
-
-// GetAllTenantsWithPagination returns paginated list of tenants with filtering and search
-func (s *AdminService) GetAllTenantsWithPagination(ctx context.Context, params map[string]interface{}) ([]map[string]interface{}, int, error) {
-	page := params["page"].(int)
-	limit := params["limit"].(int)
-	search := params["search"].(string)
-	status := params["status"].(string)
-	sortBy := params["sort_by"].(string)
-	order := params["order"].(string)
-
-	offset := (page - 1) * limit
-
-	type TenantData struct {
-		ID               string     `json:"id"`
-		Name             string     `json:"name"`
-		Slug             string     `json:"slug"`
-		Email            string     `json:"email"`
-		Phone            string     `json:"phone"`
-		Status           string     `json:"status"`
-		SubscriptionPlan string     `json:"subscription_plan"`
-		LocationsCount   int        `json:"locations_count"`
-		UsersCount       int        `json:"users_count"`
-		ProductsCount    int        `json:"products_count"`
-		CreatedAt        time.Time  `json:"created_at"`
-		LastActive       *time.Time `json:"last_active"`
-	}
-
-	var tenants []TenantData
-	var total int
-
-	// Build WHERE clause for filters
-	whereConditions := []string{"1=1"}
-	queryArgs := []interface{}{}
-	argCount := 0
-
-	// Add search filter
-	if search != "" {
-		argCount++
-		whereConditions = append(whereConditions, fmt.Sprintf("(t.name ILIKE $%d OR admin_user.email ILIKE $%d OR t.phone ILIKE $%d)", argCount, argCount, argCount))
-		searchPattern := "%" + search + "%"
-		queryArgs = append(queryArgs, searchPattern)
-	}
-
-	// Add status filter
-	if status != "" && status != "all" {
-		argCount++
-		whereConditions = append(whereConditions, fmt.Sprintf("COALESCE(latest_sub.status, 'no_subscription') = $%d", argCount))
-		queryArgs = append(queryArgs, status)
-	}
-
-	whereClause := strings.Join(whereConditions, " AND ")
-
-	// First, get the total count
-	countQuery := fmt.Sprintf(`
-		SELECT COUNT(DISTINCT t.id)
-		FROM tenants t
-		LEFT JOIN (
-			SELECT tenant_id, email
-			FROM users
-			WHERE role = 'admin'
-			AND tenant_id IS NOT NULL
-		) admin_user ON admin_user.tenant_id = t.id
-		LEFT JOIN (
-			SELECT DISTINCT ON (tenant_id)
-				tenant_id,
-				status,
-				updated_at
-			FROM subscriptions
-			ORDER BY tenant_id, created_at DESC
-		) latest_sub ON latest_sub.tenant_id = t.id
-		WHERE %s
-	`, whereClause)
-
-	sqlDB, err := s.db.DB()
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get DB connection: %w", err)
-	}
-
-	err = sqlDB.QueryRowContext(ctx, countQuery, queryArgs...).Scan(&total)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get total count: %w", err)
-	}
-
-	// Build ORDER BY clause
-	orderClause := "t.created_at DESC" // default
-	validSortFields := map[string]string{
-		"name":       "t.name",
-		"created_at": "t.created_at",
-		"status":     "status",
-		"email":      "email",
-		"phone":      "t.phone",
-	}
-
-	if field, ok := validSortFields[sortBy]; ok {
-		if order == "asc" {
-			orderClause = field + " ASC"
-		} else {
-			orderClause = field + " DESC"
-		}
-	}
-
-	// Add pagination arguments
-	argCount++
-	limitArg := argCount
-	argCount++
-	offsetArg := argCount
-	queryArgs = append(queryArgs, limit, offset)
-
-	// Get paginated tenants with their latest subscription and usage info
-	query := fmt.Sprintf(`
-		SELECT DISTINCT
-			t.id as id,
-			t.name as name,
-			t.name as slug,
-			COALESCE(admin_user.email, '') as email,
-			COALESCE(t.phone, '') as phone,
-			COALESCE(latest_sub.status, 'no_subscription') as status,
-			'No Plan' as subscription_plan,
-			COALESCE(ur.locations, 0) as locations_count,
-			COALESCE(ur.users, 0) as users_count,
-			COALESCE(ur.products, 0) as products_count,
-			t.created_at,
-			COALESCE(ur.updated_at, latest_sub.updated_at, t.updated_at) as last_active
-		FROM tenants t
-		LEFT JOIN (
-			SELECT tenant_id, email
-			FROM users
-			WHERE role = 'admin'
-			AND tenant_id IS NOT NULL
-		) admin_user ON admin_user.tenant_id = t.id
-		LEFT JOIN (
-			SELECT DISTINCT ON (tenant_id)
-				tenant_id,
-				status,
-				plan_id,
-				updated_at
-			FROM subscriptions
-			ORDER BY tenant_id, created_at DESC
-		) latest_sub ON latest_sub.tenant_id = t.id
-		LEFT JOIN (
-			SELECT
-				tenant_id,
-				MAX(locations) as locations,
-				MAX(users) as users,
-				MAX(products) as products,
-				MAX(updated_at) as updated_at
-			FROM usage_records
-			GROUP BY tenant_id
-		) ur ON ur.tenant_id = t.id
-		WHERE %s
-		ORDER BY %s
-		LIMIT $%d OFFSET $%d
-	`, whereClause, orderClause, limitArg, offsetArg)
-
-	rows, err := sqlDB.QueryContext(ctx, query, queryArgs...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to query tenants: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var tenant TenantData
-		err := rows.Scan(
-			&tenant.ID,
-			&tenant.Name,
-			&tenant.Slug,
-			&tenant.Email,
-			&tenant.Phone,
-			&tenant.Status,
-			&tenant.SubscriptionPlan,
-			&tenant.LocationsCount,
-			&tenant.UsersCount,
-			&tenant.ProductsCount,
-			&tenant.CreatedAt,
-			&tenant.LastActive,
-		)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to scan tenant: %w", err)
-		}
-		tenants = append(tenants, tenant)
-	}
-
-	// Convert to map[string]interface{}
-	var result []map[string]interface{}
-	for _, tenant := range tenants {
-		tenantMap := map[string]interface{}{
-			"id":                tenant.ID,
-			"name":              tenant.Name,
-			"slug":              tenant.Slug,
-			"email":             tenant.Email,
-			"phone":             tenant.Phone,
-			"status":            tenant.Status,
-			"subscription_plan": tenant.SubscriptionPlan,
-			"locations_count":   tenant.LocationsCount,
-			"users_count":       tenant.UsersCount,
-			"products_count":    tenant.ProductsCount,
-			"created_at":        tenant.CreatedAt,
-			"last_active":       tenant.LastActive,
-		}
-		result = append(result, tenantMap)
-	}
-
-	return result, total, nil
 }
 
 // Helper function to generate OTP
@@ -824,9 +1118,7 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 	type TenantData struct {
 		ID               string     `json:"id"`
 		Name             string     `json:"name"`
-		Slug             string     `json:"slug"`
 		Email            string     `json:"email"`
-		Phone            string     `json:"phone"`
 		Status           string     `json:"status"`
 		SubscriptionPlan string     `json:"subscription_plan"`
 		LocationsCount   int        `json:"locations_count"`
@@ -843,11 +1135,9 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 		SELECT DISTINCT
 			t.id as id,
 			t.name as name,
-			t.name as slug,
-			COALESCE(admin_user.email, '') as email,
-			COALESCE(t.phone, '') as phone,
+			COALESCE(t.phone, '') as email,
 			COALESCE(latest_sub.status, 'no_subscription') as status,
-			'No Plan' as subscription_plan,
+			COALESCE(p.display_name, 'No Plan') as subscription_plan,
 			COALESCE(ur.locations, 0) as locations_count,
 			COALESCE(ur.users, 0) as users_count,
 			COALESCE(ur.products, 0) as products_count,
@@ -855,18 +1145,13 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 			COALESCE(ur.updated_at, latest_sub.updated_at, t.updated_at) as last_active
 		FROM tenants t
 		LEFT JOIN (
-			SELECT tenant_id, email
-			FROM users
-			WHERE role = 'admin' AND deleted_at IS NULL
-			GROUP BY tenant_id, email
-		) admin_user ON t.id = admin_user.tenant_id
-		LEFT JOIN (
 			SELECT DISTINCT ON (tenant_id)
 				tenant_id, id, status, plan_id, created_at, updated_at
 			FROM subscriptions
 			WHERE deleted_at IS NULL
 			ORDER BY tenant_id, created_at DESC
 		) latest_sub ON t.id = latest_sub.tenant_id
+		LEFT JOIN pricing_plans p ON latest_sub.plan_id = p.id
 		LEFT JOIN (
 			SELECT
 				subscription_id,
@@ -891,9 +1176,7 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 		result[i] = map[string]interface{}{
 			"id":                tenant.ID,
 			"name":              tenant.Name,
-			"slug":              tenant.Slug,
 			"email":             tenant.Email,
-			"phone":             tenant.Phone,
 			"status":            tenant.Status,
 			"subscription_plan": tenant.SubscriptionPlan,
 			"locations_count":   tenant.LocationsCount,
@@ -905,6 +1188,230 @@ func (s *AdminService) GetAllTenants(ctx context.Context) ([]map[string]interfac
 	}
 
 	return result, nil
+}
+
+// Tenant Detail methods
+
+func (s *AdminService) GetTenantDetail(ctx context.Context, tenantID uuid.UUID) (*models.TenantDetailResponse, error) {
+	// Get basic tenant info
+	type TenantBasic struct {
+		ID        uuid.UUID  `json:"id"`
+		Name      string     `json:"name"`
+		Domain    string     `json:"domain"`
+		IsActive  bool       `json:"is_active"`
+		CreatedAt time.Time  `json:"created_at"`
+		UpdatedAt time.Time  `json:"updated_at"`
+	}
+
+	var tenant TenantBasic
+	if err := s.db.Raw("SELECT id, name, COALESCE(phone, '') as domain, COALESCE(is_active, true) as is_active, created_at, updated_at FROM tenants WHERE id = ? AND deleted_at IS NULL", tenantID).Scan(&tenant).Error; err != nil {
+		return nil, fmt.Errorf("tenant not found: %w", err)
+	}
+
+	detail := &models.TenantDetailResponse{
+		ID:       tenant.ID,
+		Name:     tenant.Name,
+		Email:    tenant.Domain,
+		IsActive: tenant.IsActive,
+		CreatedAt: tenant.CreatedAt,
+	}
+
+	// Get subscription
+	var subscription models.Subscription
+	err := s.db.Preload("Plan").Where("tenant_id = ? AND deleted_at IS NULL", tenantID).Order("created_at DESC").First(&subscription).Error
+	if err == nil {
+		detail.Status = subscription.Status
+		detail.SubscriptionPlan = subscription.Plan.DisplayName
+		detail.Subscription = &models.SubscriptionResponse{
+			ID:                 subscription.ID,
+			TenantID:           subscription.TenantID,
+			Plan:               subscription.Plan,
+			Status:             subscription.Status,
+			CurrentPeriodStart: subscription.CurrentPeriodStart,
+			CurrentPeriodEnd:   subscription.CurrentPeriodEnd,
+			TrialStart:         subscription.TrialStart,
+			TrialEnd:           subscription.TrialEnd,
+			BillingCycle:       subscription.BillingCycle,
+			Amount:             subscription.Amount,
+			Currency:           subscription.Currency,
+			NextBillingDate:    subscription.NextBillingDate,
+			CreatedAt:          subscription.CreatedAt,
+			UpdatedAt:          subscription.UpdatedAt,
+		}
+
+		// Get usage
+		var usage models.UsageRecord
+		if err := s.db.Where("tenant_id = ?", tenantID).Order("record_date DESC").First(&usage).Error; err == nil {
+			var locationUsage, userUsage, productUsage float64
+			if subscription.Plan.MaxLocations > 0 {
+				locationUsage = float64(usage.Locations) / float64(subscription.Plan.MaxLocations) * 100
+			}
+			if subscription.Plan.MaxUsers > 0 {
+				userUsage = float64(usage.Users) / float64(subscription.Plan.MaxUsers) * 100
+			}
+			if subscription.Plan.MaxProducts > 0 {
+				productUsage = float64(usage.Products) / float64(subscription.Plan.MaxProducts) * 100
+			}
+			detail.Usage = &models.TenantUsageResponse{
+				Locations:     usage.Locations,
+				MaxLocations:  subscription.Plan.MaxLocations,
+				LocationUsage: locationUsage,
+				Users:         usage.Users,
+				MaxUsers:      subscription.Plan.MaxUsers,
+				UserUsage:     userUsage,
+				Products:      usage.Products,
+				MaxProducts:   subscription.Plan.MaxProducts,
+				ProductUsage:  productUsage,
+			}
+		}
+
+		// Recent payments
+		s.db.Where("subscription_id = ?", subscription.ID).Order("created_at DESC").Limit(5).Find(&detail.RecentPayments)
+	} else {
+		detail.Status = "no_subscription"
+		detail.SubscriptionPlan = "No Plan"
+	}
+
+	// Counts from shared tables
+	s.db.Raw("SELECT COUNT(*) FROM users WHERE tenant_id = ? AND deleted_at IS NULL", tenantID).Scan(&detail.UserCount)
+	s.db.Raw("SELECT COUNT(*) FROM shops WHERE tenant_id = ? AND deleted_at IS NULL", tenantID).Scan(&detail.ShopCount)
+	s.db.Raw("SELECT COUNT(*) FROM products WHERE tenant_id = ? AND deleted_at IS NULL", tenantID).Scan(&detail.ProductCount)
+
+	// Recent audit logs
+	s.db.Where("tenant_id = ?", tenantID).Order("created_at DESC").Limit(10).Find(&detail.RecentAuditLogs)
+
+	return detail, nil
+}
+
+func (s *AdminService) GetTenantTimeline(ctx context.Context, tenantID uuid.UUID, page, limit int) ([]models.TimelineEvent, int64, error) {
+	var events []models.TimelineEvent
+
+	// Gather events from multiple sources
+	// 1. Audit logs for this tenant
+	var auditLogs []models.AuditLog
+	s.db.Where("tenant_id = ?", tenantID).Order("created_at DESC").Limit(limit).Find(&auditLogs)
+
+	for _, log := range auditLogs {
+		events = append(events, models.TimelineEvent{
+			ID:        log.ID,
+			Type:      "audit",
+			Title:     fmt.Sprintf("%s %s", log.Action, log.Resource),
+			Details:   map[string]interface{}{"resource_id": log.ResourceID, "action": log.Action},
+			CreatedAt: log.CreatedAt,
+		})
+	}
+
+	// 2. Subscription changes
+	var subscriptions []models.Subscription
+	s.db.Preload("Plan").Where("tenant_id = ?", tenantID).Order("created_at DESC").Find(&subscriptions)
+
+	for _, sub := range subscriptions {
+		events = append(events, models.TimelineEvent{
+			ID:        sub.ID,
+			Type:      "subscription_change",
+			Title:     fmt.Sprintf("Subscription %s - %s", sub.Status, sub.Plan.DisplayName),
+			Details:   map[string]interface{}{"plan": sub.Plan.DisplayName, "status": sub.Status, "amount": sub.Amount},
+			CreatedAt: sub.CreatedAt,
+		})
+	}
+
+	// 3. Payments
+	var payments []models.Payment
+	s.db.Joins("JOIN subscriptions ON subscriptions.id = payments.subscription_id").
+		Where("subscriptions.tenant_id = ?", tenantID).
+		Order("payments.created_at DESC").Limit(limit).Find(&payments)
+
+	for _, pay := range payments {
+		events = append(events, models.TimelineEvent{
+			ID:        pay.ID,
+			Type:      "payment",
+			Title:     fmt.Sprintf("Payment %s - ₹%.2f", pay.Status, pay.Amount),
+			Details:   map[string]interface{}{"amount": pay.Amount, "status": pay.Status, "method": pay.PaymentMethod},
+			CreatedAt: pay.CreatedAt,
+		})
+	}
+
+	// Sort by created_at DESC
+	for i := 0; i < len(events); i++ {
+		for j := i + 1; j < len(events); j++ {
+			if events[j].CreatedAt.After(events[i].CreatedAt) {
+				events[i], events[j] = events[j], events[i]
+			}
+		}
+	}
+
+	total := int64(len(events))
+
+	// Paginate
+	offset := (page - 1) * limit
+	if offset >= len(events) {
+		return []models.TimelineEvent{}, total, nil
+	}
+	end := offset + limit
+	if end > len(events) {
+		end = len(events)
+	}
+
+	return events[offset:end], total, nil
+}
+
+func (s *AdminService) DeactivateTenant(ctx context.Context, tenantID uuid.UUID, adminID uuid.UUID, reason string) error {
+	tx := s.db.Begin()
+
+	// Deactivate tenant
+	if err := tx.Exec("UPDATE tenants SET is_active = false, updated_at = ? WHERE id = ?", time.Now(), tenantID).Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to deactivate tenant: %w", err)
+	}
+
+	// Suspend active subscription
+	tx.Model(&models.Subscription{}).Where("tenant_id = ? AND status IN ?", tenantID, []string{"active", "trial"}).Updates(map[string]interface{}{
+		"status": "suspended",
+	})
+
+	// Audit log
+	newValues, _ := json.Marshal(map[string]interface{}{"is_active": false, "reason": reason})
+	tx.Create(&models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &adminID,
+		TenantID:    &tenantID,
+		Action:      "deactivate",
+		Resource:    "tenant",
+		ResourceID:  tenantID.String(),
+		NewValues:   string(newValues),
+	})
+
+	tx.Commit()
+	return nil
+}
+
+func (s *AdminService) ReactivateTenant(ctx context.Context, tenantID uuid.UUID, adminID uuid.UUID) error {
+	tx := s.db.Begin()
+
+	// Reactivate tenant
+	if err := tx.Exec("UPDATE tenants SET is_active = true, updated_at = ? WHERE id = ?", time.Now(), tenantID).Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to reactivate tenant: %w", err)
+	}
+
+	// Reactivate suspended subscription
+	tx.Model(&models.Subscription{}).Where("tenant_id = ? AND status = 'suspended'", tenantID).Updates(map[string]interface{}{
+		"status": "active",
+	})
+
+	// Audit log
+	tx.Create(&models.AuditLog{
+		ID:          uuid.New(),
+		AdminUserID: &adminID,
+		TenantID:    &tenantID,
+		Action:      "reactivate",
+		Resource:    "tenant",
+		ResourceID:  tenantID.String(),
+		NewValues:   `{"is_active":true}`,
+	})
+
+	tx.Commit()
+	return nil
 }
 
 func generateOTP(length int) (string, error) {

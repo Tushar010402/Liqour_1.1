@@ -4,19 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
-	"net/http"
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -24,152 +19,43 @@ import (
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
+	firebaseauth "github.com/liquorpro/go-backend/pkg/shared/firebase"
 	"github.com/liquorpro/go-backend/pkg/shared/models"
 	"github.com/liquorpro/go-backend/pkg/shared/utils"
 	"gorm.io/gorm"
 )
 
-// ============================================================================
-// Worker Pools for Async Operations (Performance Optimization)
-// ============================================================================
-
-// smsWorkerPool limits concurrent SMS API requests to prevent overload
-var smsWorkerPool = make(chan struct{}, 10)
-
-// securityEventBuffer handles async security event logging with batching
-var (
-	securityEventBuffer     = make(chan *securityEventWithDB, 1000)
-	securityEventBufferOnce sync.Once
-)
-
-type securityEventWithDB struct {
-	event *models.SecurityEvent
-	db    *gorm.DB
-}
-
-// Pre-compiled regex patterns for performance (compiled once at startup)
-var (
-	mobileRegex = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
-)
-
-// Async device session worker pool for non-blocking session creation
-var deviceSessionPool = make(chan struct{}, 20) // 20 concurrent workers
-
-// deviceSessionRequest holds data for async device session creation
-type deviceSessionRequest struct {
-	service           *AuthService
-	ctx               context.Context
-	user              *models.User
-	deviceReq         *LoginWithDeviceRequest
-	tokenString       string
-	refreshToken      string
-	expiresAt         time.Time
-	preGeneratedID    uuid.UUID
-	existingSession   *models.UserSession
-	isRefresh         bool
-}
-
-// initSecurityEventWorker starts the background worker for security event logging
-func initSecurityEventWorker(db *gorm.DB) {
-	securityEventBufferOnce.Do(func() {
-		go func() {
-			batch := make([]*models.SecurityEvent, 0, 50)
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case eventWithDB := <-securityEventBuffer:
-					batch = append(batch, eventWithDB.event)
-					// Flush when batch is full
-					if len(batch) >= 50 {
-						if err := db.Create(&batch).Error; err != nil {
-							log.Printf("Failed to batch insert security events: %v", err)
-						}
-						batch = batch[:0]
-					}
-				case <-ticker.C:
-					// Flush on timer
-					if len(batch) > 0 {
-						if err := db.Create(&batch).Error; err != nil {
-							log.Printf("Failed to batch insert security events: %v", err)
-						}
-						batch = batch[:0]
-					}
-				}
-			}
-		}()
-	})
-}
-
-// createDeviceSessionAsync creates device session in background (non-blocking)
-// This saves ~20-30ms on the hot path by not waiting for DB operations
-func createDeviceSessionAsync(req *deviceSessionRequest) {
-	select {
-	case deviceSessionPool <- struct{}{}: // Acquire worker slot
-		go func() {
-			defer func() { <-deviceSessionPool }() // Release slot
-
-			// Use background context since original may be cancelled
-			bgCtx := context.Background()
-
-			if req.isRefresh && req.existingSession != nil {
-				// Refresh existing session
-				if err := req.service.RefreshDeviceSession(bgCtx, req.existingSession, req.tokenString, req.refreshToken, req.expiresAt); err != nil {
-					log.Printf("Async: Failed to refresh device session: %v", err)
-				}
-			} else {
-				// Create new session
-				if _, err := req.service.CreateDeviceSessionWithID(bgCtx, req.user, req.deviceReq, req.tokenString, req.refreshToken, req.expiresAt, req.preGeneratedID); err != nil {
-					log.Printf("Async: Failed to create device session: %v", err)
-				}
-			}
-		}()
-	default:
-		// Pool full - create synchronously as fallback
-		log.Printf("Device session pool full, creating synchronously")
-		if req.isRefresh && req.existingSession != nil {
-			req.service.RefreshDeviceSession(req.ctx, req.existingSession, req.tokenString, req.refreshToken, req.expiresAt)
-		} else {
-			req.service.CreateDeviceSessionWithID(req.ctx, req.user, req.deviceReq, req.tokenString, req.refreshToken, req.expiresAt, req.preGeneratedID)
-		}
-	}
-}
-
 // AuthService handles authentication operations
 type AuthService struct {
-	db               *database.DB
-	cache            *cache.Cache
-	config           *config.JWTConfig
-	rateLimitService *RateLimitService
+	db                *database.DB
+	cache             *cache.Cache
+	config            *config.JWTConfig
+	rateLimitService  *RateLimitService
+	smsService        SMSServiceInterface
+	firebaseVerifier  *firebaseauth.AuthVerifier
+}
+
+// SMSServiceInterface defines the interface for SMS services
+type SMSServiceInterface interface {
+	SendOTP(phoneNumber, name, otp string) (string, error)
 }
 
 // NewAuthService creates a new auth service
-func NewAuthService(db *database.DB, cache *cache.Cache, jwtConfig *config.JWTConfig, rateLimitService *RateLimitService) *AuthService {
-	// Initialize security event background worker
-	initSecurityEventWorker(db.DB)
-
+func NewAuthService(db *database.DB, cache *cache.Cache, jwtConfig *config.JWTConfig, rateLimitService *RateLimitService, smsService SMSServiceInterface, firebaseVerifier *firebaseauth.AuthVerifier) *AuthService {
 	return &AuthService{
-		db:               db,
-		cache:            cache,
-		config:           jwtConfig,
-		rateLimitService: rateLimitService,
+		db:                db,
+		cache:             cache,
+		config:            jwtConfig,
+		rateLimitService:  rateLimitService,
+		smsService:        smsService,
+		firebaseVerifier:  firebaseVerifier,
 	}
 }
 
-// LoginRequest represents login request data with device information
+// LoginRequest represents login request data
 type LoginRequest struct {
-	Username string `json:"username"` // Username for login
-	Email    string `json:"email"`    // Email for login (alternative to username)
+	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
-
-	// Device Information (sent by client for device tracking)
-	DeviceID   string `json:"device_id"`   // Unique device identifier
-	DeviceName string `json:"device_name"` // e.g., "iPhone 14 Pro", "Samsung Galaxy S23"
-	DeviceType string `json:"device_type"` // "mobile", "web", "tablet"
-	OSName     string `json:"os_name"`     // "iOS", "Android", "Web"
-	OSVersion  string `json:"os_version"`  // "17.0", "14", etc.
-	AppVersion string `json:"app_version"` // "1.0.0"
 }
 
 // LoginResponse represents login response data
@@ -179,8 +65,6 @@ type LoginResponse struct {
 	ExpiresAt    time.Time       `json:"expires_at"`
 	User         *UserResponse   `json:"user"`
 	Tenant       *TenantResponse `json:"tenant"`
-	SessionID    string          `json:"session_id,omitempty"`
-	DeviceName   string          `json:"device_name,omitempty"`
 }
 
 // UserResponse represents user data in responses
@@ -190,13 +74,19 @@ type UserResponse struct {
 	Email        string     `json:"email"`
 	FirstName    string     `json:"first_name"`
 	LastName     string     `json:"last_name"`
-	Phone        string     `json:"phone"`
 	Role         string     `json:"role"`
 	IsActive     bool       `json:"is_active"`
 	ProfileImage string     `json:"profile_image"`
+	Salary       *float64   `json:"salary,omitempty"`
+	Duty         string     `json:"duty,omitempty"`
+	TagLine      string     `json:"tag_line,omitempty"`
+	Phone        string     `json:"phone,omitempty"`
 	TenantName   string     `json:"tenant_name,omitempty"`
-	ShopID       *uuid.UUID `json:"shop_id,omitempty"`
-	ShopName     string     `json:"shop_name,omitempty"`
+	ShopID       *uuid.UUID `json:"shop_id"`
+	ShopName     *string    `json:"shop_name"`
+	// ShopIDs is the list of shops an executive is assigned to (omitted for
+	// non-executive roles). Salesman uses ShopID instead.
+	ShopIDs []uuid.UUID `json:"shop_ids,omitempty"`
 }
 
 // TenantResponse represents tenant data in responses
@@ -204,31 +94,38 @@ type TenantResponse struct {
 	ID          uuid.UUID `json:"id"`
 	Name        string    `json:"name"`
 	CompanyName string    `json:"company_name"`
+	Phone       string    `json:"phone,omitempty"`
+	Address     string    `json:"address,omitempty"`
 	IsActive    bool      `json:"is_active"`
 }
 
 // RegisterRequest represents registration request data (after OTP verification)
+// Password is optional since we use OTP-based authentication
 type RegisterRequest struct {
 	Email       string `json:"email" binding:"required,email"`
-	Password    string `json:"password" binding:"omitempty,min=8"` // Optional password for OTP-based registration
+	Password    string `json:"password"` // Optional - OTP auth doesn't need password
 	FirstName   string `json:"first_name" binding:"required"`
 	LastName    string `json:"last_name" binding:"required"`
 	Phone       string `json:"phone" binding:"required"`
 	TenantName  string `json:"tenant_name" binding:"required"`
 	CompanyName string `json:"company_name" binding:"required"`
+	// Optional shop data - if provided, shop will be created during registration
+	ShopName    string `json:"shop_name"`
+	ShopAddress string `json:"shop_address"`
 }
 
 // CheckUserRequest represents check user existence request
 type CheckUserRequest struct {
-	Mobile string `json:"mobile"` // Supports "mobile"
-	Phone  string `json:"phone"`  // Supports "phone" (for Flutter app compatibility)
-	Email  string `json:"email"`  // Supports "email" for email validation
+	Mobile string `json:"mobile" binding:"required"`
 }
 
-// CheckUserResponse represents check user existence response
+// CheckUserResponse represents check user response — always sends OTP first
 type CheckUserResponse struct {
-	Exists  bool   `json:"exists"`
-	Message string `json:"message"`
+	Exists    bool      `json:"exists"`              // Always false — real status revealed after OTP verification
+	Message   string    `json:"message"`
+	SessionID string    `json:"session_id,omitempty"` // OTP session ID for verification
+	ExpiresAt time.Time `json:"expires_at,omitempty"` // OTP expiry time
+	OTPSentAt time.Time `json:"otp_sent_at,omitempty"`
 }
 
 // SendOTPRequest represents send OTP request data
@@ -237,12 +134,12 @@ type SendOTPRequest struct {
 }
 
 // SendOTPResponse represents send OTP response data
+// Note: purpose is NOT returned here — only revealed after OTP verification
 type SendOTPResponse struct {
 	Message   string    `json:"message"`
 	OTPSentAt time.Time `json:"otp_sent_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 	SessionID string    `json:"session_id"`
-	Purpose   string    `json:"purpose"` // "login" or "registration"
 }
 
 // VerifyOTPRequest represents verify OTP request data
@@ -250,29 +147,19 @@ type VerifyOTPRequest struct {
 	Mobile    string `json:"mobile" binding:"required"`
 	OTP       string `json:"otp" binding:"required"`
 	SessionID string `json:"session_id"`
-
-	// Device Information for session tracking (2-device limit like Swiggy/Zomato)
-	DeviceID   string `json:"device_id"`   // Unique device identifier
-	DeviceName string `json:"device_name"` // e.g., "iPhone 14 Pro", "Samsung Galaxy S23"
-	DeviceType string `json:"device_type"` // "mobile", "web", "tablet"
-	OSName     string `json:"os_name"`     // "iOS", "Android", "Web"
-	OSVersion  string `json:"os_version"`  // "17.0", "14", etc.
-	AppVersion string `json:"app_version"` // "1.0.0"
 }
 
+// VerifyOTPResponse represents verify OTP response data (same as LoginResponse)
 // VerifyOTPResponse represents the response for OTP verification
 type VerifyOTPResponse struct {
-	Token        string          `json:"token,omitempty"`
-	RefreshToken string          `json:"refresh_token,omitempty"`
-	ExpiresAt    time.Time       `json:"expires_at,omitempty"`
-	User         *UserResponse   `json:"user,omitempty"`
-	Tenant       *TenantResponse `json:"tenant,omitempty"`
-	Message      string          `json:"message,omitempty"`
-	Purpose      string          `json:"purpose,omitempty"` // "login" or "registration"
-
-	// Session info for device tracking (2-device limit)
-	SessionID  string `json:"session_id,omitempty"`
-	DeviceName string `json:"device_name,omitempty"`
+	Token             string          `json:"token,omitempty"`
+	RefreshToken      string          `json:"refresh_token,omitempty"`
+	ExpiresAt         time.Time       `json:"expires_at,omitempty"`
+	User              *UserResponse   `json:"user,omitempty"`
+	Tenant            *TenantResponse `json:"tenant,omitempty"`
+	Message           string          `json:"message,omitempty"`
+	Purpose           string          `json:"purpose,omitempty"`            // "login" or "registration"
+	RegistrationToken string          `json:"registration_token,omitempty"` // Token to skip OTP on registration
 }
 
 // Login authenticates user and returns JWT token
@@ -305,21 +192,6 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginRespon
 		return nil, errors.New("tenant account is inactive")
 	}
 
-	// ========== Device Limit Check (2-device limit like Swiggy/Zomato) ==========
-	// Check if device limit is reached (only if device_id is provided by client)
-	var existingSession *models.UserSession
-	if req.DeviceID != "" {
-		existingSession, err = s.CheckDeviceLimit(ctx, user.ID, req.DeviceID)
-		if err != nil {
-			// If it's a device limit error, return special error with session details
-			if deviceLimitErr, ok := err.(*models.DeviceLimitError); ok {
-				// Return error with active sessions so client can display them
-				return nil, deviceLimitErr
-			}
-			return nil, fmt.Errorf("failed to check device limit: %w", err)
-		}
-	}
-
 	// Generate JWT token
 	token, expiresAt, err := s.generateJWTToken(&user)
 	if err != nil {
@@ -332,7 +204,7 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginRespon
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 
-	// Store session in cache (for fast token validation)
+	// Store session in cache
 	sessionKey := fmt.Sprintf(cache.UserSessionKey, user.ID.String())
 	sessionData := map[string]interface{}{
 		"user_id":       user.ID.String(),
@@ -347,36 +219,8 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginRespon
 	}
 
 	if err := s.cache.Set(ctx, sessionKey, sessionData, cache.SessionTTL); err != nil {
-		// Log error but don't fail login - use log.Printf (async buffered) instead of fmt.Printf
-		log.Printf("Warning: Failed to store session in cache: %v", err)
-	}
-
-	// ========== Create/Update Device Session in Database ==========
-	var sessionID string
-	var deviceName string
-	if req.DeviceID != "" {
-		deviceReq := &LoginWithDeviceRequest{
-			LoginRequest: req,
-			IPAddress:    "", // Can be set from handler if needed
-		}
-
-		if existingSession != nil {
-			// Same device logging in again - refresh the session
-			if err := s.RefreshDeviceSession(ctx, existingSession, token, refreshToken, expiresAt); err != nil {
-				log.Printf("Warning: Failed to refresh device session: %v", err)
-			}
-			sessionID = existingSession.ID.String()
-			deviceName = existingSession.DeviceName
-		} else {
-			// New device - create session
-			session, err := s.CreateDeviceSession(ctx, &user, deviceReq, token, refreshToken, expiresAt)
-			if err != nil {
-				log.Printf("Warning: Failed to create device session: %v", err)
-			} else {
-				sessionID = session.ID.String()
-				deviceName = session.DeviceName
-			}
-		}
+		// Log error but don't fail login
+		fmt.Printf("Warning: Failed to store session in cache: %v\n", err)
 	}
 
 	return &LoginResponse{
@@ -385,8 +229,6 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginRespon
 		ExpiresAt:    expiresAt,
 		User:         s.mapUserToResponse(&user),
 		Tenant:       s.mapTenantToResponse(user.Tenant),
-		SessionID:    sessionID,
-		DeviceName:   deviceName,
 	}, nil
 }
 
@@ -396,6 +238,18 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Login
 	var result *LoginResponse
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		// Normalize phone number for consistent database operations
+		normalizedPhone := s.normalizeMobileNumber(req.Phone)
+
+		// Check if user already exists by phone number (primary unique key)
+		var existingUserByPhone models.User
+		if err := tx.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+			normalizedPhone, req.Phone, normalizedPhone).First(&existingUserByPhone).Error; err == nil {
+			return errors.New("phone number already registered")
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("failed to check phone number: %w", err)
+		}
+
 		// Check if user already exists by email
 		var existingUser models.User
 		if err := tx.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
@@ -421,43 +275,24 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Login
 			counter++
 		}
 
-		// Hash password - generate random one if not provided (OTP-based registration)
+		// Hash password - if no password provided (OTP-based auth), generate a random one
 		password := req.Password
 		if password == "" {
-			// Generate secure random password for OTP-based registration
-			randomPassword, err := utils.GenerateRandomString(16)
-			if err != nil {
-				return fmt.Errorf("failed to generate password: %w", err)
-			}
-			password = randomPassword
+			// Generate a random password for OTP-only users
+			password = uuid.New().String()
 		}
-
 		hashedPassword, err := utils.HashPassword(password)
 		if err != nil {
 			return fmt.Errorf("failed to hash password: %w", err)
 		}
 
-		// Check if tenant name already exists
-		var existingTenant models.Tenant
-		if err := tx.Where("name = ?", req.TenantName).First(&existingTenant).Error; err == nil {
-			return errors.New("tenant name already exists")
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("failed to check existing tenant: %w", err)
-		}
-
-		// Check if phone number already exists
-		var existingUserByPhone models.User
-		if err := tx.Where("phone = ?", req.Phone).First(&existingUserByPhone).Error; err == nil {
-			return errors.New("phone number already registered")
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("failed to check existing phone: %w", err)
-		}
-
 		// Create tenant
 		tenant := models.Tenant{
-			Name:        req.TenantName,   // Tenant slug/subdomain
-			CompanyName: req.CompanyName,  // Display name
+			Name:        req.TenantName,   // Display name
+			CompanyName: req.CompanyName,  // Official company name
+			Phone:       req.Phone,        // Company phone
 			IsActive:    true,
+			OnboardedAt: time.Now(),
 		}
 
 		if err := tx.Create(&tenant).Error; err != nil {
@@ -471,7 +306,7 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Login
 			Email:        req.Email,
 			FirstName:    req.FirstName,
 			LastName:     req.LastName,
-			Phone:        req.Phone,
+			Phone:        normalizedPhone, // Use normalized phone for consistency
 			PasswordHash: hashedPassword,
 			Role:         models.RoleAdmin, // First user becomes admin
 			IsActive:     true,
@@ -480,6 +315,54 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Login
 		if err := tx.Create(&user).Error; err != nil {
 			return fmt.Errorf("failed to create user: %w", err)
 		}
+
+		// Create shop if shop data is provided
+		if req.ShopName != "" {
+			shop := models.Shop{
+				TenantModel: models.TenantModel{
+					TenantID: &tenant.ID,
+				},
+				Name:     req.ShopName,
+				Address:  req.ShopAddress,
+				Phone:    req.Phone, // Use registration phone as shop phone
+				IsActive: true,
+			}
+
+			if err := tx.Create(&shop).Error; err != nil {
+				return fmt.Errorf("failed to create shop: %w", err)
+			}
+
+			log.Printf("✅ Shop created successfully during registration: %s (ID: %s)", shop.Name, shop.ID)
+		}
+
+		// Seed standard categories for the new tenant
+		standardCategories := []struct {
+			Name        string
+			Description string
+			SortOrder   int
+		}{
+			{"Beer", "Beer and lager products", 1},
+			{"Whisky", "Whisky and scotch products", 2},
+			{"Rum", "Rum products", 3},
+			{"Vodka", "Vodka products", 4},
+		}
+
+		for _, sc := range standardCategories {
+			cat := models.Category{
+				TenantModel: models.TenantModel{
+					TenantID: &tenant.ID,
+				},
+				Name:        sc.Name,
+				Description: sc.Description,
+				IsActive:    true,
+				SortOrder:   sc.SortOrder,
+			}
+			if err := tx.Create(&cat).Error; err != nil {
+				log.Printf("⚠️ Failed to seed category %s for tenant %s: %v", sc.Name, tenant.ID, err)
+				// Non-fatal: don't fail registration if category seeding fails
+			}
+		}
+		log.Printf("✅ Standard categories seeded for tenant: %s", tenant.ID)
 
 		// Generate tokens
 		token, expiresAt, err := s.generateJWTToken(&user)
@@ -507,7 +390,7 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (*Login
 		}
 
 		if err := s.cache.Set(ctx, sessionKey, sessionData, cache.SessionTTL); err != nil {
-			log.Printf("Warning: Failed to store session in cache: %v", err)
+			fmt.Printf("Warning: Failed to store session in cache: %v\n", err)
 		}
 
 		result = &LoginResponse{
@@ -571,7 +454,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string, use
 	sessionData["login_time"] = time.Now()
 
 	if err := s.cache.Set(ctx, sessionKey, sessionData, cache.SessionTTL); err != nil {
-		log.Printf("Warning: Failed to update session in cache: %v", err)
+		fmt.Printf("Warning: Failed to update session in cache: %v\n", err)
 	}
 
 	return &LoginResponse{
@@ -647,6 +530,7 @@ func (s *AuthService) mapUserToResponse(user *models.User) *UserResponse {
 		Role:         user.Role,
 		IsActive:     user.IsActive,
 		ProfileImage: user.ProfileImage,
+		TagLine:      user.TagLine,
 	}
 
 	// Add tenant information if available
@@ -669,6 +553,8 @@ func (s *AuthService) mapTenantToResponse(tenant *models.Tenant) *TenantResponse
 		ID:          tenant.ID,
 		Name:        tenant.Name,
 		CompanyName: tenant.CompanyName,
+		Phone:       tenant.Phone,
+		Address:     tenant.Address,
 		IsActive:    tenant.IsActive,
 	}
 }
@@ -676,31 +562,41 @@ func (s *AuthService) mapTenantToResponse(tenant *models.Tenant) *TenantResponse
 // VerifyOTP verifies OTP and logs in user (static OTP: 000000)
 // Security Helper Methods for Scalable OTP System
 
-// sanitizeMobileNumber removes spaces and normalizes phone number format
-func (s *AuthService) sanitizeMobileNumber(mobile string) string {
-	// Remove all spaces from phone number (Flutter app may send formatted numbers with spaces)
-	return strings.ReplaceAll(mobile, " ", "")
-}
-
 // isValidMobileNumber validates mobile number format (international format)
-// Uses pre-compiled regex for sub-millisecond performance
-func (s *AuthService) isValidMobileNumber(mobile string) bool {
-	// Sanitize first
-	mobile = s.sanitizeMobileNumber(mobile)
-	// Use pre-compiled regex (at package level) for fast matching
-	return mobileRegex.MatchString(mobile)
+// normalizeMobileNumber removes spaces and other formatting from mobile number
+func (s *AuthService) normalizeMobileNumber(mobile string) string {
+	// Remove all spaces, hyphens, parentheses
+	normalized := strings.ReplaceAll(mobile, " ", "")
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	normalized = strings.ReplaceAll(normalized, "(", "")
+	normalized = strings.ReplaceAll(normalized, ")", "")
+	return normalized
 }
 
-// checkOTPRateLimit implements ultra-fast rate limiting for OTP requests
-// Uses Redis-only rate limiting for sub-2ms performance (no DB queries)
+func (s *AuthService) isValidMobileNumber(mobile string) bool {
+	// Normalize first (remove spaces, etc.)
+	normalized := s.normalizeMobileNumber(mobile)
+	// Regex for international mobile number format (+countrycode followed by digits)
+	mobileRegex := regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
+	return mobileRegex.MatchString(normalized)
+}
+
+// checkOTPRateLimit implements rate limiting for OTP requests using dynamic rate limiting
 func (s *AuthService) checkOTPRateLimit(ctx context.Context, mobile string) error {
-	// Use ultra-fast Redis-only rate limiting
-	isBlocked, err := s.rateLimitService.CheckOTPRateLimitFast(ctx, mobile)
+	// Use dynamic rate limiting system
+	isBlocked, err := s.rateLimitService.CheckRateLimit(
+		"otp_requests", // rate limit name
+		mobile,         // identifier (mobile number)
+		nil,            // tenant ID (nil for global)
+		nil,            // user ID (nil for OTP requests)
+		"",             // request IP (not available in this context)
+		"",             // user agent (not available in this context)
+	)
 
 	if err != nil {
 		// If there's an error with the rate limiting service, fall back to allowing the request
 		// but log the error for monitoring
-		log.Printf("Rate limiting service error: %v", err)
+		fmt.Printf("Rate limiting service error: %v\n", err)
 		return nil
 	}
 
@@ -747,10 +643,6 @@ func (s *AuthService) hashOTP(otp string) string {
 
 // verifyOTPHash compares provided OTP with stored hash
 func (s *AuthService) verifyOTPHash(providedOTP, storedHash string) bool {
-	// Master OTP for development/testing - works with any phone number
-	if providedOTP == "011001" {
-		return true
-	}
 	providedHash := s.hashOTP(providedOTP)
 	return providedHash == storedHash
 }
@@ -828,207 +720,204 @@ func (s *AuthService) isNumberBlocked(ctx context.Context, mobile string) bool {
 	return err == nil // If key exists, number is blocked
 }
 
-// sendSMSOTP sends OTP via SMS using confirmsms.in API
-func (s *AuthService) sendSMSOTP(mobile, otp string) error {
-	// SMS API credentials
-	apiKey := "6555d5f6c02a1"
-	sender := "DRDANG"
-
-	// Remove '+' from mobile number for API
-	phoneNumber := strings.TrimPrefix(mobile, "+")
-
-	// Use verified message template format (matches Python implementation)
-	// Format: Dear User,\n{otp} is your one time password (OTP). Please enter the OTP to proceed.\nThank you.\nDr. Dangs Lab
-	messageText := fmt.Sprintf("Dear User,%%0A%s is your one time password (OTP). Please enter the OTP to proceed.%%0AThank you.%%0ADr. Dangs Lab", otp)
-
-	// Build API URL with HTTPS (verified working endpoint)
-	apiURL := fmt.Sprintf("https://fast.confirmsms.in/api/push.json?apikey=%s&sender=%s&mobileno=%s&text=%s",
-		apiKey, sender, phoneNumber, messageText)
-
-	// Create HTTP client with SSL verification disabled for this specific API
-	// (certificate mismatch: cert is for mysmsapp.in but domain is fast.confirmsms.in)
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{Transport: tr}
-
-	// Make HTTPS GET request
-	resp, err := client.Get(apiURL)
-	if err != nil {
-		return fmt.Errorf("failed to send SMS: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read SMS response: %w", err)
-	}
-
-	// Parse response
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("failed to parse SMS response: %w", err)
-	}
-
-	// Check for success status in response
-	if status, ok := result["status"].(string); ok && status == "success" {
-		return nil
-	}
-
-	// Legacy check for request_id (backward compatibility)
-	if _, ok := result["request_id"]; ok {
-		return nil
-	}
-
-	return fmt.Errorf("SMS API did not return success status: %s", string(body))
-}
-
-// sendSMSOTPAsync sends SMS asynchronously using worker pool (non-blocking)
-// This is the PRIMARY method to use for production - returns immediately
-func (s *AuthService) sendSMSOTPAsync(mobile, otp string) {
-	select {
-	case smsWorkerPool <- struct{}{}: // Acquire worker slot
-		go func() {
-			defer func() { <-smsWorkerPool }() // Release slot when done
-
-			// Create context with timeout for SMS API call
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			// Create HTTP client with timeout
-			tr := &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			}
-			client := &http.Client{
-				Transport: tr,
-				Timeout:   10 * time.Second,
-			}
-
-			// SMS API credentials
-			apiKey := "6555d5f6c02a1"
-			sender := "DRDANG"
-			phoneNumber := strings.TrimPrefix(mobile, "+")
-			messageText := fmt.Sprintf("Dear User,%%0A%s is your one time password (OTP). Please enter the OTP to proceed.%%0AThank you.%%0ADr. Dangs Lab", otp)
-			apiURL := fmt.Sprintf("https://fast.confirmsms.in/api/push.json?apikey=%s&sender=%s&mobileno=%s&text=%s",
-				apiKey, sender, phoneNumber, messageText)
-
-			// Create request with context
-			req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-			if err != nil {
-				log.Printf("SMS request creation failed for %s: %v", s.maskMobileNumber(mobile), err)
-				return
-			}
-
-			resp, err := client.Do(req)
-			if err != nil {
-				log.Printf("SMS send failed for %s: %v", s.maskMobileNumber(mobile), err)
-				// Store for retry (optional)
-				s.cache.Set(context.Background(),
-					fmt.Sprintf("sms_retry:%s", mobile),
-					map[string]string{"otp": otp, "mobile": mobile},
-					5*time.Minute)
-				return
-			}
-			defer resp.Body.Close()
-
-			body, _ := io.ReadAll(resp.Body)
-			log.Printf("SMS sent to %s: %s", s.maskMobileNumber(mobile), string(body))
-		}()
-	default:
-		// Worker pool full - log warning but don't block
-		log.Printf("SMS worker pool full, OTP for %s stored in Redis only", s.maskMobileNumber(mobile))
-	}
-}
-
 // SendOTP sends OTP to mobile number after validating phone/email uniqueness
 func (s *AuthService) SendOTP(ctx context.Context, req SendOTPRequest) (*SendOTPResponse, error) {
-	// Sanitize phone number (remove spaces)
-	mobile := s.sanitizeMobileNumber(req.Mobile)
+	mobile := req.Mobile
 
 	// Security: Validate and sanitize mobile number
 	if !s.isValidMobileNumber(mobile) {
 		return nil, errors.New("invalid mobile number format")
 	}
 
+	// Normalize mobile number for database operations
+	normalizedMobile := s.normalizeMobileNumber(mobile)
+
 	// Security: Check if number is blocked due to suspicious activity
-	if s.isNumberBlocked(ctx, mobile) {
+	if s.isNumberBlocked(ctx, normalizedMobile) {
 		return nil, errors.New("mobile number temporarily blocked due to suspicious activity")
 	}
 
 	// Security: Rate limiting - check if too many OTP requests from this mobile
-	if err := s.checkOTPRateLimit(ctx, mobile); err != nil {
+	if err := s.checkOTPRateLimit(ctx, normalizedMobile); err != nil {
 		return nil, err
 	}
 
 	// REQUIREMENT: Check if phone number already exists (primary unique key)
+	// Search using multiple strategies for maximum compatibility
 	var existingUserByPhone models.User
-	err := s.db.Where("phone = ?", mobile).First(&existingUserByPhone).Error
+	err := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+		normalizedMobile, mobile, normalizedMobile).First(&existingUserByPhone).Error
+
+	// Store user existence status to avoid variable shadowing issues
+	userExists := err == nil
 
 	if err == nil {
 		// Phone exists - this is LOGIN flow
 		if !existingUserByPhone.IsActive {
 			return nil, errors.New("user account is inactive")
 		}
+		log.Printf("📱 [OTP] User exists for %s - LOGIN flow", s.maskMobileNumber(mobile))
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		// Database error
 		return nil, fmt.Errorf("failed to check phone number: %w", err)
-	}
-	// If ErrRecordNotFound - phone doesn't exist, this is REGISTRATION flow
-
-	// Security: Generate cryptographically secure session ID
-	sessionID := s.generateSecureSessionID()
-
-	// Security: Generate secure OTP (for production, use random 6-digit)
-	otp := s.getOTPForMobile(mobile) // Handle special OTPs for specific mobiles
-	if s.isProduction() && otp == "" {
-		otp = s.generateSecureOTP()
+	} else {
+		// If ErrRecordNotFound - phone doesn't exist, this is REGISTRATION flow
+		log.Printf("📱 [OTP] New user for %s - REGISTRATION flow", s.maskMobileNumber(mobile))
 	}
 
-	// Security: Hash OTP before storing
-	hashedOTP := s.hashOTP(otp)
+	// REQUIREMENT: Check if OTP already exists and is still valid (10 minute window)
+	// REQUIREMENT: Reuse existing OTP instead of generating new one
+	// REQUIREMENT: Enforce 30-second cooldown between resends
+	otpKey := fmt.Sprintf("otp:%s", normalizedMobile)
+	var existingOTPData map[string]interface{}
+	var otp, sessionID string
+	var isResend bool
 
-	// Store OTP data in Redis with expiration (10 minutes as requested)
-	otpData := map[string]interface{}{
-		"hashed_otp":   hashedOTP,
-		"mobile":       mobile,
-		"attempts":     0,
-		"created_at":   time.Now().Unix(),
-		"session_id":   sessionID,
-		"max_attempts": 3,
-		"purpose":      s.determineOTPPurpose(err == nil), // login if user exists, registration if not
+	if err := s.cache.Get(ctx, otpKey, &existingOTPData); err == nil {
+		// OTP exists - check if we can resend
+		lastSentAt, _ := existingOTPData["last_sent_at"].(float64)
+		lastSentTime := time.Unix(int64(lastSentAt), 0)
+		timeSinceLastSent := time.Since(lastSentTime)
+
+		// REQUIREMENT: 30-second cooldown between resends
+		if timeSinceLastSent < 30*time.Second {
+			remainingDuration := (30 * time.Second) - timeSinceLastSent
+			remainingSeconds := int(remainingDuration.Seconds())
+			return nil, fmt.Errorf("please wait %d seconds before requesting OTP again", remainingSeconds)
+		}
+
+		// Cooldown passed - reuse existing OTP and session ID
+		sessionID, _ = existingOTPData["session_id"].(string)
+		hashedOTP, _ := existingOTPData["hashed_otp"].(string)
+
+		// Retrieve the original OTP from special cache (for resending)
+		// Note: In production, we need to decrypt or retrieve the OTP to resend it
+		// For now, we'll generate new OTP if we can't retrieve the old one
+		otpCacheKey := fmt.Sprintf("otp_plain:%s", normalizedMobile)
+		if err := s.cache.Get(ctx, otpCacheKey, &otp); err != nil {
+			// Cannot retrieve OTP - this should not happen, but fallback to new OTP
+			otp = s.getOTPForMobile(mobile)
+			if s.isProduction() && otp == "" {
+				otp = s.generateSecureOTP()
+			}
+			hashedOTP = s.hashOTP(otp)
+		}
+
+		// Update last_sent_at timestamp and purpose based on current user state
+		existingOTPData["last_sent_at"] = time.Now().Unix()
+		existingOTPData["hashed_otp"] = hashedOTP
+		existingOTPData["purpose"] = s.determinePurpose(userExists) // Update purpose to match current user state
+
+		log.Printf("📱 [OTP] Resending OTP with purpose: %s for %s | OTP: %s", existingOTPData["purpose"], s.maskMobileNumber(mobile), otp)
+
+		// Keep existing expiry (10 minutes from original creation)
+		createdAt, _ := existingOTPData["created_at"].(float64)
+		createdTime := time.Unix(int64(createdAt), 0)
+		remainingExpiry := 10*time.Minute - time.Since(createdTime)
+
+		if err := s.cache.Set(ctx, otpKey, existingOTPData, remainingExpiry); err != nil {
+			return nil, fmt.Errorf("failed to update OTP: %w", err)
+		}
+
+		isResend = true
+		log.Printf("📱 Resending existing OTP to %s (cooldown: %.0fs passed)", s.maskMobileNumber(mobile), timeSinceLastSent.Seconds())
+	} else {
+		// No existing OTP - generate new one
+		// Security: Generate cryptographically secure session ID
+		sessionID = s.generateSecureSessionID()
+
+		// Security: Generate secure OTP (for production, use random 6-digit)
+		otp = s.getOTPForMobile(mobile) // Handle special OTPs for specific mobiles
+		if s.isProduction() && otp == "" {
+			otp = s.generateSecureOTP()
+		}
+
+		// Security: Hash OTP before storing
+		hashedOTP := s.hashOTP(otp)
+
+		// REQUIREMENT: Store OTP data in Redis with 10 minutes expiration
+		otpData := map[string]interface{}{
+			"hashed_otp":   hashedOTP,
+			"mobile":       normalizedMobile,
+			"attempts":     0,
+			"created_at":   time.Now().Unix(),
+			"last_sent_at": time.Now().Unix(), // Track when OTP was last sent
+			"session_id":   sessionID,
+			"max_attempts": 3,
+			"purpose":      s.determinePurpose(userExists), // login if user exists, registration if not
+		}
+
+		// REQUIREMENT: 10 minutes validity as specified
+		expiryDuration := 10 * time.Minute
+
+		if err := s.cache.Set(ctx, otpKey, otpData, expiryDuration); err != nil {
+			return nil, fmt.Errorf("failed to store OTP: %w", err)
+		}
+
+		// Store plain OTP separately for resending (same expiry)
+		otpCacheKey := fmt.Sprintf("otp_plain:%s", normalizedMobile)
+		if err := s.cache.Set(ctx, otpCacheKey, otp, expiryDuration); err != nil {
+			log.Printf("⚠️ Failed to cache plain OTP for resending: %v", err)
+		}
+
+		isResend = false
+		log.Printf("📱 [OTP] Generated new OTP with purpose: %s for %s | OTP: %s",
+			s.determinePurpose(userExists), s.maskMobileNumber(mobile), otp)
 	}
 
-	// REQUIREMENT: 10 minutes validity as specified
-	expiryDuration := 10 * time.Minute
-	otpKey := fmt.Sprintf("otp:%s", mobile)
+	// Send OTP via SMS
+	if s.isProduction() && s.smsService != nil {
+		// Extract user's first name from the FirstName field if available in context
+		// For SendOTPForRegistrationRequest, we can get the first name
+		userName := s.getUserNameFromMobile(ctx, mobile)
 
-	if err := s.cache.Set(ctx, otpKey, otpData, expiryDuration); err != nil {
-		return nil, fmt.Errorf("failed to store OTP: %w", err)
-	}
-
-	// Send SMS OTP (async - returns immediately for fast response)
-	if s.isProduction() {
-		s.sendSMSOTPAsync(mobile, otp)
+		// Send SMS using the SMS service
+		messageID, err := s.smsService.SendOTP(mobile, userName, otp)
+		if err != nil {
+			log.Printf("⚠️ SMS sending failed: %v (OTP stored in Redis)", err)
+			// Don't fail the request - OTP is still stored in Redis
+			// User can still verify OTP if they receive it through other means
+		} else {
+			log.Printf("✅ SMS sent successfully. Message ID: %s", messageID)
+		}
+	} else {
+		// Development mode - log OTP for testing
+		fmt.Printf("📱 OTP for %s: %s (Development Mode)\n", s.maskMobileNumber(mobile), otp)
 	}
 
 	// Update rate limiting counter
 	// Rate limiting counter is automatically handled by CheckRateLimit
 
 	now := time.Now()
+
+	// Determine expiry time based on whether it's a resend or new OTP
+	var expiresAt time.Time
+	if isResend {
+		// For resends, use the remaining time from original creation
+		existingCreatedAt, _ := existingOTPData["created_at"].(float64)
+		originalCreatedTime := time.Unix(int64(existingCreatedAt), 0)
+		expiresAt = originalCreatedTime.Add(10 * time.Minute)
+	} else {
+		// For new OTPs, expires 10 minutes from now
+		expiresAt = now.Add(10 * time.Minute)
+	}
+
+	message := fmt.Sprintf("OTP sent successfully to %s", s.maskMobileNumber(mobile))
+	if isResend {
+		message = fmt.Sprintf("OTP resent successfully to %s", s.maskMobileNumber(mobile))
+	}
+
 	return &SendOTPResponse{
-		Message:   fmt.Sprintf("OTP sent successfully to %s", s.maskMobileNumber(mobile)),
+		Message:   message,
 		OTPSentAt: now,
-		ExpiresAt: now.Add(expiryDuration),
+		ExpiresAt: expiresAt,
 		SessionID: sessionID,
-		Purpose:   s.determineOTPPurpose(err == nil), // login if user exists, registration if not
 	}, nil
 }
 
 // Enhanced VerifyOTP with proper validation
 func (s *AuthService) VerifyOTP(ctx context.Context, req VerifyOTPRequest) (*VerifyOTPResponse, error) {
-	// Sanitize phone number (remove spaces)
-	mobile := s.sanitizeMobileNumber(req.Mobile)
+	mobile := req.Mobile
 	providedOTP := req.OTP
 
 	// Security validations
@@ -1036,17 +925,23 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req VerifyOTPRequest) (*Ver
 		return nil, errors.New("invalid mobile number format")
 	}
 
-	if s.isNumberBlocked(ctx, mobile) {
+	// Normalize mobile number for consistent operations
+	normalizedMobile := s.normalizeMobileNumber(mobile)
+
+	if s.isNumberBlocked(ctx, normalizedMobile) {
 		return nil, errors.New("mobile number temporarily blocked")
 	}
 
-	// Retrieve OTP data (using sanitized mobile)
-	otpKey := fmt.Sprintf("otp:%s", mobile)
+	// Retrieve OTP data
+	otpKey := fmt.Sprintf("otp:%s", normalizedMobile)
 	var otpData map[string]interface{}
 	err := s.cache.Get(ctx, otpKey, &otpData)
 	if err != nil {
 		return nil, errors.New("OTP expired or not found")
 	}
+
+	// Debug: Log the retrieved OTP data
+	log.Printf("🔍 [OTP DEBUG] Retrieved OTP data for %s: %+v", s.maskMobileNumber(mobile), otpData)
 
 	// Verify session ID if provided
 	if req.SessionID != "" {
@@ -1062,7 +957,7 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req VerifyOTPRequest) (*Ver
 	maxAttempts, _ := otpData["max_attempts"].(float64)
 	if attempts >= maxAttempts {
 		s.cache.Delete(ctx, otpKey)
-		s.blockSuspiciousNumber(ctx, mobile, 1*time.Hour)
+		s.blockSuspiciousNumber(ctx, normalizedMobile, 1*time.Hour)
 		return nil, errors.New("maximum OTP attempts exceeded")
 	}
 
@@ -1072,49 +967,66 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req VerifyOTPRequest) (*Ver
 		return nil, errors.New("invalid OTP data")
 	}
 
-	// Master OTP bypass for testing/development
-	isMasterOTP := providedOTP == "011001"
-
-	if !isMasterOTP && !s.verifyOTPHash(providedOTP, storedHashedOTP) {
+	if !s.verifyOTPHash(providedOTP, storedHashedOTP) {
 		// Increment attempts counter
 		attempts++
 		otpData["attempts"] = attempts
 		s.cache.Set(ctx, otpKey, otpData, 10*time.Minute)
 
 		// Track failed attempts
-		s.incrementFailureCounter(ctx, mobile)
+		s.incrementFailureCounter(ctx, normalizedMobile)
 
 		return nil, errors.New("invalid OTP")
 	}
 
-	// NOTE: Do NOT delete OTP here - it will be deleted after successful login
-	// This allows ForceLoginWithOTP to work when device limit is reached
+	// OTP verified successfully - clear it
+	s.cache.Delete(ctx, otpKey)
 
 	// Determine purpose and handle accordingly
-	purpose, _ := otpData["purpose"].(string)
+	purposeRaw, exists := otpData["purpose"]
+	if !exists {
+		log.Printf("⚠️ [OTP] purpose field not found in OTP data for %s", s.maskMobileNumber(mobile))
+		// Fallback: check if user exists to determine purpose
+		var user models.User
+		err := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+			normalizedMobile, mobile, normalizedMobile).First(&user).Error
+		if err == nil {
+			purposeRaw = "login"
+		} else {
+			purposeRaw = "registration"
+		}
+	}
+
+	purpose, ok := purposeRaw.(string)
+	if !ok {
+		log.Printf("⚠️ [OTP] purpose field is not a string (type: %T, value: %v) for %s", purposeRaw, purposeRaw, s.maskMobileNumber(mobile))
+		// Fallback: check if user exists to determine purpose
+		var user models.User
+		err := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+			normalizedMobile, mobile, normalizedMobile).First(&user).Error
+		if err == nil {
+			purpose = "login"
+		} else {
+			purpose = "registration"
+		}
+	}
+
+	log.Printf("📱 [OTP] Verifying OTP for %s with purpose: %s", s.maskMobileNumber(mobile), purpose)
 
 	if purpose == "login" {
-		// Login flow - user exists (use cached lookup for speed)
-		user, err := s.getUserByPhoneCached(ctx, mobile)
+		// Login flow - user exists
+		// Search using multiple strategies for maximum compatibility
+		var user models.User
+		err := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+			normalizedMobile, mobile, normalizedMobile).Preload("Tenant").First(&user).Error
 		if err != nil {
-			// Delete OTP on error
-			s.cache.Delete(ctx, otpKey)
 			return nil, fmt.Errorf("user not found: %w", err)
 		}
 
-		// ========== Device Limit Check (2-device limit like Swiggy/Zomato) ==========
-		var existingSession *models.UserSession
-		if req.DeviceID != "" {
-			existingSession, err = s.CheckDeviceLimit(ctx, user.ID, req.DeviceID)
-			if err != nil {
-				// If it's a device limit error, DON'T delete OTP - user needs it for ForceLoginWithOTP
-				if deviceLimitErr, ok := err.(*models.DeviceLimitError); ok {
-					return nil, deviceLimitErr
-				}
-				// Delete OTP for other errors
-				s.cache.Delete(ctx, otpKey)
-				return nil, fmt.Errorf("failed to check device limit: %w", err)
-			}
+		// DEBUG: Log user details
+		log.Printf("🔍 [AUTH DEBUG] User loaded - ID: %s, Role: %s, TenantID: %v", user.ID, user.Role, user.TenantID)
+		if user.TenantID != nil {
+			log.Printf("🔍 [AUTH DEBUG] User.TenantID value: %s", user.TenantID.String())
 		}
 
 		// Handle Super User (SaaS admin) - they don't have a tenant
@@ -1127,26 +1039,11 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req VerifyOTPRequest) (*Ver
 			}
 		}
 
-		// ========== Determine Session ID for JWT token ==========
-		// We need to know the session ID BEFORE generating the token
-		var sessionID string
-		var deviceName string
-		var preGeneratedSessionID uuid.UUID
+		// DEBUG: Log tenant ID being used for JWT
+		log.Printf("🔍 [AUTH DEBUG] TenantID for JWT generation: %s", tenantID.String())
 
-		if req.DeviceID != "" {
-			if existingSession != nil {
-				// Same device logging in again - will refresh existing session
-				sessionID = existingSession.ID.String()
-				deviceName = existingSession.DeviceName
-			} else {
-				// New device - pre-generate session ID
-				preGeneratedSessionID = uuid.New()
-				sessionID = preGeneratedSessionID.String()
-			}
-		}
-
-		// Generate JWT token WITH session_id for device-specific logout
-		tokenString, refreshToken, expiresAt, err := s.generateTokensWithRole(user.ID, tenantID, user.Role, sessionID)
+		// Generate JWT token
+		tokenString, refreshToken, expiresAt, err := s.generateTokensWithRole(user.ID, tenantID, user.Role)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate tokens: %w", err)
 		}
@@ -1168,264 +1065,82 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req VerifyOTPRequest) (*Ver
 			sessionData["tenant_id"] = nil // Explicitly set to nil for Super Users
 		}
 
-		if err := s.cache.Set(ctx, sessionKey, sessionData, 45*24*time.Hour); err != nil {
+		if err := s.cache.Set(ctx, sessionKey, sessionData, cache.SessionTTL); err != nil {
 			return nil, fmt.Errorf("failed to store session: %w", err)
 		}
-
-		// ========== Create/Update Device Session ASYNC (saves ~20-30ms) ==========
-		if req.DeviceID != "" {
-			deviceReq := &LoginWithDeviceRequest{
-				LoginRequest: LoginRequest{
-					DeviceID:   req.DeviceID,
-					DeviceName: req.DeviceName,
-					DeviceType: req.DeviceType,
-					OSName:     req.OSName,
-					OSVersion:  req.OSVersion,
-					AppVersion: req.AppVersion,
-				},
-			}
-
-			// Fire and forget - don't block on DB operation
-			createDeviceSessionAsync(&deviceSessionRequest{
-				service:         s,
-				ctx:             ctx,
-				user:            user,
-				deviceReq:       deviceReq,
-				tokenString:     tokenString,
-				refreshToken:    refreshToken,
-				expiresAt:       expiresAt,
-				preGeneratedID:  preGeneratedSessionID,
-				existingSession: existingSession,
-				isRefresh:       existingSession != nil,
-			})
-
-			// DeviceName is determined synchronously (no DB needed)
-			if existingSession != nil {
-				deviceName = existingSession.DeviceName
-			} else if req.DeviceName != "" {
-				deviceName = req.DeviceName
-			} else {
-				deviceName = req.DeviceType // fallback
-			}
-		}
-
-		// Login successful - now delete the OTP
-		s.cache.Delete(ctx, otpKey)
 
 		return &VerifyOTPResponse{
 			Token:        tokenString,
 			RefreshToken: refreshToken,
 			ExpiresAt:    expiresAt,
-			User:         s.mapUserToResponse(user),
+			User:         s.mapUserToResponse(&user),
 			Tenant:       s.mapTenantToResponse(user.Tenant),
 			Message:      "Login successful",
 			Purpose:      "login",
-			SessionID:    sessionID,
-			DeviceName:   deviceName,
 		}, nil
 	} else {
 		// Registration flow - user doesn't exist yet
-		// Delete OTP after successful verification for registration
-		s.cache.Delete(ctx, otpKey)
+		// Issue a registration token so the user can complete registration
+		// without re-verifying OTP (the OTP was already consumed above)
+		regToken := uuid.New().String()
+		regKey := fmt.Sprintf("reg_token:%s", normalizedMobile)
+		regData := map[string]interface{}{
+			"token":    regToken,
+			"mobile":   normalizedMobile,
+			"verified": true,
+		}
+		s.cache.Set(ctx, regKey, regData, 15*time.Minute) // 15 min to complete registration
+
+		log.Printf("📱 [OTP] Registration token issued for %s (token: %s...)", s.maskMobileNumber(mobile), regToken[:8])
 
 		return &VerifyOTPResponse{
-			Message: "Phone verified successfully. Please complete registration.",
-			Purpose: "registration",
+			Message:           "Phone verified successfully. Please complete registration.",
+			Purpose:           "registration",
+			RegistrationToken: regToken,
 		}, nil
 	}
 }
 
-// ForceLoginWithOTPRequest is for Swiggy/Zomato style force login
-// When device limit is reached, user selects a session to logout, then logs in
-type ForceLoginWithOTPRequest struct {
-	Mobile            string `json:"mobile" binding:"required"`
-	OTP               string `json:"otp" binding:"required"`
-	SessionID         string `json:"session_id"`
-	SessionIDToRemove string `json:"session_id_to_remove" binding:"required"` // Session to logout
-
-	// Device Information for session tracking
-	DeviceID   string `json:"device_id"`
-	DeviceName string `json:"device_name"`
-	DeviceType string `json:"device_type"`
-	OSName     string `json:"os_name"`
-	OSVersion  string `json:"os_version"`
-	AppVersion string `json:"app_version"`
-}
-
-// ForceLoginWithOTP handles Swiggy/Zomato style login when device limit is reached
-// 1. Verify OTP is valid
-// 2. Logout the selected session
-// 3. Create new session for the new device
-func (s *AuthService) ForceLoginWithOTP(ctx context.Context, req ForceLoginWithOTPRequest) (*VerifyOTPResponse, error) {
-	// Normalize mobile number
-	mobile := req.Mobile
-	if !strings.HasPrefix(mobile, "+91") {
-		mobile = "+91" + strings.TrimLeft(mobile, "0")
-	}
-
-	// Validate OTP from cache
-	otpKey := fmt.Sprintf("otp:%s", mobile)
-	var otpData map[string]interface{}
-	err := s.cache.Get(ctx, otpKey, &otpData)
-	if err != nil {
-		return nil, errors.New("OTP expired or not found")
-	}
-
-	// Verify OTP using hash (same as VerifyOTP)
-	storedHashedOTP, ok := otpData["hashed_otp"].(string)
-	if !ok {
-		return nil, errors.New("invalid OTP data")
-	}
-
-	// Master OTP bypass for testing/development
-	isMasterOTP := req.OTP == "011001"
-
-	if !isMasterOTP && !s.verifyOTPHash(req.OTP, storedHashedOTP) {
-		return nil, errors.New("invalid OTP")
-	}
-
-	// OTP verified - clear it (force login successful)
-	s.cache.Delete(ctx, otpKey)
-
-	// Get user (use cached lookup for speed)
-	user, err := s.getUserByPhoneCached(ctx, mobile)
-	if err != nil {
-		return nil, fmt.Errorf("user not found: %w", err)
-	}
-
-	// Parse session ID to remove
-	sessionIDToRemove, err := uuid.Parse(req.SessionIDToRemove)
-	if err != nil {
-		return nil, errors.New("invalid session_id_to_remove")
-	}
-
-	// Verify the session belongs to this user and logout that session
-	var sessionToRemove models.UserSession
-	err = s.db.Where("id = ? AND user_id = ? AND is_active = true", sessionIDToRemove, user.ID).First(&sessionToRemove).Error
-	if err != nil {
-		return nil, errors.New("session not found or already logged out")
-	}
-
-	// Deactivate the selected session
-	if err := s.db.Model(&sessionToRemove).Updates(map[string]interface{}{
-		"is_active":   false,
-		"is_current":  false,
-		"logout_at":   time.Now(),
-		"logout_type": "force_logout_by_new_device",
-	}).Error; err != nil {
-		return nil, fmt.Errorf("failed to logout session: %w", err)
-	}
-
-	// Also invalidate the device session cache for the removed session
-	removedCacheKey := fmt.Sprintf("session:device:%s", sessionIDToRemove.String())
-	s.cache.Delete(ctx, removedCacheKey)
-
-	// Now proceed with normal login (device limit should pass now)
-	// Handle Super User (SaaS admin) - they don't have a tenant
-	var tenantID uuid.UUID
-	if user.Role == models.RoleSaasAdmin && user.IsSuperuser {
-		tenantID = uuid.Nil
-	} else {
-		if user.TenantID != nil {
-			tenantID = *user.TenantID
-		}
-	}
-
-	// ========== Determine Session ID for JWT token ==========
-	// Pre-generate session ID so it can be included in JWT
-	var sessionID string
-	var deviceName string
-	var preGeneratedSessionID uuid.UUID
-
-	if req.DeviceID != "" {
-		preGeneratedSessionID = uuid.New()
-		sessionID = preGeneratedSessionID.String()
-	}
-
-	// Generate JWT token WITH session_id for device-specific logout
-	tokenString, refreshToken, expiresAt, err := s.generateTokensWithRole(user.ID, tenantID, user.Role, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate tokens: %w", err)
-	}
-
-	// Store session in cache
-	sessionKey := fmt.Sprintf(cache.UserSessionKey, user.ID.String())
-	sessionData := map[string]interface{}{
-		"user_id":       user.ID.String(),
-		"role":          user.Role,
-		"is_superuser":  user.IsSuperuser,
-		"refresh_token": refreshToken,
-		"login_time":    time.Now(),
-	}
-
-	if tenantID != uuid.Nil {
-		sessionData["tenant_id"] = tenantID.String()
-	} else {
-		sessionData["tenant_id"] = nil
-	}
-
-	if err := s.cache.Set(ctx, sessionKey, sessionData, 45*24*time.Hour); err != nil {
-		return nil, fmt.Errorf("failed to store session: %w", err)
-	}
-
-	// Create device session ASYNC (saves ~20-30ms)
-	if req.DeviceID != "" {
-		deviceReq := &LoginWithDeviceRequest{
-			LoginRequest: LoginRequest{
-				DeviceID:   req.DeviceID,
-				DeviceName: req.DeviceName,
-				DeviceType: req.DeviceType,
-				OSName:     req.OSName,
-				OSVersion:  req.OSVersion,
-				AppVersion: req.AppVersion,
-			},
-		}
-
-		// Fire and forget - don't block on DB operation
-		createDeviceSessionAsync(&deviceSessionRequest{
-			service:        s,
-			ctx:            ctx,
-			user:           user,
-			deviceReq:      deviceReq,
-			tokenString:    tokenString,
-			refreshToken:   refreshToken,
-			expiresAt:      expiresAt,
-			preGeneratedID: preGeneratedSessionID,
-			isRefresh:      false,
-		})
-
-		// DeviceName is determined synchronously
-		if req.DeviceName != "" {
-			deviceName = req.DeviceName
-		} else {
-			deviceName = req.DeviceType // fallback
-		}
-	}
-
-	return &VerifyOTPResponse{
-		Token:        tokenString,
-		RefreshToken: refreshToken,
-		ExpiresAt:    expiresAt,
-		User:         s.mapUserToResponse(user),
-		Tenant:       s.mapTenantToResponse(user.Tenant),
-		Message:      "Login successful (previous device logged out)",
-		Purpose:      "login",
-		SessionID:    sessionID,
-		DeviceName:   deviceName,
-	}, nil
-}
-
 // Enhanced SendOTPForRegistration with email validation
+// Note: Only phone is required at OTP send stage. Other fields are collected later at verify-otp-register.
 type SendOTPForRegistrationRequest struct {
-	Phone     string `json:"phone" binding:"required"`
-	Email     string `json:"email" binding:"required,email"`
-	FirstName string `json:"first_name" binding:"required"`
+	Phone       string `json:"phone" binding:"required"`
+	Email       string `json:"email"`       // Optional at OTP stage - validated at registration
+	FirstName   string `json:"first_name"`  // Optional at OTP stage - required at registration
+	LastName    string `json:"last_name"`
+	TenantName  string `json:"tenant_name"`
+	CompanyName string `json:"company_name"`
+	ShopName    string `json:"shop_name"`
+	ShopAddress string `json:"shop_address"`
+}
+
+// VerifyOTPAndRegisterRequest combines OTP verification with registration
+// Supports two flows:
+// 1. Direct: phone + otp (from registration page)
+// 2. From login: phone + registration_token (phone already verified via login flow)
+type VerifyOTPAndRegisterRequest struct {
+	Phone             string `json:"phone" binding:"required"`
+	OTP               string `json:"otp"`                // Required if no registration_token
+	SessionID         string `json:"session_id"`
+	RegistrationToken string `json:"registration_token"` // Alternative to OTP (from login flow)
+	Email             string `json:"email" binding:"required,email"`
+	FirstName         string `json:"first_name" binding:"required"`
+	LastName          string `json:"last_name" binding:"required"`
+	TenantName        string `json:"tenant_name" binding:"required"`
+	CompanyName       string `json:"company_name" binding:"required"`
+	ShopName          string `json:"shop_name"`    // Optional
+	ShopAddress       string `json:"shop_address"` // Optional
 }
 
 func (s *AuthService) SendOTPForRegistration(ctx context.Context, req SendOTPForRegistrationRequest) (*SendOTPResponse, error) {
+	// Normalize mobile number for consistent database operations
+	normalizedMobile := s.normalizeMobileNumber(req.Phone)
+
 	// REQUIREMENT: Validate phone number uniqueness (primary key)
+	// Search using multiple strategies for maximum compatibility (same as SendOTP and CheckUser)
 	var existingUserByPhone models.User
-	err := s.db.Where("phone = ?", req.Phone).First(&existingUserByPhone).Error
+	err := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+		normalizedMobile, req.Phone, normalizedMobile).First(&existingUserByPhone).Error
 	if err == nil {
 		return nil, errors.New("phone number already registered")
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1433,125 +1148,56 @@ func (s *AuthService) SendOTPForRegistration(ctx context.Context, req SendOTPFor
 	}
 
 	// REQUIREMENT: Validate email uniqueness (secondary key)
-	var existingUserByEmail models.User
-	err = s.db.Where("email = ?", req.Email).First(&existingUserByEmail).Error
-	if err == nil {
-		return nil, errors.New("email already registered")
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("failed to check email: %w", err)
+	// Skip check when email is empty — empty strings match other users with no email
+	if req.Email != "" {
+		var existingUserByEmail models.User
+		err = s.db.Where("email = ?", req.Email).First(&existingUserByEmail).Error
+		if err == nil {
+			return nil, errors.New("email already registered")
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("failed to check email: %w", err)
+		}
 	}
+
+	// Store first name in Redis temporarily for SMS personalization (10 minutes)
+	nameKey := fmt.Sprintf("registration:name:%s", normalizedMobile)
+	s.cache.Set(ctx, nameKey, req.FirstName, 10*time.Minute)
 
 	// Both phone and email are unique - proceed with OTP
 	return s.SendOTP(ctx, SendOTPRequest{Mobile: req.Phone})
 }
 
-// CheckUser checks if a user exists by mobile number or email without sending OTP
+// CheckUser sends OTP to mobile number for verification first.
+// Registration status is only revealed after OTP verification (in VerifyOTP response).
 func (s *AuthService) CheckUser(ctx context.Context, req CheckUserRequest) (*CheckUserResponse, error) {
-	// Check if email is provided (for email validation)
-	if req.Email != "" {
-		// Email validation
-		var existingUser models.User
-		err := s.db.Where("email = ?", req.Email).First(&existingUser).Error
-
-		if err == nil {
-			// Email exists
-			if !existingUser.IsActive {
-				return nil, errors.New("user account is inactive")
-			}
-			return &CheckUserResponse{
-				Exists:  true,
-				Message: "Email already registered.",
-			}, nil
-		} else if errors.Is(err, gorm.ErrRecordNotFound) {
-			// Email doesn't exist
-			return &CheckUserResponse{
-				Exists:  false,
-				Message: "Email is available.",
-			}, nil
-		} else {
-			// Database error
-			return nil, fmt.Errorf("failed to check email: %w", err)
-		}
-	}
-
-	// Phone validation (existing logic)
-	// Support both "mobile" and "phone" field names for Flutter app compatibility
-	mobile := req.Mobile
-	if mobile == "" {
-		mobile = req.Phone
-	}
-
-	// Sanitize phone number (remove spaces)
-	mobile = s.sanitizeMobileNumber(mobile)
-
-	// Security: Validate and sanitize mobile number
-	if !s.isValidMobileNumber(mobile) {
-		return nil, errors.New("invalid mobile number format")
-	}
-
-	// Check if user exists by mobile number (using sanitized number)
-	var existingUser models.User
-	err := s.db.Where("phone = ?", mobile).First(&existingUser).Error
-
-	if err == nil {
-		// User exists
-		if !existingUser.IsActive {
-			return nil, errors.New("user account is inactive")
-		}
-		return &CheckUserResponse{
-			Exists:  true,
-			Message: "User exists. You can proceed to login.",
-		}, nil
-	} else if errors.Is(err, gorm.ErrRecordNotFound) {
-		// User doesn't exist
-		return &CheckUserResponse{
-			Exists:  false,
-			Message: "New user. Please create an account.",
-		}, nil
-	} else {
-		// Database error
-		return nil, fmt.Errorf("failed to check user: %w", err)
-	}
-}
-
-// Helper methods
-
-// getUserByPhoneCached retrieves user by phone with Redis caching (2-minute TTL)
-// Saves ~5-10ms on DB lookups in hot OTP paths
-func (s *AuthService) getUserByPhoneCached(ctx context.Context, phone string) (*models.User, error) {
-	cacheKey := fmt.Sprintf(cache.UserByPhoneKey, phone)
-
-	// Try cache first
-	var cachedUser models.User
-	if err := s.cache.Get(ctx, cacheKey, &cachedUser); err == nil && cachedUser.ID != uuid.Nil {
-		// Cache hit - but we still need to load tenant for preload
-		if cachedUser.TenantID != nil {
-			var tenant models.Tenant
-			if err := s.db.Where("id = ?", cachedUser.TenantID).First(&tenant).Error; err == nil {
-				cachedUser.Tenant = &tenant
-			}
-		}
-		return &cachedUser, nil
-	}
-
-	// Cache miss - query DB
-	var user models.User
-	if err := s.db.Where("phone = ?", phone).Preload("Tenant").First(&user).Error; err != nil {
+	// Send OTP — this handles validation, rate limiting, and SMS delivery
+	otpResp, err := s.SendOTP(ctx, SendOTPRequest{Mobile: req.Mobile})
+	if err != nil {
 		return nil, err
 	}
 
-	// Cache for 2 minutes (short TTL for consistency)
-	s.cache.Set(ctx, cacheKey, user, cache.UserByPhoneTTL)
+	// Report the REAL existence status. Older app builds route on this flag —
+	// when it was hardcoded false, existing users were sent to the
+	// create-new-user screen instead of the OTP/login screen (and never
+	// reached verify-otp). Newer builds ignore this and decide at verify-otp,
+	// so reporting the true value is safe for both. Uses the same robust phone
+	// match as the login/verify paths.
+	normalized := s.normalizeMobileNumber(req.Mobile)
+	var existingUser models.User
+	lookupErr := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+		normalized, req.Mobile, normalized).First(&existingUser).Error
+	exists := lookupErr == nil
 
-	return &user, nil
+	return &CheckUserResponse{
+		Exists:    exists,
+		Message:   fmt.Sprintf("OTP sent to %s. Please verify to continue.", s.maskMobileNumber(req.Mobile)),
+		SessionID: otpResp.SessionID,
+		ExpiresAt: otpResp.ExpiresAt,
+		OTPSentAt: otpResp.OTPSentAt,
+	}, nil
 }
 
-func (s *AuthService) determineOTPPurpose(userExists bool) string {
-	if userExists {
-		return "login"
-	}
-	return "registration"
-}
+// Helper methods
 
 func (s *AuthService) isProduction() bool {
 	env := os.Getenv("APP_ENVIRONMENT")
@@ -1563,7 +1209,6 @@ func (s *AuthService) getOTPForMobile(mobile string) string {
 	// Special OTPs for specific users
 	specialOTPs := map[string]string{
 		"+918630668488": "111111", // Super User Dharam Prakash
-		"+919876543210": "123456", // Apple App Store Review Test Account
 		// Add more special OTPs as needed
 	}
 
@@ -1588,16 +1233,43 @@ func (s *AuthService) incrementFailureCounter(ctx context.Context, mobile string
 	s.cache.Set(ctx, failureKey, failureCount, 1*time.Hour)
 }
 
-// generateTokens creates JWT access and refresh tokens (without session_id - for backward compatibility)
+// getUserNameFromMobile attempts to retrieve the user's first name for SMS personalization
+// Returns "User" if name cannot be found
+func (s *AuthService) getUserNameFromMobile(ctx context.Context, mobile string) string {
+	// Try to get user from database for existing users (login flow)
+	normalizedMobile := s.normalizeMobileNumber(mobile)
+	var user models.User
+	err := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+		normalizedMobile, mobile, normalizedMobile).First(&user).Error
+
+	if err == nil && user.FirstName != "" {
+		return user.FirstName
+	}
+
+	// For registration flow, check if name is stored temporarily in Redis
+	nameKey := fmt.Sprintf("registration:name:%s", normalizedMobile)
+	var firstName string
+	if err := s.cache.Get(ctx, nameKey, &firstName); err == nil && firstName != "" {
+		return firstName
+	}
+
+	// Default to "User" if name cannot be determined
+	return "User"
+}
+
+// generateTokens creates JWT access and refresh tokens
 func (s *AuthService) generateTokens(userID, tenantID uuid.UUID) (string, string, time.Time, error) {
-	return s.generateTokensWithRole(userID, tenantID, "admin", "")
+	return s.generateTokensWithRole(userID, tenantID, "admin")
 }
 
 // generateTokensWithRole creates JWT access and refresh tokens with specified role
-// sessionID is optional - if provided, it enables device-specific session validation
-func (s *AuthService) generateTokensWithRole(userID, tenantID uuid.UUID, role string, sessionID string) (string, string, time.Time, error) {
-	// Set token expiration (45 days for better user experience)
-	expiresAt := time.Now().Add(45 * 24 * time.Hour)
+func (s *AuthService) generateTokensWithRole(userID, tenantID uuid.UUID, role string) (string, string, time.Time, error) {
+	// Set token expiration — use config value, fallback to 7 days
+	expHours := s.config.ExpirationHours
+	if expHours <= 0 {
+		expHours = 168 // 7 days default
+	}
+	expiresAt := time.Now().Add(time.Duration(expHours) * time.Hour)
 
 	// Create JWT claims
 	claims := jwt.MapClaims{
@@ -1605,11 +1277,6 @@ func (s *AuthService) generateTokensWithRole(userID, tenantID uuid.UUID, role st
 		"role":    role,
 		"exp":     expiresAt.Unix(),
 		"iat":     time.Now().Unix(),
-	}
-
-	// Add session_id if provided (enables device-specific logout)
-	if sessionID != "" {
-		claims["session_id"] = sessionID
 	}
 
 	// Add tenant_id only if it's not Nil (Super Users don't have tenant restriction)
@@ -1624,18 +1291,13 @@ func (s *AuthService) generateTokensWithRole(userID, tenantID uuid.UUID, role st
 		return "", "", time.Time{}, fmt.Errorf("failed to sign token: %w", err)
 	}
 
-	// Create refresh token (longer expiry - 60 days)
+	// Create refresh token (longer expiry)
 	refreshClaims := jwt.MapClaims{
 		"user_id": userID.String(),
 		"role":    role,
-		"exp":     time.Now().Add(60 * 24 * time.Hour).Unix(),
+		"exp":     time.Now().Add(30 * 24 * time.Hour).Unix(), // 30 days refresh token
 		"iat":     time.Now().Unix(),
 		"type":    "refresh",
-	}
-
-	// Add session_id to refresh token as well
-	if sessionID != "" {
-		refreshClaims["session_id"] = sessionID
 	}
 
 	// Add tenant_id only if it's not Nil
@@ -1652,958 +1314,347 @@ func (s *AuthService) generateTokensWithRole(userID, tenantID uuid.UUID, role st
 	return tokenString, refreshTokenString, expiresAt, nil
 }
 
-// ============================================================================
-// Device Session Management - 2 Device Login Limit (like Swiggy/Zomato)
-// ============================================================================
+// VerifyOTPAndRegister combines OTP verification with user registration in a single step
+// This is the recommended method for tenant registration as it ensures atomicity
+// Supports two verification flows:
+// 1. Standard: phone + OTP (direct registration)
+// 2. Token-based: phone + registration_token (from login flow where OTP was already verified)
+func (s *AuthService) VerifyOTPAndRegister(ctx context.Context, req VerifyOTPAndRegisterRequest) (*LoginResponse, error) {
+	mobile := req.Phone
 
-// LoginWithDeviceRequest extends LoginRequest with IP address (set by handler)
-type LoginWithDeviceRequest struct {
-	LoginRequest
-	IPAddress         string
-	DeviceFingerprint string // Generated client-side for fraud detection
-	ScreenResolution  string
-	Timezone          string
-	Language          string
-}
-
-// ============================================================================
-// Security Event Logging (Industrial-grade audit trail)
-// ============================================================================
-
-// LogSecurityEvent logs a security-related event for audit purposes
-// Uses buffered channel for batch processing (prevents goroutine leak)
-func (s *AuthService) LogSecurityEvent(ctx context.Context, event *models.SecurityEvent) {
-	// Non-blocking: Queue to buffered channel for batch processing
-	// This prevents unbounded goroutine spawning (memory optimization)
-	select {
-	case securityEventBuffer <- &securityEventWithDB{event: event, db: s.db.DB}:
-		// Event queued successfully
-	default:
-		// Buffer full - log warning but don't block
-		log.Printf("Security event buffer full, dropping event: %s for user %s", event.EventType, event.UserID)
+	// Security validations
+	if !s.isValidMobileNumber(mobile) {
+		return nil, errors.New("invalid mobile number format")
 	}
 
-}
+	// Normalize mobile number for consistent operations
+	normalizedMobile := s.normalizeMobileNumber(mobile)
 
-// ============================================================================
-// Device Limit Check with Atomic Redis Locking (like Swiggy/Zomato)
-// ============================================================================
+	if s.isNumberBlocked(ctx, normalizedMobile) {
+		return nil, errors.New("mobile number temporarily blocked")
+	}
 
-// CheckDeviceLimit checks if user has reached the maximum device limit
-// Uses Redis distributed lock for atomic enforcement (prevents race conditions)
-// Returns existing session if device is already logged in, or error if limit reached
-func (s *AuthService) CheckDeviceLimit(ctx context.Context, userID uuid.UUID, deviceID string) (*models.UserSession, error) {
-	// Atomic lock to prevent race conditions when multiple devices try to login simultaneously
-	lockKey := fmt.Sprintf("device_limit_lock:%s", userID.String())
-	lockValue := fmt.Sprintf("%s:%d", deviceID, time.Now().UnixNano())
-
-	// Try to acquire lock with exponential backoff (50ms, 100ms, 200ms) - no blocking sleep
-	var acquired bool
-	var err error
-	for i := 0; i < 3; i++ {
-		acquired, err = s.cache.SetNX(ctx, lockKey, lockValue, 10*time.Second)
+	// Flow 1: Registration token from login flow (phone already verified)
+	if req.RegistrationToken != "" {
+		regKey := fmt.Sprintf("reg_token:%s", normalizedMobile)
+		var regData map[string]interface{}
+		err := s.cache.Get(ctx, regKey, &regData)
 		if err != nil {
-			log.Printf("[DeviceLimit] Lock acquire error for user %s: %v", userID, err)
-			break // Continue without lock
+			return nil, errors.New("registration token expired. Please start again")
 		}
-		if acquired {
-			break
+
+		storedToken, _ := regData["token"].(string)
+		if storedToken != req.RegistrationToken {
+			return nil, errors.New("invalid registration token")
 		}
-		// Exponential backoff with context check
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Duration(50<<i) * time.Millisecond):
-			continue
-		}
-	}
-	if !acquired && err == nil {
-		return nil, errors.New("another login is in progress. Please try again")
-	}
 
-	// Ensure lock is released when done
-	defer func() {
-		// Only release if we own the lock
-		var storedValue string
-		if err := s.cache.Get(ctx, lockKey, &storedValue); err == nil && storedValue == lockValue {
-			s.cache.Delete(ctx, lockKey)
-		}
-	}()
+		// Token is valid — consume it
+		s.cache.Delete(ctx, regKey)
+		log.Printf("📱 [REG] Registration token verified for %s", s.maskMobileNumber(mobile))
 
-	// Check Redis cache first for active sessions (30 second TTL)
-	cacheKey := fmt.Sprintf(cache.ActiveSessionsKey, userID.String())
-	var activeSessions []models.UserSession
+		// Skip to user creation (below)
+	} else if req.OTP != "" {
+		// Flow 2: Standard OTP verification
+		providedOTP := req.OTP
 
-	if cacheErr := s.cache.Get(ctx, cacheKey, &activeSessions); cacheErr != nil {
-		// Cache miss - query DB with optimized SELECT
-		err = s.db.DB.Where("user_id = ? AND is_active = true AND deleted_at IS NULL", userID).
-			Select("id, user_id, device_id, device_name, device_type, os_name, os_version, last_active_at, is_current").
-			Order("last_active_at DESC").
-			Limit(5). // Only need max devices + safety margin
-			Find(&activeSessions).Error
-
+		// Retrieve OTP data
+		otpKey := fmt.Sprintf("otp:%s", normalizedMobile)
+		var otpData map[string]interface{}
+		err := s.cache.Get(ctx, otpKey, &otpData)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get active sessions: %w", err)
+			return nil, errors.New("OTP expired or not found. Please request a new OTP")
 		}
 
-		// Cache for 30 seconds
-		s.cache.Set(ctx, cacheKey, activeSessions, cache.DeviceCacheTTL)
-	}
-
-	// Check if this device already has a session (allow re-login from same device)
-	for _, session := range activeSessions {
-		if session.DeviceID == deviceID && deviceID != "" {
-			return &session, nil // Device already logged in, will refresh session
-		}
-	}
-
-	// Check device limit
-	if len(activeSessions) >= models.MaxDevicesPerUser {
-		// Log security event for device limit reached
-		s.LogSecurityEvent(ctx, &models.SecurityEvent{
-			UserID:      userID,
-			EventType:   models.EventTypeDeviceLimitReached,
-			Severity:    models.SeverityInfo,
-			DeviceID:    deviceID,
-			Description: fmt.Sprintf("User attempted login from new device but has %d active sessions (limit: %d)", len(activeSessions), models.MaxDevicesPerUser),
-		})
-
-		return nil, &models.DeviceLimitError{
-			ActiveSessions: activeSessions,
-			Message:        fmt.Sprintf("Maximum device limit (%d) reached. Please logout from another device.", models.MaxDevicesPerUser),
-			MaxDevices:     models.MaxDevicesPerUser,
-		}
-	}
-
-	return nil, nil // OK to create new session
-}
-
-// ============================================================================
-// Device Fingerprint Calculation (Fraud Detection)
-// ============================================================================
-
-// CalculateDeviceFingerprint creates a hash of device characteristics for fraud detection
-func (s *AuthService) CalculateDeviceFingerprint(req *LoginWithDeviceRequest) string {
-	// Combine device characteristics into a fingerprint
-	components := []string{
-		req.DeviceID,
-		req.DeviceType,
-		req.OSName,
-		req.OSVersion,
-		req.ScreenResolution,
-		req.Timezone,
-		req.Language,
-	}
-
-	combined := strings.Join(components, "|")
-	hash := sha256.Sum256([]byte(combined))
-	return hex.EncodeToString(hash[:16]) // First 16 bytes = 32 hex chars
-}
-
-// CalculateRiskScore evaluates the risk level of a login attempt
-func (s *AuthService) CalculateRiskScore(ctx context.Context, userID uuid.UUID, req *LoginWithDeviceRequest, existingSession *models.UserSession) int {
-	riskScore := 0
-
-	// Check for known device
-	var previousSessions []models.UserSession
-	s.db.DB.Where("user_id = ? AND device_id = ?", userID, req.DeviceID).
-		Order("created_at DESC").
-		Limit(5).
-		Find(&previousSessions)
-
-	if len(previousSessions) == 0 {
-		riskScore += 15 // New device - slightly elevated risk
-	}
-
-	// Check for IP change from last login
-	if existingSession != nil && existingSession.IPAddress != req.IPAddress {
-		riskScore += 10 // IP changed
-	}
-
-	// Check for rapid login attempts
-	recentAttemptKey := fmt.Sprintf("login_attempts:%s", userID.String())
-	var recentAttempts int
-	s.cache.Get(ctx, recentAttemptKey, &recentAttempts)
-	if recentAttempts > 5 {
-		riskScore += 20 // Too many login attempts
-	}
-
-	// Check for device fingerprint mismatch
-	if existingSession != nil && existingSession.DeviceFingerprint != "" {
-		calculatedFingerprint := s.CalculateDeviceFingerprint(req)
-		if existingSession.DeviceFingerprint != calculatedFingerprint {
-			riskScore += 25 // Device fingerprint changed
-		}
-	}
-
-	return min(riskScore, 100) // Cap at 100
-}
-
-// CreateDeviceSession creates a new session with device tracking and security logging
-func (s *AuthService) CreateDeviceSession(ctx context.Context, user *models.User, req *LoginWithDeviceRequest, token, refreshToken string, expiresAt time.Time) (*models.UserSession, error) {
-	// Hash the token for secure storage
-	tokenHash := hashTokenForStorage(token)
-
-	// Calculate device fingerprint for fraud detection
-	deviceFingerprint := s.CalculateDeviceFingerprint(req)
-
-	// Calculate risk score for this login
-	riskScore := s.CalculateRiskScore(ctx, user.ID, req, nil)
-
-	now := time.Now()
-	session := &models.UserSession{
-		UserID:       user.ID,
-		Token:        token[:min(len(token), 100)] + "...", // Store truncated for reference
-		TokenHash:    tokenHash,
-		RefreshToken: hashTokenForStorage(refreshToken),
-		DeviceID:     req.DeviceID,
-		DeviceName:   getDeviceName(req.DeviceName, req.OSName),
-		DeviceType:   getDeviceType(req.DeviceType),
-		OSName:       req.OSName,
-		OSVersion:    req.OSVersion,
-		AppVersion:   req.AppVersion,
-		IPAddress:    req.IPAddress,
-		ExpiresAt:    &expiresAt,
-		LastActiveAt: &now,
-		IsActive:     true,
-		IsCurrent:    true,
-		// Industrial-grade security fields
-		DeviceFingerprint: deviceFingerprint,
-		ScreenResolution:  req.ScreenResolution,
-		Timezone:          req.Timezone,
-		Language:          req.Language,
-		LoginMethod:       models.LoginMethodOTP,
-		RiskScore:         riskScore,
-	}
-
-	// Start transaction
-	tx := s.db.DB.Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// Deactivate "is_current" for other sessions of this user
-	if err := tx.Model(&models.UserSession{}).
-		Where("user_id = ? AND is_active = true", user.ID).
-		Update("is_current", false).Error; err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to update existing sessions: %w", err)
-	}
-
-	// Create new session in database
-	if err := tx.Create(session).Error; err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to create session: %w", err)
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		return nil, fmt.Errorf("failed to commit session: %w", err)
-	}
-
-	// Cache session in Redis for fast validation (with sliding expiration support)
-	cacheKey := fmt.Sprintf("session:device:%s", session.ID.String())
-	cacheData := map[string]interface{}{
-		"user_id":            user.ID.String(),
-		"session_id":         session.ID.String(),
-		"device_id":          session.DeviceID,
-		"device_fingerprint": deviceFingerprint,
-		"ip_address":         req.IPAddress,
-		"is_active":          true,
-		"created_at":         now.Unix(),
-		"last_active_at":     now.Unix(),
-	}
-	if user.TenantID != nil {
-		cacheData["tenant_id"] = user.TenantID.String()
-	}
-	s.cache.Set(ctx, cacheKey, cacheData, cache.SessionTTL)
-
-	// Log security event for successful login
-	s.LogSecurityEvent(ctx, &models.SecurityEvent{
-		UserID:      user.ID,
-		SessionID:   &session.ID,
-		EventType:   models.EventTypeLogin,
-		Severity:    models.SeverityInfo,
-		IPAddress:   req.IPAddress,
-		DeviceID:    req.DeviceID,
-		Description: fmt.Sprintf("Login successful from %s (%s)", session.DeviceName, session.DeviceType),
-		RiskScore:   riskScore,
-	})
-
-	// Track login attempts for rate limiting
-	loginAttemptKey := fmt.Sprintf("login_attempts:%s", user.ID.String())
-	s.cache.Delete(ctx, loginAttemptKey) // Reset on successful login
-
-	return session, nil
-}
-
-// CreateDeviceSessionWithID creates a new session with a pre-generated session ID
-// This is used when the session ID needs to be known before creating the session (e.g., for JWT claims)
-// Industrial-grade: Includes device fingerprinting, risk scoring, and security event logging
-func (s *AuthService) CreateDeviceSessionWithID(ctx context.Context, user *models.User, req *LoginWithDeviceRequest, token, refreshToken string, expiresAt time.Time, sessionID uuid.UUID) (*models.UserSession, error) {
-	// Hash the token for secure storage
-	tokenHash := hashTokenForStorage(token)
-
-	// Calculate device fingerprint for fraud detection
-	deviceFingerprint := s.CalculateDeviceFingerprint(req)
-
-	// Calculate risk score for this login
-	riskScore := s.CalculateRiskScore(ctx, user.ID, req, nil)
-
-	now := time.Now()
-	session := &models.UserSession{
-		BaseModel: models.BaseModel{
-			ID: sessionID, // Use pre-generated session ID
-		},
-		UserID:       user.ID,
-		Token:        token[:min(len(token), 100)] + "...", // Store truncated for reference
-		TokenHash:    tokenHash,
-		RefreshToken: hashTokenForStorage(refreshToken),
-		DeviceID:     req.DeviceID,
-		DeviceName:   getDeviceName(req.DeviceName, req.OSName),
-		DeviceType:   getDeviceType(req.DeviceType),
-		OSName:       req.OSName,
-		OSVersion:    req.OSVersion,
-		AppVersion:   req.AppVersion,
-		IPAddress:    req.IPAddress,
-		ExpiresAt:    &expiresAt,
-		LastActiveAt: &now,
-		IsActive:     true,
-		IsCurrent:    true,
-		// Industrial-grade security fields
-		DeviceFingerprint: deviceFingerprint,
-		ScreenResolution:  req.ScreenResolution,
-		Timezone:          req.Timezone,
-		Language:          req.Language,
-		LoginMethod:       models.LoginMethodOTP,
-		RiskScore:         riskScore,
-	}
-
-	// Start transaction
-	tx := s.db.DB.Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// Deactivate "is_current" for other sessions of this user
-	if err := tx.Model(&models.UserSession{}).
-		Where("user_id = ? AND is_active = true", user.ID).
-		Update("is_current", false).Error; err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to update existing sessions: %w", err)
-	}
-
-	// Create new session in database
-	if err := tx.Create(session).Error; err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to create session: %w", err)
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		return nil, fmt.Errorf("failed to commit session: %w", err)
-	}
-
-	// Cache session in Redis for fast validation (with sliding expiration support)
-	cacheKey := fmt.Sprintf("session:device:%s", session.ID.String())
-	cacheData := map[string]interface{}{
-		"user_id":            user.ID.String(),
-		"session_id":         session.ID.String(),
-		"device_id":          session.DeviceID,
-		"device_fingerprint": deviceFingerprint,
-		"ip_address":         req.IPAddress,
-		"is_active":          true,
-		"created_at":         now.Unix(),
-		"last_active_at":     now.Unix(),
-	}
-	if user.TenantID != nil {
-		cacheData["tenant_id"] = user.TenantID.String()
-	}
-	s.cache.Set(ctx, cacheKey, cacheData, cache.SessionTTL)
-
-	// Log security event for successful login
-	s.LogSecurityEvent(ctx, &models.SecurityEvent{
-		UserID:      user.ID,
-		SessionID:   &session.ID,
-		EventType:   models.EventTypeLogin,
-		Severity:    models.SeverityInfo,
-		IPAddress:   req.IPAddress,
-		DeviceID:    req.DeviceID,
-		Description: fmt.Sprintf("Login successful from %s (%s)", session.DeviceName, session.DeviceType),
-		RiskScore:   riskScore,
-	})
-
-	// Track login attempts for rate limiting
-	loginAttemptKey := fmt.Sprintf("login_attempts:%s", user.ID.String())
-	s.cache.Delete(ctx, loginAttemptKey) // Reset on successful login
-
-	return session, nil
-}
-
-// RefreshDeviceSession updates an existing session when same device re-logs in
-// Industrial-grade: Includes refresh counting and sliding expiration
-func (s *AuthService) RefreshDeviceSession(ctx context.Context, session *models.UserSession, token, refreshToken string, expiresAt time.Time) error {
-	now := time.Now()
-
-	// Increment refresh count for security monitoring
-	newRefreshCount := session.RefreshCount + 1
-
-	updates := map[string]interface{}{
-		"token_hash":      hashTokenForStorage(token),
-		"refresh_token":   hashTokenForStorage(refreshToken),
-		"expires_at":      expiresAt,
-		"last_active_at":  now,
-		"last_refresh_at": now,
-		"refresh_count":   newRefreshCount,
-		"is_current":      true,
-	}
-
-	if err := s.db.DB.Model(&models.UserSession{}).
-		Where("id = ?", session.ID).
-		Updates(updates).Error; err != nil {
-		return fmt.Errorf("failed to refresh session: %w", err)
-	}
-
-	// Re-cache session in Redis for fast validation (sliding expiration)
-	cacheKey := fmt.Sprintf("session:device:%s", session.ID.String())
-	cacheData := map[string]interface{}{
-		"user_id":            session.UserID.String(),
-		"session_id":         session.ID.String(),
-		"device_id":          session.DeviceID,
-		"device_fingerprint": session.DeviceFingerprint,
-		"ip_address":         session.IPAddress,
-		"is_active":          true,
-		"last_active_at":     now.Unix(),
-		"refresh_count":      newRefreshCount,
-	}
-	s.cache.Set(ctx, cacheKey, cacheData, cache.SessionTTL)
-
-	// Log token refresh for security monitoring
-	s.LogSecurityEvent(ctx, &models.SecurityEvent{
-		UserID:      session.UserID,
-		SessionID:   &session.ID,
-		EventType:   models.EventTypeTokenRefresh,
-		Severity:    models.SeverityInfo,
-		DeviceID:    session.DeviceID,
-		Description: fmt.Sprintf("Token refreshed (count: %d)", newRefreshCount),
-	})
-
-	return nil
-}
-
-// UpdateSessionHeartbeat updates the last_active_at timestamp for sliding session expiration
-// Called periodically by the client to keep session alive (like Swiggy/Zomato)
-func (s *AuthService) UpdateSessionHeartbeat(ctx context.Context, sessionID uuid.UUID, ipAddress string) error {
-	now := time.Now()
-
-	// Update database
-	result := s.db.DB.Model(&models.UserSession{}).
-		Where("id = ? AND is_active = true", sessionID).
-		Update("last_active_at", now)
-
-	if result.Error != nil {
-		return fmt.Errorf("failed to update heartbeat: %w", result.Error)
-	}
-
-	if result.RowsAffected == 0 {
-		return errors.New("session not found or inactive")
-	}
-
-	// Update Redis cache with sliding expiration
-	cacheKey := fmt.Sprintf("session:device:%s", sessionID.String())
-	var cacheData map[string]interface{}
-	if err := s.cache.Get(ctx, cacheKey, &cacheData); err == nil {
-		cacheData["last_active_at"] = now.Unix()
-		// Check for IP change (security monitoring)
-		if storedIP, ok := cacheData["ip_address"].(string); ok && storedIP != ipAddress {
-			cacheData["ip_changed"] = true
-			// Log IP change as a warning
-			if userIDStr, ok := cacheData["user_id"].(string); ok {
-				userID, _ := uuid.Parse(userIDStr)
-				s.LogSecurityEvent(ctx, &models.SecurityEvent{
-					UserID:      userID,
-					SessionID:   &sessionID,
-					EventType:   models.EventTypeIPChange,
-					Severity:    models.SeverityWarning,
-					IPAddress:   ipAddress,
-					Description: fmt.Sprintf("IP changed from %s to %s during session", storedIP, ipAddress),
-				})
+		// Verify session ID if provided
+		if req.SessionID != "" {
+			if storedSessionID, ok := otpData["session_id"].(string); ok {
+				if storedSessionID != req.SessionID {
+					return nil, errors.New("invalid session")
+				}
 			}
 		}
-		s.cache.Set(ctx, cacheKey, cacheData, cache.SessionTTL) // Refresh TTL
+
+		// Check attempt limit
+		attempts, _ := otpData["attempts"].(float64)
+		maxAttempts, _ := otpData["max_attempts"].(float64)
+		if attempts >= maxAttempts {
+			s.cache.Delete(ctx, otpKey)
+			s.blockSuspiciousNumber(ctx, normalizedMobile, 1*time.Hour)
+			return nil, errors.New("maximum OTP attempts exceeded. Please request a new OTP")
+		}
+
+		// Verify OTP
+		storedHashedOTP, ok := otpData["hashed_otp"].(string)
+		if !ok {
+			return nil, errors.New("invalid OTP data")
+		}
+
+		if !s.verifyOTPHash(providedOTP, storedHashedOTP) {
+			// Increment attempts counter
+			attempts++
+			otpData["attempts"] = attempts
+			s.cache.Set(ctx, otpKey, otpData, 10*time.Minute)
+
+			// Track failed attempts
+			s.incrementFailureCounter(ctx, normalizedMobile)
+
+			return nil, errors.New("invalid OTP")
+		}
+
+		// OTP verified — clear it
+		s.cache.Delete(ctx, otpKey)
+
+		// Check purpose - must be registration
+		purpose, _ := otpData["purpose"].(string)
+		if purpose == "login" {
+			return nil, errors.New("this phone number is already registered. Please use login instead")
+		}
+	} else {
+		return nil, errors.New("either OTP or registration token is required")
 	}
 
-	return nil
-}
+	// Phone verified — now proceed with registration checks
 
-// GetActiveSessions returns all active sessions for a user
-func (s *AuthService) GetActiveSessions(ctx context.Context, userID uuid.UUID) ([]models.UserSession, error) {
-	var sessions []models.UserSession
-	err := s.db.DB.Where("user_id = ? AND is_active = true AND deleted_at IS NULL", userID).
-		Order("last_active_at DESC").
-		Find(&sessions).Error
+	// Double-check that user doesn't exist (safety check)
+	var existingUser models.User
+	var err error
+	err = s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+		normalizedMobile, mobile, normalizedMobile).First(&existingUser).Error
+	if err == nil {
+		return nil, errors.New("phone number already registered")
+	}
 
+	// Check if email is already registered
+	err = s.db.Where("email = ?", req.Email).First(&existingUser).Error
+	if err == nil {
+		return nil, errors.New("email already registered")
+	}
+
+	// Now proceed with registration
+	log.Printf("✅ [Registration] Phone verified for %s, proceeding with registration", s.maskMobileNumber(mobile))
+
+	// Create registration request
+	registerReq := RegisterRequest{
+		Email:       req.Email,
+		FirstName:   req.FirstName,
+		LastName:    req.LastName,
+		Phone:       normalizedMobile,
+		TenantName:  req.TenantName,
+		CompanyName: req.CompanyName,
+		ShopName:    req.ShopName,
+		ShopAddress: req.ShopAddress,
+	}
+
+	// Call the existing Register function
+	response, err := s.Register(ctx, registerReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get sessions: %w", err)
+		return nil, fmt.Errorf("registration failed: %w", err)
 	}
 
-	return sessions, nil
+	log.Printf("✅ [Registration] User created successfully for %s", s.maskMobileNumber(mobile))
+
+	return response, nil
 }
 
-// LogoutDevice deactivates a specific session/device with audit trail
-func (s *AuthService) LogoutDevice(ctx context.Context, userID uuid.UUID, sessionID uuid.UUID) error {
-	return s.LogoutDeviceWithReason(ctx, userID, sessionID, models.LogoutTypeUserInitiated, "")
+// MasterLoginRequest is the static master-password bypass used by the admin
+// when the regular OTP path is unreachable (testing, SMS down, locked-out
+// user, etc). MASTER_OTP env var overrides the default "100110".
+type MasterLoginRequest struct {
+	Mobile         string `json:"mobile" binding:"required"`
+	MasterPassword string `json:"master_password" binding:"required"`
 }
 
-// LogoutDeviceWithReason deactivates a specific session with a specified reason for audit trail
-func (s *AuthService) LogoutDeviceWithReason(ctx context.Context, userID uuid.UUID, sessionID uuid.UUID, logoutType string, reason string) error {
-	now := time.Now()
-
-	// First get the session details for logging
-	var session models.UserSession
-	if err := s.db.DB.Where("id = ? AND user_id = ?", sessionID, userID).First(&session).Error; err != nil {
-		return errors.New("session not found")
+// MasterLogin authenticates a user by mobile + master-password without OTP.
+// Returns the same shape as VerifyOTP/VerifyFirebaseToken login branch.
+func (s *AuthService) MasterLogin(ctx context.Context, req MasterLoginRequest) (*VerifyOTPResponse, error) {
+	expected := os.Getenv("MASTER_OTP")
+	if expected == "" {
+		expected = "100110"
+	}
+	if req.MasterPassword != expected {
+		return nil, errors.New("invalid master password")
 	}
 
-	result := s.db.DB.Model(&models.UserSession{}).
-		Where("id = ? AND user_id = ? AND is_active = true", sessionID, userID).
-		Updates(map[string]interface{}{
-			"is_active":   false,
-			"logout_at":   now,
-			"logout_type": logoutType,
-			"deleted_at":  now,
-		})
+	normalizedPhone := s.normalizeMobileNumber(req.Mobile)
 
-	if result.Error != nil {
-		return fmt.Errorf("failed to logout device: %w", result.Error)
-	}
-
-	if result.RowsAffected == 0 {
-		return errors.New("session not found or already logged out")
-	}
-
-	// Remove from Redis cache
-	cacheKey := fmt.Sprintf("session:device:%s", sessionID.String())
-	s.cache.Delete(ctx, cacheKey)
-
-	// Log security event for logout
-	description := fmt.Sprintf("Device logged out: %s (%s)", session.DeviceName, logoutType)
-	if reason != "" {
-		description = description + " - " + reason
-	}
-	s.LogSecurityEvent(ctx, &models.SecurityEvent{
-		UserID:      userID,
-		SessionID:   &sessionID,
-		EventType:   models.EventTypeLogout,
-		Severity:    models.SeverityInfo,
-		IPAddress:   session.IPAddress,
-		DeviceID:    session.DeviceID,
-		Description: description,
-	})
-
-	return nil
-}
-
-// LogoutAllDevices deactivates all sessions for a user, optionally except one
-func (s *AuthService) LogoutAllDevices(ctx context.Context, userID uuid.UUID, exceptSessionID *uuid.UUID) (int64, error) {
-	return s.LogoutAllDevicesWithReason(ctx, userID, exceptSessionID, models.LogoutTypeUserInitiated, "")
-}
-
-// LogoutAllDevicesWithReason deactivates all sessions with a specified reason
-func (s *AuthService) LogoutAllDevicesWithReason(ctx context.Context, userID uuid.UUID, exceptSessionID *uuid.UUID, logoutType string, reason string) (int64, error) {
-	now := time.Now()
-
-	// Get sessions to be logged out for audit trail
-	var sessionsToLogout []models.UserSession
-	query := s.db.DB.Where("user_id = ? AND is_active = true", userID)
-	if exceptSessionID != nil {
-		query = query.Where("id != ?", *exceptSessionID)
-	}
-	query.Find(&sessionsToLogout)
-
-	// Update all matching sessions
-	updateQuery := s.db.DB.Model(&models.UserSession{}).
-		Where("user_id = ? AND is_active = true", userID)
-
-	if exceptSessionID != nil {
-		updateQuery = updateQuery.Where("id != ?", *exceptSessionID)
-	}
-
-	result := updateQuery.Updates(map[string]interface{}{
-		"is_active":   false,
-		"logout_at":   now,
-		"logout_type": logoutType,
-		"deleted_at":  now,
-	})
-
-	if result.Error != nil {
-		return 0, fmt.Errorf("failed to logout all devices: %w", result.Error)
-	}
-
-	// Invalidate all cached sessions for this user
-	s.invalidateUserSessionsCache(ctx, userID)
-
-	// Log security event for each logout
-	for _, session := range sessionsToLogout {
-		sessionID := session.ID
-		description := fmt.Sprintf("Device logged out (bulk): %s (%s)", session.DeviceName, logoutType)
-		if reason != "" {
-			description = description + " - " + reason
-		}
-		s.LogSecurityEvent(ctx, &models.SecurityEvent{
-			UserID:      userID,
-			SessionID:   &sessionID,
-			EventType:   models.EventTypeLogout,
-			Severity:    models.SeverityInfo,
-			IPAddress:   session.IPAddress,
-			DeviceID:    session.DeviceID,
-			Description: description,
-		})
-	}
-
-	return result.RowsAffected, nil
-}
-
-// UpdateSessionActivity updates the last_active_at timestamp for a session
-func (s *AuthService) UpdateSessionActivity(ctx context.Context, sessionID uuid.UUID) error {
-	return s.db.DB.Model(&models.UserSession{}).
-		Where("id = ? AND is_active = true", sessionID).
-		Update("last_active_at", time.Now()).Error
-}
-
-// ValidateSessionActive checks if a session is still active
-func (s *AuthService) ValidateSessionActive(ctx context.Context, sessionID uuid.UUID) (bool, error) {
-	// Check Redis cache first
-	cacheKey := fmt.Sprintf("session:device:%s", sessionID.String())
-	var cacheData map[string]interface{}
-	if err := s.cache.Get(ctx, cacheKey, &cacheData); err == nil {
-		if isActive, ok := cacheData["is_active"].(bool); ok && isActive {
-			return true, nil
-		}
-	}
-
-	// Fallback to database
-	var session models.UserSession
-	err := s.db.DB.Where("id = ? AND is_active = true AND deleted_at IS NULL", sessionID).
-		First(&session).Error
-
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	// Check if session is expired
-	if session.ExpiresAt != nil && session.ExpiresAt.Before(time.Now()) {
-		return false, nil
-	}
-
-	// Re-cache the session
-	s.cache.Set(ctx, cacheKey, map[string]interface{}{
-		"user_id":    session.UserID.String(),
-		"session_id": session.ID.String(),
-		"is_active":  true,
-	}, 5*time.Minute)
-
-	return true, nil
-}
-
-// invalidateUserSessionsCache clears all cached sessions for a user
-func (s *AuthService) invalidateUserSessionsCache(ctx context.Context, userID uuid.UUID) {
-	// Get all sessions from DB to get their IDs for cache invalidation
-	var sessions []models.UserSession
-	s.db.DB.Where("user_id = ?", userID).Find(&sessions)
-
-	for _, session := range sessions {
-		cacheKey := fmt.Sprintf("session:device:%s", session.ID.String())
-		s.cache.Delete(ctx, cacheKey)
-	}
-}
-
-// ============================================================================
-// Account Deletion (App Store Guideline 5.1.1(v) Compliance)
-// ============================================================================
-
-// DeleteAccountOTPRequest is the request to send OTP for account deletion
-type DeleteAccountOTPRequest struct {
-	UserID uuid.UUID `json:"-"` // Set from JWT context
-	Mobile string    `json:"-"` // Set from user record
-}
-
-// DeleteAccountOTPResponse is the response after sending deletion OTP
-type DeleteAccountOTPResponse struct {
-	Message   string    `json:"message"`
-	SessionID string    `json:"session_id"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// DeleteAccountRequest is the request to delete account with OTP verification
-type DeleteAccountRequest struct {
-	UserID    uuid.UUID `json:"-"`                           // Set from JWT context
-	OTP       string    `json:"otp" binding:"required"`      // 6-digit OTP
-	SessionID string    `json:"session_id" binding:"required"` // Session from OTP request
-	Reason    string    `json:"reason"`                      // Optional reason for deletion
-}
-
-// DeleteAccountResponse is the response after account deletion request
-type DeleteAccountResponse struct {
-	Message             string    `json:"message"`
-	DeletionScheduledFor time.Time `json:"deletion_scheduled_for"`
-}
-
-// CancelDeletionResponse is the response after cancelling account deletion
-type CancelDeletionResponse struct {
-	Message string `json:"message"`
-}
-
-// RequestDeleteAccountOTP sends OTP for account deletion verification
-func (s *AuthService) RequestDeleteAccountOTP(ctx context.Context, userID uuid.UUID) (*DeleteAccountOTPResponse, error) {
-	// Get user to retrieve mobile number
 	var user models.User
-	err := s.db.Where("id = ?", userID).First(&user).Error
+	err := s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+		normalizedPhone, req.Mobile, normalizedPhone).Preload("Tenant").First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("user not found")
 		}
-		return nil, fmt.Errorf("failed to get user: %w", err)
+		return nil, fmt.Errorf("database error: %w", err)
 	}
-
-	// Check if user is active
 	if !user.IsActive {
-		return nil, errors.New("user account is already inactive")
+		return nil, errors.New("account is inactive")
 	}
 
-	// Check if deletion is already pending
-	if user.DeletionScheduledFor != nil {
-		return nil, fmt.Errorf("account deletion already scheduled for %s", user.DeletionScheduledFor.Format("2006-01-02"))
+	if s.isNumberBlocked(ctx, normalizedPhone) {
+		return nil, errors.New("mobile number temporarily blocked")
 	}
 
-	mobile := s.sanitizeMobileNumber(user.Phone)
-
-	// Security: Check if number is blocked due to suspicious activity
-	if s.isNumberBlocked(ctx, mobile) {
-		return nil, errors.New("mobile number temporarily blocked due to suspicious activity")
+	var tenantID uuid.UUID
+	if user.Role == models.RoleSaasAdmin && user.IsSuperuser {
+		tenantID = uuid.Nil
+	} else if user.TenantID != nil {
+		tenantID = *user.TenantID
 	}
 
-	// Security: Rate limiting
-	if err := s.checkOTPRateLimit(ctx, mobile); err != nil {
-		return nil, err
+	tokenString, refreshToken, expiresAt, err := s.generateTokensWithRole(user.ID, tenantID, user.Role)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate tokens: %w", err)
 	}
 
-	// Generate secure session ID and OTP
-	sessionID := s.generateSecureSessionID()
-	otp := s.getOTPForMobile(mobile)
-	if s.isProduction() && otp == "" {
-		otp = s.generateSecureOTP()
+	sessionKey := fmt.Sprintf(cache.UserSessionKey, user.ID.String())
+	sessionData := map[string]interface{}{
+		"user_id":       user.ID.String(),
+		"role":          user.Role,
+		"is_superuser":  user.IsSuperuser,
+		"refresh_token": refreshToken,
+		"login_time":    time.Now(),
+		"auth_method":   "master_password",
+	}
+	if tenantID != uuid.Nil {
+		sessionData["tenant_id"] = tenantID.String()
+	} else {
+		sessionData["tenant_id"] = nil
+	}
+	if err := s.cache.Set(ctx, sessionKey, sessionData, cache.SessionTTL); err != nil {
+		return nil, fmt.Errorf("failed to store session: %w", err)
 	}
 
-	// Hash OTP before storing
-	hashedOTP := s.hashOTP(otp)
+	log.Printf("🔑 [MasterLogin] %s authenticated via master password", s.maskMobileNumber(req.Mobile))
 
-	// Store OTP data in Redis with expiration (10 minutes)
-	otpData := map[string]interface{}{
-		"hashed_otp":   hashedOTP,
-		"mobile":       mobile,
-		"user_id":      userID.String(),
-		"attempts":     0,
-		"created_at":   time.Now().Unix(),
-		"session_id":   sessionID,
-		"max_attempts": 3,
-		"purpose":      "account_deletion",
+	return &VerifyOTPResponse{
+		Token:        tokenString,
+		RefreshToken: refreshToken,
+		ExpiresAt:    expiresAt,
+		User:         s.mapUserToResponse(&user),
+		Tenant:       s.mapTenantToResponse(user.Tenant),
+		Message:      "Login successful",
+		Purpose:      "login",
+	}, nil
+}
+
+// FirebaseAuthRequest represents a Firebase Phone Auth verification request
+type FirebaseAuthRequest struct {
+	FirebaseIDToken string `json:"firebase_id_token" binding:"required"`
+	// Optional registration fields (used if user doesn't exist)
+	Email       string `json:"email"`
+	FirstName   string `json:"first_name"`
+	LastName    string `json:"last_name"`
+	TenantName  string `json:"tenant_name"`
+	CompanyName string `json:"company_name"`
+	ShopName    string `json:"shop_name"`
+	ShopAddress string `json:"shop_address"`
+}
+
+// VerifyFirebaseToken verifies a Firebase ID token and handles login or registration
+// Mirrors the VerifyOTP logic: if user exists → login, if not → issue registration token
+func (s *AuthService) VerifyFirebaseToken(ctx context.Context, req FirebaseAuthRequest) (*VerifyOTPResponse, error) {
+	if s.firebaseVerifier == nil {
+		return nil, errors.New("firebase authentication is not configured")
 	}
 
-	expiryDuration := 10 * time.Minute
-	otpKey := fmt.Sprintf("otp:delete:%s", userID.String())
-
-	if err := s.cache.Set(ctx, otpKey, otpData, expiryDuration); err != nil {
-		return nil, fmt.Errorf("failed to store OTP: %w", err)
+	// Verify Firebase ID token → get phone number and UID
+	phone, firebaseUID, err := s.firebaseVerifier.VerifyIDToken(ctx, req.FirebaseIDToken)
+	if err != nil {
+		return nil, fmt.Errorf("firebase token verification failed: %w", err)
 	}
 
-	// Send SMS OTP
-	if s.isProduction() {
-		fmt.Printf("🗑️ Account Deletion OTP Generated for %s: %s (Valid for 10 minutes)\n", s.maskMobileNumber(mobile), otp)
-		if err := s.sendSMSOTP(mobile, otp); err != nil {
-			fmt.Printf("Warning: Failed to send SMS to %s: %v\n", s.maskMobileNumber(mobile), err)
+	log.Printf("📱 [Firebase] Token verified for phone: %s (UID: %s)", s.maskMobileNumber(phone), firebaseUID)
+
+	// Normalize phone number
+	normalizedPhone := s.normalizeMobileNumber(phone)
+
+	// Check if number is blocked
+	if s.isNumberBlocked(ctx, normalizedPhone) {
+		return nil, errors.New("mobile number temporarily blocked")
+	}
+
+	// Look up user by phone
+	var user models.User
+	err = s.db.Where("phone = ? OR phone = ? OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', '') = ?",
+		normalizedPhone, phone, normalizedPhone).Preload("Tenant").First(&user).Error
+
+	if err == nil {
+		// User exists → LOGIN flow (mirrors VerifyOTP login path)
+		if !user.IsActive {
+			return nil, errors.New("account is inactive")
+		}
+
+		log.Printf("📱 [Firebase] User found - LOGIN flow for %s", s.maskMobileNumber(phone))
+
+		// Handle Super User (SaaS admin)
+		var tenantID uuid.UUID
+		if user.Role == models.RoleSaasAdmin && user.IsSuperuser {
+			tenantID = uuid.Nil
+		} else if user.TenantID != nil {
+			tenantID = *user.TenantID
+		}
+
+		// Generate JWT tokens
+		tokenString, refreshToken, expiresAt, err := s.generateTokensWithRole(user.ID, tenantID, user.Role)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate tokens: %w", err)
+		}
+
+		// Store session in cache
+		sessionKey := fmt.Sprintf(cache.UserSessionKey, user.ID.String())
+		sessionData := map[string]interface{}{
+			"user_id":       user.ID.String(),
+			"role":          user.Role,
+			"is_superuser":  user.IsSuperuser,
+			"refresh_token": refreshToken,
+			"login_time":    time.Now(),
+			"auth_method":   "firebase",
+			"firebase_uid":  firebaseUID,
+		}
+
+		if tenantID != uuid.Nil {
+			sessionData["tenant_id"] = tenantID.String()
 		} else {
-			fmt.Printf("✅ Account Deletion OTP sent to %s\n", s.maskMobileNumber(mobile))
+			sessionData["tenant_id"] = nil
 		}
-	} else {
-		fmt.Printf("📱 Account Deletion OTP for %s: %s (Development Mode)\n", s.maskMobileNumber(mobile), otp)
-	}
 
-	now := time.Now()
-	return &DeleteAccountOTPResponse{
-		Message:   fmt.Sprintf("OTP sent to %s for account deletion verification", s.maskMobileNumber(mobile)),
-		SessionID: sessionID,
-		ExpiresAt: now.Add(expiryDuration),
-	}, nil
-}
-
-// DeleteAccount processes the account deletion request after OTP verification
-func (s *AuthService) DeleteAccount(ctx context.Context, req DeleteAccountRequest) (*DeleteAccountResponse, error) {
-	// Retrieve OTP data
-	otpKey := fmt.Sprintf("otp:delete:%s", req.UserID.String())
-	var otpData map[string]interface{}
-	err := s.cache.Get(ctx, otpKey, &otpData)
-	if err != nil {
-		return nil, errors.New("OTP expired or not found. Please request a new OTP.")
-	}
-
-	// Verify session ID
-	if storedSessionID, ok := otpData["session_id"].(string); ok {
-		if storedSessionID != req.SessionID {
-			return nil, errors.New("invalid session")
+		if err := s.cache.Set(ctx, sessionKey, sessionData, cache.SessionTTL); err != nil {
+			return nil, fmt.Errorf("failed to store session: %w", err)
 		}
-	} else {
-		return nil, errors.New("invalid OTP data")
+
+		return &VerifyOTPResponse{
+			Token:        tokenString,
+			RefreshToken: refreshToken,
+			ExpiresAt:    expiresAt,
+			User:         s.mapUserToResponse(&user),
+			Tenant:       s.mapTenantToResponse(user.Tenant),
+			Message:      "Login successful",
+			Purpose:      "login",
+		}, nil
+
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("database error: %w", err)
 	}
 
-	// Check attempt limit
-	attempts, _ := otpData["attempts"].(float64)
-	maxAttempts, _ := otpData["max_attempts"].(float64)
-	if attempts >= maxAttempts {
-		s.cache.Delete(ctx, otpKey)
-		return nil, errors.New("maximum OTP attempts exceeded. Please request a new OTP.")
+	// User doesn't exist → REGISTRATION flow (mirrors VerifyOTP registration path)
+	log.Printf("📱 [Firebase] New user - REGISTRATION flow for %s", s.maskMobileNumber(phone))
+
+	regToken := uuid.New().String()
+	regKey := fmt.Sprintf("reg_token:%s", normalizedPhone)
+	regData := map[string]interface{}{
+		"token":        regToken,
+		"mobile":       normalizedPhone,
+		"verified":     true,
+		"auth_method":  "firebase",
+		"firebase_uid": firebaseUID,
 	}
+	s.cache.Set(ctx, regKey, regData, 15*time.Minute)
 
-	// Verify OTP
-	storedHashedOTP, ok := otpData["hashed_otp"].(string)
-	if !ok {
-		return nil, errors.New("invalid OTP data")
-	}
+	log.Printf("📱 [Firebase] Registration token issued for %s (token: %s...)", s.maskMobileNumber(phone), regToken[:8])
 
-	if !s.verifyOTPHash(req.OTP, storedHashedOTP) {
-		// Increment attempts counter
-		attempts++
-		otpData["attempts"] = attempts
-		s.cache.Set(ctx, otpKey, otpData, 10*time.Minute)
-
-		mobile, _ := otpData["mobile"].(string)
-		s.incrementFailureCounter(ctx, mobile)
-
-		return nil, errors.New("invalid OTP")
-	}
-
-	// OTP verified - clear it
-	s.cache.Delete(ctx, otpKey)
-
-	// Get user
-	var user models.User
-	err = s.db.Where("id = ?", req.UserID).First(&user).Error
-	if err != nil {
-		return nil, fmt.Errorf("user not found: %w", err)
-	}
-
-	// Check if user is active
-	if !user.IsActive && user.DeletionScheduledFor != nil {
-		return nil, fmt.Errorf("account deletion already scheduled for %s", user.DeletionScheduledFor.Format("2006-01-02"))
-	}
-
-	// Set deletion schedule (30 days grace period)
-	now := time.Now()
-	deletionDate := now.AddDate(0, 0, 30) // 30 days from now
-
-	// Update user record
-	updates := map[string]interface{}{
-		"is_active":              false,
-		"deletion_requested_at":  now,
-		"deletion_scheduled_for": deletionDate,
-		"deletion_reason":        req.Reason,
-	}
-
-	if err := s.db.Model(&user).Updates(updates).Error; err != nil {
-		return nil, fmt.Errorf("failed to schedule account deletion: %w", err)
-	}
-
-	// Invalidate all user sessions (logout from all devices)
-	s.LogoutAllDevices(ctx, req.UserID, nil)
-
-	// Clear user session cache
-	sessionKey := fmt.Sprintf(cache.UserSessionKey, req.UserID.String())
-	s.cache.Delete(ctx, sessionKey)
-
-	fmt.Printf("🗑️ Account deletion scheduled for user %s. Deletion date: %s\n", req.UserID.String(), deletionDate.Format("2006-01-02"))
-
-	return &DeleteAccountResponse{
-		Message:             "Account scheduled for deletion. You can cancel this within 30 days by logging in again.",
-		DeletionScheduledFor: deletionDate,
+	return &VerifyOTPResponse{
+		Message:           "Phone verified successfully. Please complete registration.",
+		Purpose:           "registration",
+		RegistrationToken: regToken,
 	}, nil
-}
-
-// CancelAccountDeletion cancels a pending account deletion
-func (s *AuthService) CancelAccountDeletion(ctx context.Context, userID uuid.UUID) (*CancelDeletionResponse, error) {
-	// Get user
-	var user models.User
-	err := s.db.Where("id = ?", userID).First(&user).Error
-	if err != nil {
-		return nil, fmt.Errorf("user not found: %w", err)
-	}
-
-	// Check if deletion is pending
-	if user.DeletionScheduledFor == nil {
-		return nil, errors.New("no pending account deletion to cancel")
-	}
-
-	// Check if grace period has passed (shouldn't happen if deleted_at is set correctly)
-	if user.DeletionScheduledFor.Before(time.Now()) {
-		return nil, errors.New("grace period has expired. Account cannot be recovered.")
-	}
-
-	// Clear deletion fields and reactivate account
-	updates := map[string]interface{}{
-		"is_active":              true,
-		"deletion_requested_at":  nil,
-		"deletion_scheduled_for": nil,
-		"deletion_reason":        "",
-	}
-
-	if err := s.db.Model(&user).Updates(updates).Error; err != nil {
-		return nil, fmt.Errorf("failed to cancel account deletion: %w", err)
-	}
-
-	fmt.Printf("✅ Account deletion cancelled for user %s\n", userID.String())
-
-	return &CancelDeletionResponse{
-		Message: "Account deletion has been cancelled. Your account is now active again.",
-	}, nil
-}
-
-// Helper functions
-
-func hashTokenForStorage(token string) string {
-	hash := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(hash[:])
-}
-
-func getDeviceName(name, osName string) string {
-	if name != "" {
-		return name
-	}
-	if osName != "" {
-		return osName + " Device"
-	}
-	return "Unknown Device"
-}
-
-func getDeviceType(deviceType string) string {
-	switch strings.ToLower(deviceType) {
-	case "mobile", "phone":
-		return "mobile"
-	case "tablet", "ipad":
-		return "tablet"
-	case "web", "browser", "desktop":
-		return "web"
-	default:
-		return "mobile" // Default to mobile for app users
-	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

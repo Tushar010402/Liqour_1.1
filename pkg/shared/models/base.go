@@ -35,22 +35,48 @@ const (
 	StatusPending  = "pending"
 	StatusApproved = "approved"
 	StatusRejected = "rejected"
-	StatusReverted = "reverted"
 	StatusActive   = "active"
 	StatusInactive = "inactive"
 )
 
-// User roles - ordered by hierarchy level (lowest to highest)
-// Shop access: salesman = assigned shop only, all others = all shops
+// User roles
 const (
-	RoleSalesman         = "salesman"          // Level 1 - restricted to assigned shop
-	RoleExecutive        = "executive"         // Level 2 - all shops
-	RoleAssistantManager = "assistant_manager" // Level 3 - all shops
-	RoleManager          = "manager"           // Level 4 - all shops
-	RoleAdmin            = "admin"             // Level 5 - all shops
-	RoleOwner            = "owner"             // Level 6 - all shops (tenant owner)
-	RoleSaasAdmin        = "saas_admin"        // Super user - all tenants, all shops
+	RoleAdmin            = "admin"
+	RoleManager          = "manager"
+	RoleExecutive        = "executive"
+	RoleSalesman         = "salesman"
+	RoleAssistantManager = "assistant_manager"
+	RoleSaasAdmin        = "saas_admin"
 )
+
+// RoleHierarchy maps roles to their level (lower number = higher authority)
+var RoleHierarchy = map[string]int{
+	RoleSaasAdmin:        0,
+	RoleAdmin:            1,
+	RoleManager:          2,
+	RoleAssistantManager: 3,
+	RoleExecutive:        4,
+	RoleSalesman:         5,
+}
+
+// GetRoleLevel returns the hierarchy level for a role. Returns -1 if unknown.
+func GetRoleLevel(role string) int {
+	level, exists := RoleHierarchy[role]
+	if !exists {
+		return -1
+	}
+	return level
+}
+
+// CanManageRole returns true if actorRole has strictly higher authority than targetRole.
+func CanManageRole(actorRole, targetRole string) bool {
+	actorLevel := GetRoleLevel(actorRole)
+	targetLevel := GetRoleLevel(targetRole)
+	if actorLevel < 0 || targetLevel < 0 {
+		return false
+	}
+	return actorLevel < targetLevel
+}
 
 // Payment methods
 const (

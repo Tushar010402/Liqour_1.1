@@ -37,18 +37,6 @@ type Sale struct {
 	ApprovedByID *uuid.UUID `json:"approved_by_id" gorm:"type:uuid"`
 	ApprovedBy   *User      `json:"approved_by,omitempty" gorm:"foreignKey:ApprovedByID"`
 
-	// Rejection tracking
-	RejectedAt      *time.Time `json:"rejected_at"`
-	RejectedByID    *uuid.UUID `json:"rejected_by_id" gorm:"type:uuid"`
-	RejectedBy      *User      `json:"rejected_by,omitempty" gorm:"foreignKey:RejectedByID"`
-	RejectionReason string     `json:"rejection_reason"`
-
-	// Revert tracking (admin-only operation to undo approved sales)
-	RevertedAt    *time.Time `json:"reverted_at"`
-	RevertedByID  *uuid.UUID `json:"reverted_by_id" gorm:"type:uuid"`
-	RevertedBy    *User      `json:"reverted_by,omitempty" gorm:"foreignKey:RevertedByID"`
-	RevertReason  string     `json:"revert_reason"`
-
 	// Created by
 	CreatedByID uuid.UUID `json:"created_by_id" gorm:"type:uuid;not null"`
 	CreatedBy   *User     `json:"created_by,omitempty" gorm:"foreignKey:CreatedByID"`
@@ -57,10 +45,6 @@ type Sale struct {
 
 	// OCR and image processing
 	ParchaImage string `json:"parcha_image"` // Receipt/bill image
-
-	// Reminder tracking (prevents duplicate notifications)
-	LastReminderLevel  int        `json:"last_reminder_level" gorm:"default:0"`
-	LastReminderSentAt *time.Time `json:"last_reminder_sent_at"`
 
 	// Relationships
 	Items       []SaleItem       `json:"items,omitempty" gorm:"foreignKey:SaleID"`
@@ -153,18 +137,17 @@ type SaleReturnItem struct {
 type DailySalesRecord struct {
 	TenantModel
 	RecordDate time.Time  `json:"record_date" gorm:"not null"`
-	ShopID     uuid.UUID  `json:"shop_id" gorm:"type:uuid;not null"`
+	ShopID     uuid.UUID  `json:"shop_id" gorm:"column:shop_id;type:uuid;not null"`
 	Shop       *Shop      `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
-	SalesmanID *uuid.UUID `json:"salesman_id" gorm:"type:uuid"`
+	SalesmanID *uuid.UUID `json:"salesman_id" gorm:"column:salesman_id;type:uuid"`
 	Salesman   *Salesman  `json:"salesman,omitempty" gorm:"foreignKey:SalesmanID"`
 
 	// Financial totals
-	TotalSalesAmount   float64 `json:"total_sales_amount" gorm:"not null"`
-	TotalCashAmount    float64 `json:"total_cash_amount" gorm:"default:0"`
-	TotalCardAmount    float64 `json:"total_card_amount" gorm:"default:0"`
-	TotalUpiAmount     float64 `json:"total_upi_amount" gorm:"default:0"`
-	TotalCreditAmount  float64 `json:"total_credit_amount" gorm:"default:0"`
-	TotalExpenseAmount float64 `json:"total_expense_amount" gorm:"default:0"` // NEW: Total expenses
+	TotalSalesAmount  float64 `json:"total_sales_amount" gorm:"not null"`
+	TotalCashAmount   float64 `json:"total_cash_amount" gorm:"default:0"`
+	TotalCardAmount   float64 `json:"total_card_amount" gorm:"default:0"`
+	TotalUpiAmount    float64 `json:"total_upi_amount" gorm:"default:0"`
+	TotalCreditAmount float64 `json:"total_credit_amount" gorm:"default:0"`
 
 	// Status and approval
 	Status       string     `json:"status" gorm:"default:'pending'"` // pending, approved, rejected
@@ -178,53 +161,24 @@ type DailySalesRecord struct {
 
 	Notes string `json:"notes"`
 
-	// Image attachments (for receipt/bill photos)
-	ImageURLs string `json:"image_urls" gorm:"type:text"` // JSON array of URLs stored as text
+	// Receipt images (URLs of uploaded receipt photos for verification)
+	ReceiptImages JSONStringList `json:"receipt_images,omitempty" gorm:"type:jsonb;default:'[]'"`
 
-	// Location tracking (optional)
-	Latitude           *float64   `json:"latitude,omitempty" gorm:"column:latitude;type:decimal(10,8)"`
-	Longitude          *float64   `json:"longitude,omitempty" gorm:"column:longitude;type:decimal(11,8)"`
-	LocationAccuracy   *string    `json:"location_accuracy,omitempty" gorm:"column:location_accuracy;size:20"`
-	LocationCapturedAt *time.Time `json:"location_captured_at,omitempty" gorm:"column:location_captured_at"`
+	// Stock alert tracking (populated by Smart Sale when stock discrepancies exist)
+	HasAlerts  bool `json:"has_alerts" gorm:"default:false"`
+	AlertCount int  `json:"alert_count" gorm:"default:0"`
 
-	// AI Validation Fields
-	OCRSessionID          *uuid.UUID `json:"ocr_session_id,omitempty" gorm:"type:uuid"`
-	ValidationStatus      string     `json:"validation_status" gorm:"default:'pending';size:20"`
-	ValidationResult      *string    `json:"validation_result,omitempty" gorm:"type:jsonb"` // JSONB stored as string
-	ValidatedAt           *time.Time `json:"validated_at,omitempty"`
-	ValidationTriggeredAt *time.Time `json:"validation_triggered_at,omitempty"`
+	// Idempotency key to prevent duplicate submissions from network retries or double-taps
+	IdempotencyKey *string `json:"idempotency_key,omitempty" gorm:"column:idempotency_key;uniqueIndex:idx_daily_sales_idempotency_key,where:idempotency_key IS NOT NULL AND deleted_at IS NULL"`
 
-	// Auto-learning feedback
-	ValidationConfirmed bool       `json:"validation_confirmed" gorm:"default:false"`
-	ConfirmedByID       *uuid.UUID `json:"confirmed_by_id,omitempty" gorm:"type:uuid"`
-	ConfirmedBy         *User      `json:"confirmed_by,omitempty" gorm:"foreignKey:ConfirmedByID"`
-	ConfirmedAt         *time.Time `json:"confirmed_at,omitempty"`
-	FeedbackNotes       string     `json:"feedback_notes,omitempty"`
-
-	// Revert tracking (admin-only operation to undo approved daily sales)
-	RevertedAt    *time.Time `json:"reverted_at,omitempty"`
-	RevertedByID  *uuid.UUID `json:"reverted_by_id,omitempty" gorm:"type:uuid"`
-	RevertedBy    *User      `json:"reverted_by,omitempty" gorm:"foreignKey:RevertedByID"`
-	RevertReason  string     `json:"revert_reason,omitempty"`
-
-	// Reminder tracking (prevents duplicate notifications)
-	LastReminderLevel  int        `json:"last_reminder_level" gorm:"default:0"`
-	LastReminderSentAt *time.Time `json:"last_reminder_sent_at"`
+	// v1.0.124: SHA256 of canonical apply-payload items (client-computed).
+	// Surfaced on summary fetch so Flutter can verify "what server saved =
+	// what I submitted" round-trip integrity. Mismatch is a hard tamper
+	// signal and must be surfaced to the user — not silent.
+	ClientPayloadHash *string `json:"client_payload_hash,omitempty" gorm:"column:client_payload_hash"`
 
 	// Relationships
-	Items    []DailySalesItem    `json:"items,omitempty" gorm:"foreignKey:DailySalesRecordID"`
-	Expenses []DailySalesExpense `json:"expenses,omitempty" gorm:"foreignKey:DailySalesRecordID"` // NEW: Expense breakdown
-}
-
-// DailySalesExpense represents individual expense entries within a daily sales record
-type DailySalesExpense struct {
-	TenantModel
-	DailySalesRecordID uuid.UUID         `json:"daily_sales_record_id" gorm:"type:uuid;not null"`
-	DailySalesRecord   *DailySalesRecord `json:"daily_sales_record,omitempty" gorm:"foreignKey:DailySalesRecordID"`
-
-	HeaderID   string  `json:"header_id" gorm:"size:100;not null"`   // e.g., "godam_charges", "transport"
-	HeaderName string  `json:"header_name" gorm:"size:255;not null"` // e.g., "Godam Charges", "Transport"
-	Amount     float64 `json:"amount" gorm:"not null;default:0"`
+	Items []DailySalesItem `json:"items,omitempty" gorm:"foreignKey:DailySalesRecordID"`
 }
 
 // DailySalesItem represents individual product sales within a daily record
@@ -235,9 +189,10 @@ type DailySalesItem struct {
 	ProductID          uuid.UUID         `json:"product_id" gorm:"type:uuid;not null"`
 	Product            *Product          `json:"product,omitempty" gorm:"foreignKey:ProductID"`
 
-	Quantity    int     `json:"quantity" gorm:"not null"`
-	UnitPrice   float64 `json:"unit_price" gorm:"not null"`
-	TotalAmount float64 `json:"total_amount" gorm:"not null"`
+	Quantity     int     `json:"quantity" gorm:"not null"`
+	QuantitySold int     `json:"quantity_sold" gorm:"default:0"`
+	UnitPrice    float64 `json:"unit_price" gorm:"not null"`
+	TotalAmount  float64 `json:"total_amount" gorm:"not null"`
 
 	// Payment breakdown for this item
 	CashAmount   float64 `json:"cash_amount" gorm:"default:0"`
@@ -245,18 +200,42 @@ type DailySalesItem struct {
 	UpiAmount    float64 `json:"upi_amount" gorm:"default:0"`
 	CreditAmount float64 `json:"credit_amount" gorm:"default:0"`
 
-	// Stock audit trail - captured at creation time for inventory tracking
-	OpeningStock int `json:"opening_stock" gorm:"default:0"` // Stock BEFORE this sale was recorded
-	ClosingStock int `json:"closing_stock" gorm:"default:0"` // Expected stock AFTER (opening - quantity)
+	// Stock snapshot captured at creation time (locked values)
+	OpeningStock int `json:"opening_stock" gorm:"default:0"`
+	ClosingStock int `json:"closing_stock" gorm:"default:0"`
 
-	// OCR-extracted data (from Smart Sale / GPT-5.2) - for manager review
-	// These fields store what was extracted from the image so managers can compare with system data
-	OCRBrandName string  `json:"ocr_brand_name" gorm:"size:255"`        // Brand name extracted from image
-	OCRSize      string  `json:"ocr_size" gorm:"size:50"`               // Size extracted from image (e.g., "375ML")
-	OCRReceipt   int     `json:"ocr_receipt" gorm:"default:0"`          // New stock received (from image)
-	OCRTotal     int     `json:"ocr_total" gorm:"default:0"`            // Opening + Receipt (from image)
-	DBStock      int     `json:"db_stock" gorm:"default:0"`             // Stock in database at time of submission (for comparison)
-	OCRRate      float64 `json:"ocr_rate" gorm:"default:0"`             // Rate from image (for comparison with UnitPrice)
+	// Stock alert (populated by Smart Sale when stock discrepancy exists for this item)
+	StockAlert    string `json:"stock_alert,omitempty" gorm:"type:text"`
+	StockAlertQty int    `json:"stock_alert_qty,omitempty" gorm:"default:0"`
+
+	// v1.0.124: row-level audit. Source carries how the row was produced —
+	// "main" (AI extracted), "recovery_pass", "setup_rescue" (auto-injected
+	// from approved stock setup, user-confirmed), "manual_add" (user-added
+	// from inventory picker). ClientRowID is a UUID Flutter assigned when
+	// the row entered the review screen so the same row can be traced
+	// across re-extracts, restores, and resubmits.
+	Source      string  `json:"source,omitempty" gorm:"type:varchar(32);index:idx_dsi_source,where:source IS NOT NULL"`
+	ClientRowID *string `json:"client_row_id,omitempty" gorm:"type:uuid"`
+
+	// v1.0.133-r6 — AI-extracted register column values, snapshotted at the
+	// time of insert. Pre-r6 these columns existed in the table (added by
+	// an old migration) but the struct never declared them, so GORM never
+	// wrote to them — every saved row had ocr_total=0 and ocr_rate=0,
+	// erasing the audit trail. Now persisted on every insert. Explicit
+	// gorm column tags after the v1.0.132 last_m_rpchange_at lesson.
+	OcrBrandName string  `json:"ocr_brand_name,omitempty" gorm:"column:ocr_brand_name;type:varchar(255)"`
+	OcrSize      string  `json:"ocr_size,omitempty"       gorm:"column:ocr_size;type:varchar(50)"`
+	OcrReceipt   int     `json:"ocr_receipt,omitempty"    gorm:"column:ocr_receipt;default:0"`
+	OcrTotal     int     `json:"ocr_total,omitempty"      gorm:"column:ocr_total;default:0"`
+	OcrRate      float64 `json:"ocr_rate,omitempty"       gorm:"column:ocr_rate;type:numeric(10,2);default:0"`
+	DBStockSnap  int     `json:"db_stock,omitempty"       gorm:"column:db_stock;default:0"`
+
+	// v1.0.149 — operator-defined display order. Set on Smart Sale apply
+	// to page*1000 + row_number so initial order matches the image. Updated
+	// via PATCH /sales/daily-records/:id/items/reorder when the operator
+	// drag-reorders rows on the Sales Summary screen. Every list endpoint
+	// MUST sort by position ASC so all views agree.
+	Position int `json:"position" gorm:"column:position;not null;default:0;index:idx_daily_sales_items_record_position,priority:2"`
 }
 
 // SaleFinanceLog tracks financial transactions related to sales
@@ -274,6 +253,33 @@ type SaleFinanceLog struct {
 	// Created by
 	CreatedByID uuid.UUID `json:"created_by_id" gorm:"type:uuid;not null"`
 	CreatedBy   *User     `json:"created_by,omitempty" gorm:"foreignKey:CreatedByID"`
+}
+
+// DayClosingRecord represents end-of-day reconciliation data
+// (cash denomination count, UPI breakdown, expenses entered by salesman)
+type DayClosingRecord struct {
+	TenantModel
+	ShopID    uuid.UUID `json:"shop_id" gorm:"type:uuid;not null"`
+	Shop      *Shop     `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;not null"`
+	Date      time.Time `json:"date" gorm:"type:date;not null"`
+
+	// Cash reconciliation
+	CashDenominations string  `json:"cash_denominations" gorm:"type:jsonb;default:'{}'"`  // JSON: {"500": 5, "200": 3}
+	CashTotal         float64 `json:"cash_total" gorm:"default:0"`
+
+	// UPI reconciliation
+	UpiBreakdown string  `json:"upi_breakdown" gorm:"type:jsonb;default:'{}'"`  // JSON: {"Google Pay": 1200}
+	UpiTotal     float64 `json:"upi_total" gorm:"default:0"`
+
+	// Expense reconciliation
+	Expenses     string  `json:"expenses" gorm:"type:jsonb;default:'{}'"`  // JSON: {"Transport": 300}
+	ExpenseTotal float64 `json:"expense_total" gorm:"default:0"`
+}
+
+// TableName overrides the default table name
+func (DayClosingRecord) TableName() string {
+	return "day_closing_records"
 }
 
 // DailySaleSummary represents daily aggregated sales data
@@ -299,72 +305,4 @@ type DailySaleSummary struct {
 
 	IsGenerated bool       `json:"is_generated" gorm:"default:false"`
 	GeneratedAt *time.Time `json:"generated_at"`
-}
-
-// DailySalesDraft represents a draft daily sales entry per user per shop per date
-// Replaces Hive local storage for cross-device consistency
-type DailySalesDraft struct {
-	ID         uuid.UUID `json:"id" gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	TenantID   uuid.UUID `json:"tenant_id" gorm:"type:uuid;not null"`
-	UserID     uuid.UUID `json:"user_id" gorm:"type:uuid;not null"`
-	User       *User     `json:"user,omitempty" gorm:"foreignKey:UserID"`
-	ShopID     uuid.UUID `json:"shop_id" gorm:"type:uuid;not null"`
-	Shop       *Shop     `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
-	RecordDate time.Time `json:"record_date" gorm:"type:date;not null"`
-
-	// Draft Data (JSONB for flexibility)
-	// Contains: salesman_id, totals, items[], expenses[], location, images, notes
-	DraftData string `json:"draft_data" gorm:"type:jsonb;not null;default:'{}'"`
-
-	// Timestamps
-	CreatedAt      time.Time  `json:"created_at" gorm:"autoCreateTime"`
-	UpdatedAt      time.Time  `json:"updated_at" gorm:"autoUpdateTime"`
-	LastAutoSaveAt *time.Time `json:"last_auto_save_at,omitempty"`
-
-	// Metadata for debugging/analytics
-	DeviceID   string `json:"device_id,omitempty" gorm:"size:255"`
-	AppVersion string `json:"app_version,omitempty" gorm:"size:50"`
-}
-
-// TableName specifies the table name for DailySalesDraft
-func (DailySalesDraft) TableName() string {
-	return "daily_sales_drafts"
-}
-
-// DraftDataContent represents the structure of draft_data JSONB field
-type DraftDataContent struct {
-	SalesmanID         *string            `json:"salesman_id,omitempty"`
-	TotalSalesAmount   float64            `json:"total_sales_amount"`
-	TotalCashAmount    float64            `json:"total_cash_amount"`
-	TotalCardAmount    float64            `json:"total_card_amount"`
-	TotalUpiAmount     float64            `json:"total_upi_amount"`
-	TotalCreditAmount  float64            `json:"total_credit_amount"`
-	TotalExpenseAmount float64            `json:"total_expense_amount"`
-	Notes              string             `json:"notes,omitempty"`
-	Latitude           *float64           `json:"latitude,omitempty"`
-	Longitude          *float64           `json:"longitude,omitempty"`
-	LocationAccuracy   string             `json:"location_accuracy,omitempty"`
-	LocationCapturedAt string             `json:"location_captured_at,omitempty"`
-	ImageURLs          []string           `json:"image_urls,omitempty"`
-	Items              []DraftItemContent `json:"items,omitempty"`
-	Expenses           []DraftExpenseContent `json:"expenses,omitempty"`
-}
-
-// DraftItemContent represents an item within draft data
-type DraftItemContent struct {
-	ProductID    string  `json:"product_id"`
-	Quantity     int     `json:"quantity"`
-	UnitPrice    float64 `json:"unit_price"`
-	TotalAmount  float64 `json:"total_amount"`
-	CashAmount   float64 `json:"cash_amount"`
-	CardAmount   float64 `json:"card_amount"`
-	UpiAmount    float64 `json:"upi_amount"`
-	CreditAmount float64 `json:"credit_amount"`
-}
-
-// DraftExpenseContent represents an expense within draft data
-type DraftExpenseContent struct {
-	HeaderID   string  `json:"header_id"`
-	HeaderName string  `json:"header_name"`
-	Amount     float64 `json:"amount"`
 }

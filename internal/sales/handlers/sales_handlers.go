@@ -3,20 +3,19 @@ package handlers
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/liquorpro/go-backend/internal/sales/models"
 	"github.com/liquorpro/go-backend/internal/sales/services"
-	"github.com/liquorpro/go-backend/pkg/shared/utils"
+	"github.com/liquorpro/go-backend/pkg/shared/alias"
+	"github.com/liquorpro/go-backend/pkg/shared/database"
+	"github.com/liquorpro/go-backend/pkg/shared/models"
 	"github.com/liquorpro/go-backend/pkg/shared/validators"
 )
 
@@ -26,54 +25,114 @@ type SalesHandlers struct {
 	salesService      *services.SalesService
 	returnsService    *services.ReturnsService
 	dashboardService  *services.DashboardService
-	validationService *services.ValidationService
+	dayClosingService *services.DayClosingService
+	aliasService      *alias.AliasService // v1.0.175 — Brand Shortcuts CRUD
+	db                *database.DB        // v1.0.175 — direct alias list/delete
 }
 
-// NewSalesHandlers creates new sales handlers
+// NewSalesHandlers creates new sales handlers.
+//
+// v1.0.175 — added aliasService + db params so the Brand Shortcuts settings
+// screen can list/create/delete operator-confirmed brand aliases. The
+// existing Smart Sale matcher already reads the same ocr_brand_aliases
+// rows; this just exposes them to the operator.
 func NewSalesHandlers(
 	dailySalesService *services.DailySalesService,
 	salesService *services.SalesService,
 	returnsService *services.ReturnsService,
 	dashboardService *services.DashboardService,
+	dayClosingService *services.DayClosingService,
+	aliasService *alias.AliasService,
+	db *database.DB,
 ) *SalesHandlers {
 	return &SalesHandlers{
 		dailySalesService: dailySalesService,
 		salesService:      salesService,
 		returnsService:    returnsService,
 		dashboardService:  dashboardService,
+		dayClosingService: dayClosingService,
+		aliasService:      aliasService,
+		db:                db,
 	}
 }
 
-// SetValidationService sets the validation service for AI-powered validation
-func (h *SalesHandlers) SetValidationService(vs *services.ValidationService) {
-	h.validationService = vs
+// ComponentStatus represents the health status of a single component
+type ComponentStatus struct {
+	Status  string `json:"status"`  // "up", "down", "degraded"
+	Message string `json:"message,omitempty"`
 }
 
-// Health check endpoint
+// HealthResponse represents the structured health check response
+type HealthResponse struct {
+	Status     string                      `json:"status"` // "healthy", "degraded", "unhealthy"
+	Service    string                      `json:"service"`
+	Version    string                      `json:"version"`
+	Components map[string]ComponentStatus  `json:"components"`
+}
+
+// Health check endpoint with dependency validation (2025 best practices)
+// Returns 200 OK even if degraded to allow Docker/K8s to distinguish from network issues
 func (h *SalesHandlers) Health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status":  "healthy",
-		"service": "sales",
+	components := make(map[string]ComponentStatus)
+	overallStatus := "healthy"
+	ctx := c.Request.Context()
+
+	// Check database connectivity
+	dbStatus := h.checkDatabase(ctx)
+	components["database"] = dbStatus
+	if dbStatus.Status == "down" {
+		overallStatus = "unhealthy"
+	} else if dbStatus.Status == "degraded" {
+		overallStatus = "degraded"
+	}
+
+	// Check Redis cache connectivity
+	cacheStatus := h.checkCache(ctx)
+	components["cache"] = cacheStatus
+	if cacheStatus.Status == "down" && overallStatus == "healthy" {
+		overallStatus = "degraded" // Cache down is degraded, not unhealthy
+	}
+
+	// Return appropriate status code
+	statusCode := http.StatusOK
+	if overallStatus == "unhealthy" {
+		statusCode = http.StatusServiceUnavailable
+	}
+
+	c.JSON(statusCode, HealthResponse{
+		Status:     overallStatus,
+		Service:    "sales",
+		Version:    "1.0.0",
+		Components: components,
 	})
 }
 
-// DebugDatabase runs database diagnostic tests
-func (h *SalesHandlers) DebugDatabase(c *gin.Context) {
-	// Get tenant ID directly from header for debugging
-	tenantIDStr := c.GetHeader("X-Tenant-ID")
-	if tenantIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "X-Tenant-ID header required"})
-		return
+// checkDatabase validates database connectivity
+func (h *SalesHandlers) checkDatabase(ctx context.Context) ComponentStatus {
+	if h.dailySalesService == nil {
+		return ComponentStatus{Status: "down", Message: "service not initialized"}
 	}
 
-	tenantID, err := uuid.Parse(tenantIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant ID format"})
-		return
+	// Try to ping database through service
+	if err := h.dailySalesService.HealthCheck(ctx); err != nil {
+		return ComponentStatus{Status: "down", Message: fmt.Sprintf("connection failed: %v", err)}
 	}
 
-	result := h.dailySalesService.DebugDatabaseTest(tenantID)
-	c.JSON(http.StatusOK, result)
+	return ComponentStatus{Status: "up"}
+}
+
+// checkCache validates Redis cache connectivity
+func (h *SalesHandlers) checkCache(ctx context.Context) ComponentStatus {
+	if h.dailySalesService == nil {
+		return ComponentStatus{Status: "down", Message: "service not initialized"}
+	}
+
+	// Cache failures are non-critical, service can run without it
+	if err := h.dailySalesService.CacheHealthCheck(ctx); err != nil {
+		return ComponentStatus{Status: "degraded", Message: fmt.Sprintf("cache unavailable: %v", err)}
+	}
+
+	return ComponentStatus{Status: "up"}
 }
 
 // Daily Sales Endpoints (Critical for bulk entry workflow)
@@ -86,19 +145,18 @@ func (h *SalesHandlers) CreateDailySalesRecord(c *gin.Context) {
 		return
 	}
 
+	// Get user role from JWT context for auto-approval logic
+	userRole := c.GetString("role")
+	if userRole == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user role not found in context"})
+		return
+	}
+
 	var req services.DailySalesRecordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Enforce shop restriction for salesmen - they can only create records for their shop
-	enforcedShopID, err := h.enforceShopFilter(c, &req.ShopID, tenantID, createdByID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	req.ShopID = enforcedShopID
 
 	// Validate request
 	validator := validators.New()
@@ -127,21 +185,10 @@ func (h *SalesHandlers) CreateDailySalesRecord(c *gin.Context) {
 		return
 	}
 
-	record, err := h.dailySalesService.CreateDailySalesRecord(c.Request.Context(), req, tenantID, createdByID)
+	record, err := h.dailySalesService.CreateDailySalesRecord(c.Request.Context(), req, tenantID, createdByID, userRole)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
-	}
-
-	// Auto-trigger AI validation if images are attached
-	if h.validationService != nil && len(req.ImageURLs) > 0 {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			if err := h.validationService.TriggerValidation(ctx, record.ID, tenantID); err != nil {
-			} else {
-			}
-		}()
 	}
 
 	c.JSON(http.StatusCreated, record)
@@ -162,29 +209,43 @@ func (h *SalesHandlers) GetDailySalesRecords(c *gin.Context) {
 		return
 	}
 
-	// Manually parse UUID query params (gin can't bind uuid.UUID from query strings)
-	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
-		if parsed, err := uuid.Parse(shopIDStr); err == nil {
-			filters.ShopID = parsed
-		}
-	}
-	if salesmanIDStr := c.Query("salesman_id"); salesmanIDStr != "" {
-		if parsed, err := uuid.Parse(salesmanIDStr); err == nil {
-			filters.SalesmanID = parsed
+	// Enforce salesman shop filter
+	if c.GetString("role") == "salesman" {
+		if assignedShopID, err := h.dashboardService.GetSalesmanShopID(userID); err == nil && assignedShopID != nil {
+			filters.ShopID = assignedShopID.String()
 		}
 	}
 
-	// Enforce shop restriction for salesmen
-	var filterShopPtr *uuid.UUID
-	if filters.ShopID != uuid.Nil {
-		filterShopPtr = &filters.ShopID
+	// Translate SDUI date_filter shorthand to start_date/end_date
+	if dateFilter := c.Query("date_filter"); dateFilter != "" && filters.StartDate.IsZero() {
+		now := time.Now()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		switch dateFilter {
+		case "today":
+			filters.StartDate = today
+			filters.EndDate = today
+		case "yesterday":
+			yesterday := today.AddDate(0, 0, -1)
+			filters.StartDate = yesterday
+			filters.EndDate = yesterday
+		case "7d":
+			filters.StartDate = today.AddDate(0, 0, -7)
+			filters.EndDate = today
+		case "15d":
+			filters.StartDate = today.AddDate(0, 0, -15)
+			filters.EndDate = today
+		case "30d":
+			filters.StartDate = today.AddDate(0, 0, -30)
+			filters.EndDate = today
+		case "this_month":
+			filters.StartDate = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+			filters.EndDate = today
+		case "last_month":
+			firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+			filters.StartDate = firstOfMonth.AddDate(0, -1, 0)
+			filters.EndDate = firstOfMonth.AddDate(0, 0, -1)
+		}
 	}
-	enforcedShopID, err := h.enforceShopFilter(c, filterShopPtr, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	filters.ShopID = enforcedShopID
 
 	// Set defaults
 	if filters.Page <= 0 {
@@ -226,62 +287,13 @@ func (h *SalesHandlers) GetDailySalesRecordByID(c *gin.Context) {
 	c.JSON(http.StatusOK, record)
 }
 
-// CheckDailySalesRecordExists - Flutter calls this BEFORE restoring drafts
-// SINGLE SOURCE OF TRUTH for draft management - prevents race conditions and stale drafts
-func (h *SalesHandlers) CheckDailySalesRecordExists(c *gin.Context) {
+// UpdateDailySalesRecord updates daily sales record
+func (h *SalesHandlers) UpdateDailySalesRecord(c *gin.Context) {
 	tenantID, _, err := h.getTenantAndUserID(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Parse query params: ?shop_id=xxx&record_date=2026-01-06
-	shopIDStr := c.Query("shop_id")
-	recordDateStr := c.Query("record_date")
-
-	if shopIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "shop_id is required"})
-		return
-	}
-
-	if recordDateStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "record_date is required"})
-		return
-	}
-
-	shopID, err := uuid.Parse(shopIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shop_id format"})
-		return
-	}
-
-	recordDate, err := time.Parse("2006-01-02", recordDateStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record_date format (use YYYY-MM-DD)"})
-		return
-	}
-
-	result, err := h.dailySalesService.CheckRecordExistsForShopDate(
-		c.Request.Context(), tenantID, shopID, recordDate,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
-// UpdateDailySalesRecord updates daily sales record
-func (h *SalesHandlers) UpdateDailySalesRecord(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Get user role for admin override check
-	userRole := c.GetString("role")
 
 	recordID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -305,32 +317,53 @@ func (h *SalesHandlers) UpdateDailySalesRecord(c *gin.Context) {
 		return
 	}
 
-	// Enforce shop restriction for salesmen
-	enforcedShopID, err := h.enforceShopFilter(c, &req.ShopID, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	req.ShopID = enforcedShopID
-
-	record, err := h.dailySalesService.UpdateDailySalesRecord(c.Request.Context(), recordID, tenantID, userRole, req)
+	record, err := h.dailySalesService.UpdateDailySalesRecord(c.Request.Context(), recordID, tenantID, req)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Re-trigger AI validation if images are attached (data may have changed)
-	if h.validationService != nil && len(req.ImageURLs) > 0 {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			if err := h.validationService.TriggerValidation(ctx, record.ID, tenantID); err != nil {
-			} else {
-			}
-		}()
-	}
-
 	c.JSON(http.StatusOK, record)
+}
+
+// UpdateDailySalesRecordDate is the dedicated PATCH endpoint for date-only
+// edits from the admin sales list. Body: {"record_date": "2026-04-29"} or
+// any RFC3339 timestamp. v1.0.121.
+func (h *SalesHandlers) UpdateDailySalesRecordDate(c *gin.Context) {
+	tenantID, _, err := h.getTenantAndUserID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	recordID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
+		return
+	}
+	var body struct {
+		RecordDate string `json:"record_date" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Accept either YYYY-MM-DD or full RFC3339 — frontend usually sends YYYY-MM-DD
+	// from the <input type="date"> element.
+	var parsed time.Time
+	if t, e := time.Parse("2006-01-02", body.RecordDate); e == nil {
+		parsed = t
+	} else if t2, e2 := time.Parse(time.RFC3339, body.RecordDate); e2 == nil {
+		parsed = t2
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "record_date must be YYYY-MM-DD or RFC3339"})
+		return
+	}
+	rec, err := h.dailySalesService.UpdateDailySalesRecordDate(c.Request.Context(), recordID, tenantID, parsed)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rec)
 }
 
 // ApproveDailySalesRecord approves a daily sales record
@@ -353,6 +386,38 @@ func (h *SalesHandlers) ApproveDailySalesRecord(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, record)
+}
+
+// ReapplyDailySalesRecord re-applies an approved daily sales record's stock
+// effects within 7 days of approval. Mirror of Stock Setup's reapply.
+// 410 Gone past the 7-day window. 409 if the record isn't approved.
+func (h *SalesHandlers) ReapplyDailySalesRecord(c *gin.Context) {
+	tenantID, reappliedByID, err := h.getTenantAndUserID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	recordID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
+		return
+	}
+	record, err := h.dailySalesService.ReapplyDailySalesRecord(c.Request.Context(), recordID, tenantID, reappliedByID)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "reapply window expired"):
+			c.JSON(http.StatusGone, gin.H{"error": msg})
+		case strings.Contains(msg, "only approved records"):
+			c.JSON(http.StatusConflict, gin.H{"error": msg})
+		case strings.Contains(msg, "not found"):
+			c.JSON(http.StatusNotFound, gin.H{"error": msg})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		}
+		return
+	}
 	c.JSON(http.StatusOK, record)
 }
 
@@ -402,14 +467,6 @@ func (h *SalesHandlers) CreateSale(c *gin.Context) {
 		return
 	}
 
-	// Enforce shop restriction for salesmen - they can only create sales for their shop
-	enforcedShopID, err := h.enforceShopFilter(c, &req.ShopID, tenantID, createdByID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	req.ShopID = enforcedShopID
-
 	// Validate request
 	validator := validators.New()
 	validator.Required(req.ShopID.String(), "shop_id")
@@ -445,29 +502,12 @@ func (h *SalesHandlers) GetSales(c *gin.Context) {
 		return
 	}
 
-	// Manually parse UUID query params (gin can't bind uuid.UUID from query strings)
-	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
-		if parsed, err := uuid.Parse(shopIDStr); err == nil {
-			filters.ShopID = parsed
+	// Enforce salesman shop filter
+	if c.GetString("role") == "salesman" {
+		if assignedShopID, err := h.dashboardService.GetSalesmanShopID(userID); err == nil && assignedShopID != nil {
+			filters.ShopID = *assignedShopID
 		}
 	}
-	if salesmanIDStr := c.Query("salesman_id"); salesmanIDStr != "" {
-		if parsed, err := uuid.Parse(salesmanIDStr); err == nil {
-			filters.SalesmanID = parsed
-		}
-	}
-
-	// Enforce shop restriction for salesmen
-	var filterShopPtr *uuid.UUID
-	if filters.ShopID != uuid.Nil {
-		filterShopPtr = &filters.ShopID
-	}
-	enforcedShopID, err := h.enforceShopFilter(c, filterShopPtr, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	filters.ShopID = enforcedShopID
 
 	// Set defaults
 	if filters.Page <= 0 {
@@ -562,81 +602,6 @@ func (h *SalesHandlers) RejectSale(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Sale rejected successfully"})
 }
 
-// UpdateSale updates an existing sale
-func (h *SalesHandlers) UpdateSale(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Get user role from context
-	userRole, exists := c.Get("role")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user role not found"})
-		return
-	}
-	roleStr, ok := userRole.(string)
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid role type"})
-		return
-	}
-
-	saleID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sale ID"})
-		return
-	}
-
-	// Enforce shop restriction for salesmen - verify they can access the sale's shop
-	restrictedShopID, err := h.getSalesmanShopRestriction(c, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	if restrictedShopID != nil {
-		// Salesman - verify the sale belongs to their shop
-		existingSale, err := h.salesService.GetSaleByID(c.Request.Context(), saleID, tenantID)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Sale not found"})
-			return
-		}
-		if existingSale.ShopID != *restrictedShopID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "access denied: you can only update sales for your assigned shop"})
-			return
-		}
-	}
-
-	var req services.UpdateSaleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Validate required fields
-	if len(req.Items) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one item is required"})
-		return
-	}
-
-	sale, err := h.salesService.UpdateSale(c.Request.Context(), saleID, tenantID, userID, roleStr, req)
-	if err != nil {
-		errMsg := err.Error()
-		// Determine appropriate status code based on error message
-		switch {
-		case errMsg == "sale not found":
-			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "cannot be edited") || strings.Contains(errMsg, "only"):
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsg})
-		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-		}
-		return
-	}
-
-	c.JSON(http.StatusOK, sale)
-}
-
 // GetPendingSales returns pending sales
 func (h *SalesHandlers) GetPendingSales(c *gin.Context) {
 	tenantID, userID, err := h.getTenantAndUserID(c)
@@ -651,15 +616,9 @@ func (h *SalesHandlers) GetPendingSales(c *gin.Context) {
 			shopID = &parsed
 		}
 	}
+	shopID = h.enforceSalesmanShop(c, userID, shopID)
 
-	// Enforce shop restriction for salesmen
-	enforcedShopID, err := h.enforceShopFilter(c, shopID, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-
-	sales, err := h.salesService.GetPendingSales(c.Request.Context(), tenantID, &enforcedShopID)
+	sales, err := h.salesService.GetPendingSales(c.Request.Context(), tenantID, shopID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -682,15 +641,9 @@ func (h *SalesHandlers) GetUncollectedSales(c *gin.Context) {
 			shopID = &parsed
 		}
 	}
+	shopID = h.enforceSalesmanShop(c, userID, shopID)
 
-	// Enforce shop restriction for salesmen
-	enforcedShopID, err := h.enforceShopFilter(c, shopID, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-
-	sales, err := h.salesService.GetUncollectedSales(c.Request.Context(), tenantID, &enforcedShopID)
+	sales, err := h.salesService.GetUncollectedSales(c.Request.Context(), tenantID, shopID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -725,25 +678,6 @@ func (h *SalesHandlers) CreateSaleReturn(c *gin.Context) {
 		return
 	}
 
-	// Enforce shop restriction for salesmen - verify they can access the sale's shop
-	restrictedShopID, err := h.getSalesmanShopRestriction(c, tenantID, createdByID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	if restrictedShopID != nil {
-		// Salesman - verify the sale belongs to their shop
-		sale, err := h.salesService.GetSaleByID(c.Request.Context(), req.SaleID, tenantID)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Sale not found"})
-			return
-		}
-		if sale.ShopID != *restrictedShopID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "access denied: you can only create returns for your assigned shop"})
-			return
-		}
-	}
-
 	saleReturn, err := h.returnsService.CreateSaleReturn(c.Request.Context(), req, tenantID, createdByID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -768,29 +702,12 @@ func (h *SalesHandlers) GetSaleReturns(c *gin.Context) {
 		return
 	}
 
-	// Manually parse UUID query params (gin can't bind uuid.UUID from query strings)
-	if saleIDStr := c.Query("sale_id"); saleIDStr != "" {
-		if parsed, err := uuid.Parse(saleIDStr); err == nil {
-			filters.SaleID = parsed
+	// Enforce salesman shop filter
+	if c.GetString("role") == "salesman" {
+		if assignedShopID, err := h.dashboardService.GetSalesmanShopID(userID); err == nil && assignedShopID != nil {
+			filters.ShopID = *assignedShopID
 		}
 	}
-	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
-		if parsed, err := uuid.Parse(shopIDStr); err == nil {
-			filters.ShopID = parsed
-		}
-	}
-
-	// Enforce shop restriction for salesmen
-	var filterShopPtr *uuid.UUID
-	if filters.ShopID != uuid.Nil {
-		filterShopPtr = &filters.ShopID
-	}
-	enforcedShopID, err := h.enforceShopFilter(c, filterShopPtr, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	filters.ShopID = enforcedShopID
 
 	// Set defaults
 	if filters.Page <= 0 {
@@ -899,15 +816,9 @@ func (h *SalesHandlers) GetPendingReturns(c *gin.Context) {
 			shopID = &parsed
 		}
 	}
+	shopID = h.enforceSalesmanShop(c, userID, shopID)
 
-	// Enforce shop restriction for salesmen
-	enforcedShopID, err := h.enforceShopFilter(c, shopID, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-
-	returns, err := h.returnsService.GetPendingReturns(c.Request.Context(), tenantID, &enforcedShopID)
+	returns, err := h.returnsService.GetPendingReturns(c.Request.Context(), tenantID, shopID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -932,142 +843,110 @@ func (h *SalesHandlers) GetDashboardSummary(c *gin.Context) {
 			shopID = &parsed
 		}
 	}
+	shopID = h.enforceSalesmanShop(c, userID, shopID)
 
-	// Enforce shop restriction for salesmen
-	enforcedShopID, err := h.enforceShopFilter(c, shopID, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	if enforcedShopID != uuid.Nil {
-		shopID = &enforcedShopID
-	}
+	dateFilter := c.DefaultQuery("date_filter", "today")
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
 
-	// Get user role for role-aware dashboard
-	userRole := c.GetString("role")
-
-	// Parse date_filter query param
-	dateFilter := c.DefaultQuery("date_filter", "yesterday")
-	now := time.Now()
-	today := utils.StartOfDay(now)
-	tomorrow := today.AddDate(0, 0, 1)
-
-	var startDate, endDate time.Time
-	switch dateFilter {
-	case "today":
-		startDate = today
-		endDate = tomorrow
-	case "yesterday":
-		startDate = today.AddDate(0, 0, -1)
-		endDate = today
-	case "last_7_days":
-		startDate = today.AddDate(0, 0, -7)
-		endDate = tomorrow
-	case "last_30_days":
-		startDate = today.AddDate(0, 0, -30)
-		endDate = tomorrow
-	case "this_month":
-		startDate = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-		endDate = startDate.AddDate(0, 1, 0)
-	default:
-		startDate = today.AddDate(0, 0, -1)
-		endDate = today
-		dateFilter = "yesterday"
-	}
-
-	summary, err := h.dashboardService.GetDashboardSummary(c.Request.Context(), tenantID, userID, userRole, shopID, startDate, endDate)
+	summary, err := h.dashboardService.GetDashboardSummary(c.Request.Context(), tenantID, shopID, dateFilter, startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Build shop filter info
-	shopFilterID := interface{}(nil)
-	shopFilterName := "All Shops"
-	if shopID != nil {
-		shopFilterID = shopID.String()
-		// Try to get shop name from shop summaries
-		for _, s := range summary.ShopSummaries {
-			if s.ShopID == *shopID {
-				shopFilterName = s.ShopName
-				break
-			}
-		}
+	c.JSON(http.StatusOK, summary)
+}
+
+// Day Closing Endpoints
+
+// SaveDayClosing saves day-closing reconciliation data (upsert)
+func (h *SalesHandlers) SaveDayClosing(c *gin.Context) {
+	tenantID, userID, err := h.getTenantAndUserID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	// Build nested response alongside existing flat keys
-	response := gin.H{
-		// Existing flat keys
-		"todays_sales":    summary.TodaySales,
-		"todays_returns":  summary.TodayReturns,
-		"pending_sales":   summary.PendingSales,
-		"pending_returns": summary.PendingReturns,
-		"total_revenue":   summary.TotalRevenue,
-		"total_due":       summary.TotalDue,
-		"cash_amount":     summary.CashAmount,
-		"card_amount":     summary.CardAmount,
-		"upi_amount":      summary.UpiAmount,
-		"credit_amount":   summary.CreditAmount,
-		"shop_summaries":  summary.ShopSummaries,
-		"top_products":    summary.TopProducts,
-		"recent_sales":    summary.RecentSales,
-		"generated_at":    summary.GeneratedAt,
-
-		// Nested keys
-		"date_range": gin.H{
-			"start_date":     startDate.Format("2006-01-02"),
-			"end_date":       endDate.AddDate(0, 0, -1).Format("2006-01-02"),
-			"filter_applied": dateFilter,
-		},
-		"shop_filter": gin.H{
-			"shop_id":   shopFilterID,
-			"shop_name": shopFilterName,
-		},
-		"metrics": gin.H{
-			"payment": gin.H{
-				"total_amount": summary.TotalRevenue,
-				"count":        summary.TodaySales.TotalSales,
-			},
-			"purchase": gin.H{
-				"total_amount": 0,
-				"count":        0,
-			},
-			"sale": gin.H{
-				"total_amount": summary.TodaySales.TotalAmount,
-				"count":        summary.TodaySales.TotalSales,
-			},
-			"expense": gin.H{
-				"total_amount": 0,
-				"count":        0,
-			},
-		},
+	var req services.DayClosingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	// Role-aware additions (only include when present)
-	if summary.RoleCtx != nil {
-		response["role_context"] = summary.RoleCtx
-	}
-	if summary.TeamStatus != nil {
-		response["team_status"] = summary.TeamStatus
-		// Debug log for team submission status
-		log.Printf("[dashboard] team_status: total=%d submitted=%d missing=%d rate=%.1f%%",
-			summary.TeamStatus.TotalSalesmen, summary.TeamStatus.TotalSubmitted,
-			summary.TeamStatus.TotalMissing, summary.TeamStatus.SubmissionRate)
-		for _, shop := range summary.TeamStatus.Shops {
-			for _, sm := range shop.Salesmen {
-				log.Printf("[dashboard]   %s (%s): %s amount=%.0f",
-					sm.SalesmanName, shop.ShopName, sm.Status, sm.TotalAmount)
-			}
-		}
-	}
-	if summary.MyStatus != nil {
-		response["my_status"] = summary.MyStatus
+	// Validate
+	validator := validators.New()
+	validator.Required(req.ShopID.String(), "shop_id")
+	validator.Required(req.Date, "date")
+	if validator.HasErrors() {
+		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
+		return
 	}
 
-	c.JSON(http.StatusOK, response)
+	resp, err := h.dayClosingService.SaveDayClosing(c.Request.Context(), req, tenantID, userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetDayClosing retrieves day-closing data for a shop+date
+func (h *SalesHandlers) GetDayClosing(c *gin.Context) {
+	tenantID, _, err := h.getTenantAndUserID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	shopIDStr := c.Query("shop_id")
+	if shopIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "shop_id is required"})
+		return
+	}
+	shopID, err := uuid.Parse(shopIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid shop_id"})
+		return
+	}
+
+	date := c.Query("date")
+	if date == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date is required"})
+		return
+	}
+
+	resp, err := h.dayClosingService.GetDayClosing(c.Request.Context(), tenantID, shopID, date)
+	if err != nil {
+		// No record for this date is normal — return null, not 404
+		c.JSON(http.StatusOK, nil)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // Helper methods
+
+// enforceSalesmanShop returns the shop_id that should be used for filtering.
+// For salesman role, it forces their assigned shop. For other roles, it uses the provided shopID.
+func (h *SalesHandlers) enforceSalesmanShop(c *gin.Context, userID uuid.UUID, requestedShopID *uuid.UUID) *uuid.UUID {
+	userRole := c.GetString("role")
+	if userRole == "salesman" {
+		assignedShopID, err := h.dashboardService.GetSalesmanShopID(userID)
+		if err != nil {
+			// Fail securely: deny access if we can't verify the salesman's shop assignment
+			return nil
+		}
+		if assignedShopID != nil {
+			return assignedShopID
+		}
+		// Salesman has no assigned shop — deny access
+		return nil
+	}
+	return requestedShopID
+}
 
 func (h *SalesHandlers) getTenantAndUserID(c *gin.Context) (tenantID, userID uuid.UUID, err error) {
 	tenantIDStr := c.GetString("tenant_id")
@@ -1103,1176 +982,646 @@ func (h *SalesHandlers) getTenantAndUserID(c *gin.Context) (tenantID, userID uui
 	return tenantID, userID, nil
 }
 
-// getSalesmanShopRestriction returns the shop_id that a user is restricted to.
-// Uses centralized shop access control from utils.GetUserShopAccess
-// Returns nil for roles with full access (they can access all shops in their tenant).
-// Returns error if restricted user has no shop assigned.
-func (h *SalesHandlers) getSalesmanShopRestriction(c *gin.Context, tenantID, userID uuid.UUID) (*uuid.UUID, error) {
-	userRole := c.GetString("role")
-
-	// Use centralized shop access control
-	if !utils.IsShopRestricted(userRole) {
-		return nil, nil // No restriction for this role
-	}
-
-	// Lookup salesman's assigned shop
-	shopID, err := h.salesService.GetSalesmanShopID(c.Request.Context(), userID, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get salesman shop: %w", err)
-	}
-
-	if shopID == nil {
-		return nil, fmt.Errorf("user has no shop assigned")
-	}
-
-	return shopID, nil
-}
-
-// enforceShopFilter applies shop restriction for salesmen.
-// For salesmen: overrides/enforces their assigned shop_id
-// For others: uses the provided filter shop_id (optional)
-func (h *SalesHandlers) enforceShopFilter(c *gin.Context, filterShopID *uuid.UUID, tenantID, userID uuid.UUID) (uuid.UUID, error) {
-	restrictedShopID, err := h.getSalesmanShopRestriction(c, tenantID, userID)
-	if err != nil {
-		return uuid.Nil, err
-	}
-
-	if restrictedShopID != nil {
-		// Salesman - enforce their shop
-		// If they requested a different shop, reject
-		if filterShopID != nil && *filterShopID != uuid.Nil && *filterShopID != *restrictedShopID {
-			return uuid.Nil, fmt.Errorf("access denied: you can only access your assigned shop")
-		}
-		return *restrictedShopID, nil
-	}
-
-	// Non-salesman - use provided filter (can be Nil for all shops)
-	if filterShopID != nil {
-		return *filterShopID, nil
-	}
-	return uuid.Nil, nil
-}
-
-// ChangeDailySalesRecordDate changes only the date of a daily sales record
-// PATCH /api/daily-sales/:id/change-date
-// Rules:
-// - Pending status: Any authorized user can change
-// - Approved status: Admin/Manager can change directly, others get error
-// - Rejected status: Cannot change (must copy and create new record)
-func (h *SalesHandlers) ChangeDailySalesRecordDate(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
+// UploadDailySalesImage handles receipt image upload for manual daily sales entries
+func (h *SalesHandlers) UploadDailySalesImage(c *gin.Context) {
+	tenantID, _, err := h.getTenantAndUserID(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	userRole := c.GetString("role")
-
-	recordID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
+	// Parse multipart form (max 10MB)
+	if err := c.Request.ParseMultipartForm(10 << 20); err != nil {
+		fmt.Printf("📤 [UPLOAD] ParseMultipartForm error: %v, Content-Type: %s\n", err, c.ContentType())
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid multipart form: %v", err)})
 		return
 	}
 
-	// Use flexible request struct to accept multiple date formats
-	var rawReq struct {
-		NewDate string `json:"new_date" binding:"required"`
-		Reason  string `json:"reason"`
-	}
-	if err := c.ShouldBindJSON(&rawReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
-		return
+	// Log all form fields for debugging
+	if c.Request.MultipartForm != nil && c.Request.MultipartForm.File != nil {
+		for key, files := range c.Request.MultipartForm.File {
+			fmt.Printf("📤 [UPLOAD] Form file field: '%s' (%d files)\n", key, len(files))
+		}
+	} else {
+		fmt.Printf("📤 [UPLOAD] No multipart files found. Content-Type: %s\n", c.ContentType())
 	}
 
-	// Parse new_date with multiple formats (RFC3339, date-only, etc.)
-	var parsedDate time.Time
-	dateFormats := []string{
-		time.RFC3339,
-		"2006-01-02T15:04:05Z",
-		"2006-01-02T15:04:05",
-		"2006-01-02",
-	}
-	for _, format := range dateFormats {
-		if t, err := time.Parse(format, rawReq.NewDate); err == nil {
-			parsedDate = t
+	// Try all common field names
+	var header *multipart.FileHeader
+	for _, field := range []string{"image", "file", "photo", "receipt", "images", "images[]"} {
+		_, h, e := c.Request.FormFile(field)
+		if e == nil {
+			header = h
+			fmt.Printf("📤 [UPLOAD] Found image in field '%s': %s (%d bytes)\n", field, h.Filename, h.Size)
 			break
 		}
 	}
-	if parsedDate.IsZero() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format. Use YYYY-MM-DD or ISO 8601 format"})
+	if header == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image file is required (field: image, file, photo, receipt, images)"})
 		return
 	}
 
-	req := services.ChangeDateRequest{
-		NewDate: parsedDate,
-		Reason:  rawReq.Reason,
-	}
-
-	// Enforce shop restriction for salesmen
-	restrictedShopID, err := h.getSalesmanShopRestriction(c, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	if restrictedShopID != nil {
-		// Salesman - verify the record belongs to their shop
-		existingRecord, err := h.dailySalesService.GetDailySalesRecordByID(c.Request.Context(), recordID, tenantID)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
-			return
-		}
-		if existingRecord.ShopID != *restrictedShopID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "access denied: you can only modify records for your assigned shop"})
-			return
-		}
-	}
-
-	result, err := h.dailySalesService.ChangeDailySalesRecordDate(c.Request.Context(), recordID, tenantID, userID, userRole, req)
-	if err != nil {
-		// Check if it's a permission error
-		if result != nil && !result.Success {
-			c.JSON(http.StatusForbidden, result)
-			return
-		}
-		// Other errors
-		if strings.Contains(err.Error(), "not found") {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		} else if strings.Contains(err.Error(), "permission denied") {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		} else {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		}
+	// Validate file type
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only JPG and PNG images are supported"})
 		return
 	}
 
-	c.JSON(http.StatusOK, result)
-}
-
-// CopyDailySalesRecord creates a copy of an existing daily sales record for correction
-// This allows users to copy rejected records instead of re-entering all items manually
-func (h *SalesHandlers) CopyDailySalesRecord(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	// Validate file size (max 10MB)
+	if header.Size > 10*1024*1024 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image size must be under 10MB"})
 		return
 	}
 
-	recordID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
-		return
-	}
-
-	// Enforce shop restriction for salesmen - verify they can access the original record's shop
-	restrictedShopID, err := h.getSalesmanShopRestriction(c, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	if restrictedShopID != nil {
-		// Salesman - verify the original record belongs to their shop
-		existingRecord, err := h.dailySalesService.GetDailySalesRecordByID(c.Request.Context(), recordID, tenantID)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
-			return
-		}
-		if existingRecord.ShopID != *restrictedShopID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "access denied: you can only copy records for your assigned shop"})
-			return
-		}
-	}
-
-	result, err := h.dailySalesService.CopyDailySalesRecord(c.Request.Context(), recordID, tenantID, userID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusCreated, result)
-}
-
-// UploadDailySalesImages handles multiple image uploads for daily sales records
-// POST /api/daily-records/upload-image
-func (h *SalesHandlers) UploadDailySalesImages(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Parse multipart form (max 50MB total)
-	if err := c.Request.ParseMultipartForm(50 << 20); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse multipart form", "details": err.Error()})
-		return
-	}
-
-	// Get uploaded files
-	form, err := c.MultipartForm()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to get multipart form", "details": err.Error()})
-		return
-	}
-
-	files := form.File["images"]
-	if len(files) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No images provided. Use 'images' field for file upload."})
-		return
-	}
-
-	// Allowed file types
-	allowedTypes := map[string]bool{
-		"image/jpeg": true,
-		"image/jpg":  true,
-		"image/png":  true,
-		"image/webp": true,
-	}
-
-	// Create uploads directory if not exists
-	uploadDir := "./uploads/daily_sales"
+	// Create upload directory
+	tenantShort := tenantID.String()[:8]
+	uploadDir := filepath.Join("/app/uploads/daily_sales", tenantShort)
 	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create upload directory"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create upload directory"})
 		return
 	}
 
-	var imageURLs []string
-	timestamp := time.Now().Format("20060102_150405")
+	// Save file with unique name
+	fileName := fmt.Sprintf("daily_sales_%s_%s%s", tenantShort, uuid.New().String()[:8], ext)
+	filePath := filepath.Join(uploadDir, fileName)
 
-	for i, fileHeader := range files {
-		// Validate file size (max 10MB per file)
-		if fileHeader.Size > 10*1024*1024 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":    "File too large",
-				"details":  fmt.Sprintf("File '%s' exceeds 10MB limit", fileHeader.Filename),
-				"maxSize":  "10MB",
-				"uploaded": len(imageURLs),
-			})
-			return
-		}
-
-		// Validate file type
-		contentType := fileHeader.Header.Get("Content-Type")
-		if !allowedTypes[contentType] {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":        "Invalid file type",
-				"details":      fmt.Sprintf("File '%s' has invalid type '%s'. Allowed: JPEG, PNG, WebP", fileHeader.Filename, contentType),
-				"allowedTypes": []string{"image/jpeg", "image/png", "image/webp"},
-				"uploaded":     len(imageURLs),
-			})
-			return
-		}
-
-		// Open file
-		file, err := fileHeader.Open()
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read image", "details": err.Error()})
-			return
-		}
-		defer file.Close()
-
-		// Generate unique filename
-		ext := filepath.Ext(fileHeader.Filename)
-		if ext == "" {
-			// Determine extension from content type
-			switch contentType {
-			case "image/jpeg", "image/jpg":
-				ext = ".jpg"
-			case "image/png":
-				ext = ".png"
-			case "image/webp":
-				ext = ".webp"
-			}
-		}
-		filename := fmt.Sprintf("daily_sales_%s_%s_%s_%d%s",
-			tenantID.String()[:8],
-			userID.String()[:8],
-			timestamp,
-			i+1,
-			ext,
-		)
-
-		// Save file
-		filePath := filepath.Join(uploadDir, filename)
-		out, err := os.Create(filePath)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file", "details": err.Error()})
-			return
-		}
-		defer out.Close()
-
-		if _, err := io.Copy(out, file); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write file", "details": err.Error()})
-			return
-		}
-
-		// Add URL to list
-		imageURL := fmt.Sprintf("/uploads/daily_sales/%s", filename)
-		imageURLs = append(imageURLs, imageURL)
-	}
-
-	// Build response with multiple URL formats for compatibility
-	response := gin.H{
-		"success":    true,
-		"image_urls": imageURLs,
-		"urls":       imageURLs,
-		"count":      len(imageURLs),
-	}
-	// Add singular 'url' field for Flutter app compatibility
-	if len(imageURLs) > 0 {
-		response["url"] = imageURLs[0]
-	}
-	c.JSON(http.StatusOK, response)
-}
-
-// =============================================================================
-// AI Validation Endpoints
-// =============================================================================
-
-// GetValidation returns the AI validation result for a daily sales record
-// GET /api/sales/daily-records/:id/validation
-func (h *SalesHandlers) GetValidation(c *gin.Context) {
-	if h.validationService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Validation service not available"})
+	if err := c.SaveUploadedFile(header, filePath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save image"})
 		return
 	}
 
-	tenantID, _, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+	// Return the URL path (relative to uploads root)
+	imageURL := fmt.Sprintf("/uploads/daily_sales/%s/%s", tenantShort, fileName)
 
-	recordIDStr := c.Param("id")
-	recordID, err := uuid.Parse(recordIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
-		return
-	}
-
-	result, err := h.validationService.GetValidationResult(c.Request.Context(), recordID, tenantID)
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
-// TriggerValidation manually triggers AI validation for a daily sales record
-// POST /api/sales/daily-records/:id/validation/trigger
-func (h *SalesHandlers) TriggerValidation(c *gin.Context) {
-	if h.validationService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Validation service not available"})
-		return
-	}
-
-	tenantID, _, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	recordIDStr := c.Param("id")
-	recordID, err := uuid.Parse(recordIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
-		return
-	}
-
-	// Parse optional request body
-	var req models.TriggerValidationRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		// Ignore binding errors - body is optional
-		req.Force = false
-	}
-
-	// Trigger validation asynchronously with background context
-	// Using background context to prevent cancellation when HTTP response is sent
-	go func() {
-		ctx := context.Background()
-		if err := h.validationService.TriggerValidation(ctx, recordID, tenantID); err != nil {
-			// Log error but don't block response
-		}
-	}()
-
-	c.JSON(http.StatusAccepted, models.TriggerValidationResponse{
-		RecordID: recordID,
-		Status:   "triggered",
-		Message:  "Validation triggered successfully. Check status with GET /validation",
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"image_url": imageURL,
+		"file_name": fileName,
+		"file_size": header.Size,
 	})
 }
 
-// ConfirmValidation allows manager to confirm/correct validation results
-// POST /api/sales/daily-records/:id/validation/confirm
-func (h *SalesHandlers) ConfirmValidation(c *gin.Context) {
-	if h.validationService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Validation service not available"})
+// ReorderDailySalesItems persists the operator's drag-reorder of items on
+// the Sales Summary screen. Body: {"items": [{"id": "<uuid>", "position": 0}, ...]}.
+// Bulk-updates daily_sales_items.position so every other view (web admin,
+// daily entry summary, sales history, exports) renders the same order.
+//
+// v1.0.149 — first user-driven row-order persistence. Initial order on
+// Smart Sale apply is page*1000+row_number (image order); the operator
+// can refine that here.
+func (h *SalesHandlers) ReorderDailySalesItems(c *gin.Context) {
+	tenantIDRaw, exists := c.Get("tenant_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "tenant not found"})
 		return
 	}
-
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	tenantID, ok := tenantIDRaw.(uuid.UUID)
+	if !ok {
+		// Sometimes set as string; convert.
+		if s, sok := tenantIDRaw.(string); sok {
+			parsed, err := uuid.Parse(s)
+			if err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid tenant"})
+				return
+			}
+			tenantID = parsed
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid tenant"})
+			return
+		}
 	}
-
 	recordIDStr := c.Param("id")
 	recordID, err := uuid.Parse(recordIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid record id"})
 		return
 	}
-
-	var req models.ConfirmValidationRequest
+	var req struct {
+		Items []struct {
+			ID       string `json:"id" binding:"required"`
+			Position int    `json:"position"`
+		} `json:"items" binding:"required"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid body: %v", err)})
+		return
+	}
+	if len(req.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "items required"})
+		return
+	}
+	if len(req.Items) > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too many items in one reorder (max 500)"})
+		return
+	}
+	pairs := make([]services.ItemPosition, 0, len(req.Items))
+	for _, it := range req.Items {
+		id, err := uuid.Parse(it.ID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid item id: %s", it.ID)})
+			return
+		}
+		pairs = append(pairs, services.ItemPosition{ID: id, Position: it.Position})
+	}
+	if err := h.dailySalesService.ReorderItems(c.Request.Context(), recordID, tenantID, pairs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": len(pairs)})
+}
+
+// HealApproveCorruption fixes opening/closing on daily_sales_items rows where
+// the v1.0.133-r4 approval-time bug stamped opening==closing. Admin-gated.
+// Body: {"record_ids": ["<uuid>", ...], "dry_run": true|false}.
+//
+// v1.0.162.
+func (h *SalesHandlers) HealApproveCorruption(c *gin.Context) {
+	tenantIDRaw, exists := c.Get("tenant_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "tenant not found"})
+		return
+	}
+	tenantID, ok := tenantIDRaw.(uuid.UUID)
+	if !ok {
+		if s, sok := tenantIDRaw.(string); sok {
+			parsed, err := uuid.Parse(s)
+			if err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid tenant"})
+				return
+			}
+			tenantID = parsed
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid tenant"})
+			return
+		}
+	}
+	var req struct {
+		RecordIDs []string `json:"record_ids" binding:"required"`
+		DryRun    bool     `json:"dry_run"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid body: %v", err)})
+		return
+	}
+	if len(req.RecordIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "record_ids required"})
+		return
+	}
+	parsedIDs := make([]uuid.UUID, 0, len(req.RecordIDs))
+	for _, idStr := range req.RecordIDs {
+		id, err := uuid.Parse(strings.TrimSpace(idStr))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid record_id: %s", idStr)})
+			return
+		}
+		parsedIDs = append(parsedIDs, id)
+	}
+	result, err := h.dailySalesService.HealApproveCorruption(c.Request.Context(), tenantID, parsedIDs, req.DryRun)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	c.JSON(http.StatusOK, result)
+}
 
-	req.RecordID = recordID
+// =====================================================================
+// v1.0.175 — Brand Shortcuts management
+//
+// Three handlers expose the operator-confirmed brand-alias corpus the
+// Smart Sale + Stock Setup matchers already consume:
+//
+//   GET    /api/sales/aliases?shop_id=<uuid_or_blank>
+//   POST   /api/sales/aliases
+//   DELETE /api/sales/aliases/:id
+//
+// Today operators couldn't see, edit, or remove the entries they
+// (or auto-learning) accumulated. This unblocks the "Brand Shortcuts"
+// settings screen and gives shopkeepers a UI for the alias loop their
+// app already silently maintains.
+//
+// All three pull tenant_id from the authenticated context; shop_id
+// comes from the query/body and may be blank (tenant-wide rows). Soft-
+// delete via ocr_brand_aliases.deleted_at = NOW() (column was added
+// in 20260504_add_shop_scope_to_aliases.sql so the lookup cascade
+// already filters them out).
+// =====================================================================
 
-	if err := h.validationService.ConfirmValidation(c.Request.Context(), recordID, tenantID, userID, req); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+// salesHandlersExtractTenantID centralises the (uuid|string) → uuid.UUID
+// coercion used throughout this file. Returns false on failure with
+// a 401 already written to the response.
+func (h *SalesHandlers) salesHandlersExtractTenantID(c *gin.Context) (uuid.UUID, bool) {
+	tenantIDRaw, exists := c.Get("tenant_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "tenant not found"})
+		return uuid.Nil, false
+	}
+	if id, ok := tenantIDRaw.(uuid.UUID); ok {
+		return id, true
+	}
+	if s, sok := tenantIDRaw.(string); sok {
+		parsed, err := uuid.Parse(s)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid tenant"})
+			return uuid.Nil, false
+		}
+		return parsed, true
+	}
+	c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid tenant"})
+	return uuid.Nil, false
+}
+
+// brandAliasResponse is the shape a single alias row takes on the wire.
+// Kept flat so the Flutter list cell can bind directly without nested
+// model classes.
+type brandAliasResponse struct {
+	ID                 string     `json:"id"`
+	AliasName          string     `json:"alias_name"`
+	CanonicalBrandName string     `json:"canonical_brand_name"`
+	ProductID          *string    `json:"product_id,omitempty"`
+	ShopID             *string    `json:"shop_id,omitempty"`
+	Source             string     `json:"source"`
+	OccurrenceCount    int        `json:"occurrence_count"`
+	ConfidenceScore    float64    `json:"confidence_score"`
+	LastUsedAt         *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+}
+
+func toBrandAliasResponse(a models.OCRBrandAlias) brandAliasResponse {
+	resp := brandAliasResponse{
+		ID:                 a.ID.String(),
+		AliasName:          a.AliasName,
+		CanonicalBrandName: a.CanonicalBrandName,
+		Source:             a.Source,
+		OccurrenceCount:    a.OccurrenceCount,
+		ConfidenceScore:    a.ConfidenceScore,
+		LastUsedAt:         a.LastUsedAt,
+		CreatedAt:          a.CreatedAt,
+	}
+	if a.ProductID != nil {
+		s := a.ProductID.String()
+		resp.ProductID = &s
+	}
+	if a.ShopID != nil {
+		s := a.ShopID.String()
+		resp.ShopID = &s
+	}
+	return resp
+}
+
+// ListBrandAliases returns operator-visible aliases split by scope:
+//
+//	tenant_aliases — shop_id IS NULL rows (apply to every shop)
+//	shop_aliases   — shop_id = <query.shop_id> rows (current shop only)
+//
+// When shop_id is blank, shop_aliases is empty. Soft-deleted rows are
+// excluded server-side (deleted_at IS NOT NULL).
+//
+// Sorted by occurrence_count DESC, last_used_at DESC NULLS LAST so the
+// "most useful" rows surface first in the UI. Capped at 1000 per scope
+// to keep the payload reasonable; the Flutter side filters client-side.
+func (h *SalesHandlers) ListBrandAliases(c *gin.Context) {
+	tenantID, ok := h.salesHandlersExtractTenantID(c)
+	if !ok {
+		return
+	}
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "alias service not configured"})
+		return
+	}
+
+	var shopID *uuid.UUID
+	if shopIDStr := strings.TrimSpace(c.Query("shop_id")); shopIDStr != "" {
+		parsed, err := uuid.Parse(shopIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid shop_id"})
+			return
+		}
+		shopID = &parsed
+	}
+
+	const maxPerScope = 1000
+
+	// Tenant-wide rows (always returned).
+	var tenantRows []models.OCRBrandAlias
+	if err := h.db.Model(&models.OCRBrandAlias{}).
+		Where("tenant_id = ? AND shop_id IS NULL AND deleted_at IS NULL", tenantID).
+		Order("occurrence_count DESC, last_used_at DESC NULLS LAST, alias_name ASC").
+		Limit(maxPerScope).
+		Find(&tenantRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("list tenant aliases: %v", err)})
+		return
+	}
+
+	// Shop-scoped rows — only when caller asked for a shop.
+	var shopRows []models.OCRBrandAlias
+	if shopID != nil {
+		if err := h.db.Model(&models.OCRBrandAlias{}).
+			Where("tenant_id = ? AND shop_id = ? AND deleted_at IS NULL", tenantID, *shopID).
+			Order("occurrence_count DESC, last_used_at DESC NULLS LAST, alias_name ASC").
+			Limit(maxPerScope).
+			Find(&shopRows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("list shop aliases: %v", err)})
+			return
+		}
+	}
+
+	tenantOut := make([]brandAliasResponse, 0, len(tenantRows))
+	for _, row := range tenantRows {
+		tenantOut = append(tenantOut, toBrandAliasResponse(row))
+	}
+	shopOut := make([]brandAliasResponse, 0, len(shopRows))
+	for _, row := range shopRows {
+		shopOut = append(shopOut, toBrandAliasResponse(row))
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tenant_aliases": tenantOut,
+		"shop_aliases":   shopOut,
+		"shop_id":        shopID,
+		"counts": gin.H{
+			"tenant": len(tenantOut),
+			"shop":   len(shopOut),
+		},
+	})
+}
+
+// CreateBrandAlias writes an operator-defined alias.
+//
+// Body:
+//
+//	{
+//	  "ocr_text":   "MCD",                                  // required, ≥2 chars
+//	  "product_id": "<uuid>",                               // required
+//	  "scope":      "shop" | "tenant",                      // required
+//	  "shop_id":    "<uuid>"                                // required when scope=shop
+//	}
+//
+// Goes through the same hygiene gate the auto-learning loop uses
+// (LearnAliasScoped → jaccard ≥ 0.20, not blocked by negative alias)
+// so manual entries can't bypass safety checks. source = "user_manual"
+// scores 80.0 (same band as user_correction-grade learning).
+func (h *SalesHandlers) CreateBrandAlias(c *gin.Context) {
+	tenantID, ok := h.salesHandlersExtractTenantID(c)
+	if !ok {
+		return
+	}
+	if h.aliasService == nil || h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "alias service not configured"})
+		return
+	}
+
+	var req struct {
+		OCRText   string `json:"ocr_text" binding:"required"`
+		ProductID string `json:"product_id" binding:"required"`
+		Scope     string `json:"scope" binding:"required"`
+		ShopID    string `json:"shop_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid body: %v", err)})
+		return
+	}
+
+	ocrText := strings.TrimSpace(req.OCRText)
+	if len(ocrText) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ocr_text must be at least 2 characters"})
+		return
+	}
+
+	productID, err := uuid.Parse(strings.TrimSpace(req.ProductID))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product_id"})
+		return
+	}
+
+	scope := strings.ToLower(strings.TrimSpace(req.Scope))
+	if scope != "shop" && scope != "tenant" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "scope must be 'shop' or 'tenant'"})
+		return
+	}
+
+	var shopID uuid.UUID
+	if scope == "shop" {
+		if strings.TrimSpace(req.ShopID) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "shop_id required when scope=shop"})
+			return
+		}
+		parsed, err := uuid.Parse(strings.TrimSpace(req.ShopID))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid shop_id"})
+			return
+		}
+		shopID = parsed
+	}
+
+	// Look up the canonical brand/product name so the alias row carries
+	// it (the matcher reads canonical_brand_name straight off the row).
+	var product models.Product
+	if err := h.db.Model(&models.Product{}).
+		Where("id = ? AND tenant_id = ?", productID, tenantID).
+		First(&product).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "product not found in this tenant"})
+		return
+	}
+	canonical := product.Name
+	if canonical == "" {
+		canonical = ocrText // last-resort fallback so we never write empty canonical
+	}
+
+	if err := h.aliasService.LearnAliasScoped(tenantID, shopID, ocrText, canonical, &productID, "user_manual"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("learn alias: %v", err)})
+		return
+	}
+	// v1.0.199 — when the operator targets a SHOP scope, also mirror the
+	// alias tenant-wide as the cross-shop default. Skip when scope=="tenant"
+	// (already tenant) or shop is nil. This is the manual brand-shortcuts UX
+	// path; manual writes should propagate by default — operators rarely want
+	// a per-shop brand-shortcut override.
+	if scope == "shop" && shopID != uuid.Nil {
+		_ = h.aliasService.LearnAliasScoped(tenantID, uuid.Nil, ocrText, canonical, &productID, "user_manual_tenant")
+	}
+
+	// Read back the freshly upserted row so the client gets the canonical
+	// id/timestamps for optimistic UI updates.
+	var saved models.OCRBrandAlias
+	q := h.db.Model(&models.OCRBrandAlias{}).
+		Where("tenant_id = ? AND LOWER(alias_name) = ? AND deleted_at IS NULL",
+			tenantID, strings.ToLower(ocrText))
+	if scope == "shop" {
+		q = q.Where("shop_id = ?", shopID)
+	} else {
+		q = q.Where("shop_id IS NULL")
+	}
+	if err := q.First(&saved).Error; err != nil {
+		// Hygiene gate may have rejected (jaccard < 0.20, blocked negative,
+		// etc.) — surface a 200 with a no-op marker so the UI can show
+		// "Shortcut not added (rejected by safety check)".
+		c.JSON(http.StatusOK, gin.H{
+			"alias":    nil,
+			"created":  false,
+			"message":  "alias not stored — failed hygiene gate (too dissimilar from canonical, or in negative-alias table)",
+		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Validation confirmed successfully",
+		"alias":   toBrandAliasResponse(saved),
+		"created": true,
 	})
 }
 
-// GetAccuracyDashboard returns OCR accuracy metrics for the dashboard
-// GET /api/sales/validation/accuracy
-func (h *SalesHandlers) GetAccuracyDashboard(c *gin.Context) {
-	if h.validationService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Validation service not available"})
+// DeleteBrandAlias soft-deletes a brand alias by ID. Tenant-scoped — a
+// tenant cannot remove another tenant's alias even if the ID is guessed.
+// We also invalidate the Redis cache for the underlying (tenant, shop,
+// alias_name) key by simply re-using the alias-service path: write
+// deleted_at and let the next lookup miss + repopulate.
+func (h *SalesHandlers) DeleteBrandAlias(c *gin.Context) {
+	tenantID, ok := h.salesHandlersExtractTenantID(c)
+	if !ok {
+		return
+	}
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "alias service not configured"})
 		return
 	}
 
-	tenantID, _, err := h.getTenantAndUserID(c)
+	idStr := c.Param("id")
+	id, err := uuid.Parse(strings.TrimSpace(idStr))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid alias id"})
 		return
 	}
 
-	dashboard, err := h.validationService.GetAccuracyDashboard(c.Request.Context(), tenantID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	// Soft-delete — UPDATE … SET deleted_at = NOW() scoped to tenant_id.
+	// RowsAffected lets us 404 cleanly when nothing matched.
+	res := h.db.Exec(
+		`UPDATE ocr_brand_aliases SET deleted_at = NOW(), updated_at = NOW()
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		id, tenantID,
+	)
+	if res.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("delete alias: %v", res.Error)})
+		return
+	}
+	if res.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "alias not found"})
 		return
 	}
 
-	c.JSON(http.StatusOK, dashboard)
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "id": id.String()})
 }
 
-// =============================================================================
-// Industrial-Grade Learning & Analytics Endpoints
-// =============================================================================
-
-// GetLearningStats returns statistics about the self-learning system
-// GET /api/sales/learning/stats
-func (h *SalesHandlers) GetLearningStats(c *gin.Context) {
-	if h.validationService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Validation service not available"})
+// ListSuggestedAliases — v1.0.182 Track D2.
+//
+// GET /sales/aliases/suggested?shop_id=<uuid>&days=30
+//
+// Returns the top OCR strings (last N days, default 30) extracted by Smart
+// Sale that hit `not_found` / `low_confidence` / `not_matched` AND don't
+// have a learned alias yet. Each row carries occurrence_count so the UI
+// can prioritise the most-frequently-stuck strings. Caps at top 50.
+//
+// Source: smart_sale_setup_jobs.result->'extracted_items' jsonb. Each item
+// with status in (not_found, low_confidence, not_matched) contributes its
+// raw_brand_name / ocr_text. Aliases that already exist in
+// ocr_brand_aliases (any source, any shop scope) are excluded.
+//
+// Tenant-scoped via auth context. shop_id query param optional — when
+// blank, returns tenant-wide stuck strings; when set, filters to that shop
+// only. Operator UX: Brand Shortcuts page renders this with a 2-tap "map
+// to existing brand" flow that POSTs back to /sales/aliases.
+func (h *SalesHandlers) ListSuggestedAliases(c *gin.Context) {
+	tenantID, ok := h.salesHandlersExtractTenantID(c)
+	if !ok {
 		return
 	}
-
-	tenantID, _, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "alias service not configured"})
 		return
 	}
-
-	stats, err := h.validationService.GetLearningStats(c.Request.Context(), tenantID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, stats)
-}
-
-// GetAccuracyTrend returns accuracy trend analysis for the specified period
-// GET /api/sales/learning/accuracy-trend?days=30
-func (h *SalesHandlers) GetAccuracyTrend(c *gin.Context) {
-	if h.validationService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Validation service not available"})
-		return
-	}
-
-	tenantID, _, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Parse days parameter (default 30)
 	days := 30
-	if daysStr := c.Query("days"); daysStr != "" {
-		if d, err := strconv.Atoi(daysStr); err == nil && d > 0 && d <= 365 {
+	if v := strings.TrimSpace(c.Query("days")); v != "" {
+		var d int
+		if _, err := fmt.Sscanf(v, "%d", &d); err == nil && d > 0 && d <= 90 {
 			days = d
 		}
 	}
+	since := time.Now().AddDate(0, 0, -days)
 
-	trend, err := h.validationService.GetAccuracyTrend(c.Request.Context(), tenantID, days)
+	shopFilter := strings.TrimSpace(c.Query("shop_id"))
+	var shopUUID uuid.UUID
+	if shopFilter != "" {
+		parsed, err := uuid.Parse(shopFilter)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid shop_id"})
+			return
+		}
+		shopUUID = parsed
+	}
+
+	type suggestion struct {
+		OCRText         string `json:"ocr_text"`
+		OccurrenceCount int    `json:"occurrence_count"`
+		LastSeen        string `json:"last_seen"`
+		ExampleStatus   string `json:"example_status"`
+	}
+
+	rows, err := h.db.DB.Raw(`
+		WITH extracted AS (
+			SELECT
+				j.shop_id,
+				j.created_at,
+				LOWER(TRIM(COALESCE(item->>'ocr_text',
+				                    item->>'original_ai_brand',
+				                    item->>'brand_name',
+				                    item->>'raw_brand_name',
+				                    ''))) AS ocr_text,
+				LOWER(TRIM(COALESCE(item->>'validation_status', ''))) AS validation_status
+			FROM smart_sale_setup_jobs j,
+			     jsonb_array_elements(COALESCE(j.result->'extracted_items','[]'::jsonb)) item
+			WHERE j.tenant_id = ?
+			  AND j.created_at >= ?
+			  AND j.deleted_at IS NULL
+			  AND j.status = 'done'
+			  AND (? = '' OR j.shop_id = ?)
+		)
+		SELECT
+			ocr_text,
+			COUNT(*) AS occ,
+			MAX(created_at)::text AS last_seen,
+			MAX(validation_status) AS example_status
+		FROM extracted
+		WHERE ocr_text <> ''
+		  AND length(ocr_text) >= 3
+		  AND validation_status IN ('not_found','low_confidence','ambiguous','no_match','missing','not_matched')
+		  AND NOT EXISTS (
+		      SELECT 1 FROM ocr_brand_aliases a
+		      WHERE a.tenant_id = ?
+		        AND LOWER(a.alias_name) = ocr_text
+		        AND a.deleted_at IS NULL
+		  )
+		GROUP BY ocr_text
+		HAVING COUNT(*) >= 2
+		ORDER BY occ DESC, last_seen DESC
+		LIMIT 50
+	`, tenantID, since, shopFilter, shopUUID, tenantID).Rows()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	defer rows.Close()
 
-	c.JSON(http.StatusOK, trend)
-}
-
-// TriggerBatchLearning triggers batch learning process for the tenant
-// POST /api/sales/learning/batch-process
-func (h *SalesHandlers) TriggerBatchLearning(c *gin.Context) {
-	if h.validationService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Validation service not available"})
-		return
-	}
-
-	tenantID, _, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Run batch learning asynchronously
-	go func() {
-		ctx := context.Background()
-		_, err := h.validationService.ProcessBatchLearning(ctx, tenantID)
-		_ = err
-	}()
-
-	c.JSON(http.StatusAccepted, gin.H{
-		"status":  "processing",
-		"message": "Batch learning triggered. Check learning stats for results.",
-	})
-}
-
-// =============================================================================
-// Sale Revert with Dual OTP Verification (Admin-only)
-// =============================================================================
-
-// RequestRevertOTP sends dual OTPs (email and phone) for sale revert verification
-// POST /api/sales/sales/:id/revert/request-otp
-func (h *SalesHandlers) RequestRevertOTP(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Admin role check
-	userRole := c.GetString("role")
-	if userRole != "admin" && userRole != "owner" && userRole != "saas_admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "only admin or owner can revert sales"})
-		return
-	}
-
-	saleID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sale ID"})
-		return
-	}
-
-	response, err := h.salesService.RequestRevertOTP(c.Request.Context(), saleID, tenantID, userID)
-	if err != nil {
-		errMsg := err.Error()
-		switch {
-		case strings.Contains(errMsg, "not found"):
-			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "only approved"):
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
-		}
-		return
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
-// RevertSaleWithOTP reverts an approved sale after verifying dual OTPs
-// POST /api/sales/sales/:id/revert
-func (h *SalesHandlers) RevertSaleWithOTP(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Admin role check
-	userRole := c.GetString("role")
-	if userRole != "admin" && userRole != "owner" && userRole != "saas_admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "only admin or owner can revert sales"})
-		return
-	}
-
-	saleID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sale ID"})
-		return
-	}
-
-	var req services.RevertSaleWithOTPRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Validate required fields
-	if req.EmailOTP == "" || req.PhoneOTP == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "both email_otp and phone_otp are required"})
-		return
-	}
-	if req.Reason == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "reason is required"})
-		return
-	}
-
-	sale, err := h.salesService.RevertSaleWithOTP(c.Request.Context(), saleID, tenantID, userID, req)
-	if err != nil {
-		errMsg := err.Error()
-		switch {
-		case strings.Contains(errMsg, "OTP expired") || strings.Contains(errMsg, "not requested"):
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "invalid"):
-			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "maximum"):
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "not found"):
-			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
-		}
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Sale reverted successfully",
-		"sale":    sale,
-	})
-}
-
-// ========================================
-// Daily Sales Record Revert Handlers
-// ========================================
-
-// RequestDailySalesRevertOTP requests OTP for daily sales record revert
-// POST /api/daily-sales/:id/revert/request-otp
-func (h *SalesHandlers) RequestDailySalesRevertOTP(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Admin/Owner role check
-	userRole := c.GetString("role")
-	if userRole != "admin" && userRole != "owner" && userRole != "saas_admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "only admin or owner can revert daily sales records"})
-		return
-	}
-
-	recordID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
-		return
-	}
-
-	response, err := h.dailySalesService.RequestDailySalesRevertOTP(c.Request.Context(), recordID, tenantID, userID)
-	if err != nil {
-		errMsg := err.Error()
-		switch {
-		case strings.Contains(errMsg, "not found"):
-			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "only approved"):
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
-		}
-		return
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
-// RevertDailySalesRecordWithOTP reverts an approved daily sales record after verifying dual OTPs
-// POST /api/daily-sales/:id/revert
-func (h *SalesHandlers) RevertDailySalesRecordWithOTP(c *gin.Context) {
-	tenantID, userID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Admin/Owner role check
-	userRole := c.GetString("role")
-	if userRole != "admin" && userRole != "owner" && userRole != "saas_admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "only admin or owner can revert daily sales records"})
-		return
-	}
-
-	recordID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
-		return
-	}
-
-	var req services.DailySalesRevertWithOTPRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Validate required fields
-	if req.EmailOTP == "" || req.PhoneOTP == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "both email_otp and phone_otp are required"})
-		return
-	}
-	if req.Reason == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "reason is required"})
-		return
-	}
-
-	record, err := h.dailySalesService.RevertDailySalesRecordWithOTP(c.Request.Context(), recordID, tenantID, userID, req)
-	if err != nil {
-		errMsg := err.Error()
-		switch {
-		case strings.Contains(errMsg, "OTP expired") || strings.Contains(errMsg, "not requested"):
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "OTP") && strings.Contains(errMsg, "invalid"):
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "attempts exceeded"):
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": errMsg})
-		case strings.Contains(errMsg, "not found"):
-			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
-		}
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Daily sales record reverted successfully",
-		"record":  record,
-	})
-}
-
-// ============================================================================
-// Smart Sale Endpoints (AI-assisted sale creation from images)
-// ============================================================================
-
-// SmartSaleFinalizeRequest represents the request to finalize a smart sale
-// Supports both legacy (Flutter) and standard field names for backward compatibility
-type SmartSaleFinalizeRequest struct {
-	ShopID   string                    `json:"shop_id" binding:"required"`
-	ShopName string                    `json:"shop_name"`
-	Date     string                    `json:"date" binding:"required"` // YYYY-MM-DD format
-	Size     string                    `json:"size"`                    // e.g., "375ML"
-	Items    []SmartSaleItemRequest    `json:"items" binding:"required"`
-
-	// Standard field names (backend convention)
-	TotalSalesAmount   float64 `json:"total_sales_amount"`   // Standard: total gross sales
-	TotalCashAmount    float64 `json:"total_cash_amount"`    // Standard: cash payment
-	TotalCardAmount    float64 `json:"total_card_amount"`    // Standard: card payment
-	TotalUpiAmount     float64 `json:"total_upi_amount"`     // Standard: UPI payment
-	TotalCreditAmount  float64 `json:"total_credit_amount"`  // Standard: credit payment
-	TotalExpenseAmount float64 `json:"total_expense_amount"` // Standard: total expenses
-
-	// Legacy field names (Flutter app compatibility) - normalized to standard after binding
-	GrossAmount   float64 `json:"gross_amount"`   // Legacy → TotalSalesAmount
-	TotalAmount   float64 `json:"total_amount"`   // Legacy → TotalSalesAmount (fallback)
-	TotalExpenses float64 `json:"total_expenses"` // Legacy → TotalExpenseAmount
-	CashAmount    float64 `json:"cash_amount"`    // Legacy → TotalCashAmount
-	CardAmount    float64 `json:"card_amount"`    // Legacy → TotalCardAmount
-	UPIAmount     float64 `json:"upi_amount"`     // Legacy → TotalUpiAmount
-	CreditAmount  float64 `json:"credit_amount"`  // Legacy → TotalCreditAmount
-
-	Expenses    []SmartSaleExpenseRequest `json:"expenses"`
-	Notes       string                    `json:"notes"`
-	SmartSaleID *string                   `json:"smart_sale_id"` // Optional reference to the smart sale session
-	ImageURLs   []string                  `json:"image_urls"`    // URLs of uploaded images
-}
-
-// NormalizeLegacyFields normalizes legacy field names to standard names
-// This ensures backward compatibility with Flutter app while using standard names internally
-func (r *SmartSaleFinalizeRequest) NormalizeLegacyFields() {
-	// TotalSalesAmount: prefer GrossAmount, fallback to TotalAmount, then standard field
-	if r.TotalSalesAmount == 0 {
-		if r.GrossAmount > 0 {
-			r.TotalSalesAmount = r.GrossAmount
-		} else if r.TotalAmount > 0 {
-			r.TotalSalesAmount = r.TotalAmount
-		}
-	}
-
-	// TotalExpenseAmount: prefer TotalExpenses, then standard field
-	if r.TotalExpenseAmount == 0 && r.TotalExpenses > 0 {
-		r.TotalExpenseAmount = r.TotalExpenses
-	}
-
-	// TotalCashAmount: prefer CashAmount, then standard field
-	if r.TotalCashAmount == 0 && r.CashAmount > 0 {
-		r.TotalCashAmount = r.CashAmount
-	}
-
-	// TotalCardAmount: prefer CardAmount, then standard field
-	if r.TotalCardAmount == 0 && r.CardAmount > 0 {
-		r.TotalCardAmount = r.CardAmount
-	}
-
-	// TotalUpiAmount: prefer UPIAmount, then standard field
-	if r.TotalUpiAmount == 0 && r.UPIAmount > 0 {
-		r.TotalUpiAmount = r.UPIAmount
-	}
-
-	// TotalCreditAmount: prefer CreditAmount, then standard field
-	if r.TotalCreditAmount == 0 && r.CreditAmount > 0 {
-		r.TotalCreditAmount = r.CreditAmount
-	}
-}
-
-// SmartSaleItemRequest represents an item in the smart sale finalize request
-type SmartSaleItemRequest struct {
-	ProductID    string  `json:"product_id" binding:"required"`
-	BrandName    string  `json:"brand_name"`
-	Size         string  `json:"size"`
-	Category     string  `json:"category"`
-	Quantity     int     `json:"quantity"`
-	Rate         float64 `json:"rate"`
-	Amount       float64 `json:"amount"`
-	OpeningStock int     `json:"opening_stock"`
-	ClosingStock int     `json:"closing_stock"`
-	Receipt      int     `json:"receipt"`      // Stock received
-	Total        int     `json:"total"`        // Opening + Receipt
-	DBStock      int     `json:"db_stock"`     // Stock in database
-	IsValid      bool    `json:"is_valid"`
-}
-
-// SmartSaleExpenseRequest represents an expense in the smart sale finalize request
-type SmartSaleExpenseRequest struct {
-	Header string  `json:"header" binding:"required"`
-	Amount float64 `json:"amount" binding:"required"`
-}
-
-// FinalizeSmartSale creates a daily sales record from smart sale (AI-extracted) data
-// POST /api/sales/smart-sale/finalize
-func (h *SalesHandlers) FinalizeSmartSale(c *gin.Context) {
-	tenantID, createdByID, err := h.getTenantAndUserID(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	var req SmartSaleFinalizeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
-		return
-	}
-
-	// Normalize legacy field names to standard names for backward compatibility
-	req.NormalizeLegacyFields()
-
-	// Parse shop ID
-	shopID, err := uuid.Parse(req.ShopID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shop_id format"})
-		return
-	}
-
-	// Parse date
-	recordDate, err := time.Parse("2006-01-02", req.Date)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format, expected YYYY-MM-DD"})
-		return
-	}
-
-	// Convert items to DailySalesItemRequest format
-	// First pass: collect items and calculate total
-	type itemData struct {
-		ProductID    uuid.UUID
-		Quantity     int
-		Rate         float64
-		Amount       float64
-		OpeningStock int
-		ClosingStock int
-		// OCR-extracted data for manager review
-		OCRBrandName string
-		OCRSize      string
-		OCRReceipt   int
-		OCRTotal     int
-		DBStock      int
-		OCRRate      float64
-	}
-	var itemsData []itemData
-	var totalSalesAmount float64
-
-	for _, item := range req.Items {
-		// Skip items with zero quantity (no sale)
-		if item.Quantity <= 0 {
+	out := make([]suggestion, 0, 16)
+	for rows.Next() {
+		var s suggestion
+		if err := rows.Scan(&s.OCRText, &s.OccurrenceCount, &s.LastSeen, &s.ExampleStatus); err != nil {
 			continue
 		}
-
-		productID, err := uuid.Parse(item.ProductID)
-		if err != nil {
-			continue
-		}
-
-		// Calculate amount if not provided
-		amount := item.Amount
-		if amount == 0 && item.Rate > 0 {
-			amount = float64(item.Quantity) * item.Rate
-		}
-
-		itemsData = append(itemsData, itemData{
-			ProductID:    productID,
-			Quantity:     item.Quantity,
-			Rate:         item.Rate,
-			Amount:       amount,
-			OpeningStock: item.OpeningStock,
-			ClosingStock: item.ClosingStock,
-			// OCR-extracted data from Flutter (what user saw/confirmed)
-			OCRBrandName: item.BrandName,
-			OCRSize:      item.Size,
-			OCRReceipt:   item.Receipt,
-			OCRTotal:     item.Total,
-			DBStock:      item.DBStock,
-			OCRRate:      item.Rate, // Rate from image/user input
-		})
-
-		totalSalesAmount += amount
+		out = append(out, s)
 	}
-
-	if len(itemsData) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid items with quantity > 0 found"})
-		return
-	}
-
-	// ===== VALIDATE PRODUCT SIZES (if size filter was specified) =====
-	// Ensure all submitted products match the user's selected size
-	if req.Size != "" {
-		normalizedSize := strings.ToUpper(strings.TrimSpace(req.Size))
-		// Collect all product IDs
-		var productIDs []uuid.UUID
-		for _, item := range itemsData {
-			productIDs = append(productIDs, item.ProductID)
-		}
-
-		// Query products to get their sizes
-		type productSize struct {
-			ID   uuid.UUID `gorm:"column:id"`
-			Name string    `gorm:"column:name"`
-			Size string    `gorm:"column:size"`
-		}
-		var products []productSize
-		if err := h.dailySalesService.GetDB().Table("products").
-			Select("id, name, size").
-			Where("id IN ?", productIDs).
-			Find(&products).Error; err != nil {
-			// Continue without validation if query fails
-		} else {
-			// Create map for quick lookup
-			productSizeMap := make(map[uuid.UUID]productSize)
-			for _, p := range products {
-				productSizeMap[p.ID] = p
-			}
-
-			// Check each item's size
-			var sizeMismatches []string
-			for _, item := range itemsData {
-				if p, ok := productSizeMap[item.ProductID]; ok {
-					productSizeNorm := strings.ToUpper(strings.TrimSpace(p.Size))
-					if productSizeNorm != normalizedSize {
-						sizeMismatches = append(sizeMismatches, fmt.Sprintf("%s (%s)", p.Name, p.Size))
-					}
-				}
-			}
-
-			if len(sizeMismatches) > 0 {
-				// Log warning but allow submission - the filter might be for display only
-				// To enforce strict size matching, uncomment the following:
-				// c.JSON(http.StatusBadRequest, gin.H{
-				// 	"error": fmt.Sprintf("Size mismatch: Selected %s but found products with different sizes: %v", normalizedSize, sizeMismatches),
-				// })
-				// return
-			}
-		}
-	}
-
-	// ===== CALCULATE EXPENSES FIRST =====
-	// This must happen before payment adjustment so we have the correct expense amount
-	var expenses []services.DailySalesExpenseRequest
-	var calculatedExpenseAmount float64
-	for _, exp := range req.Expenses {
-		expenses = append(expenses, services.DailySalesExpenseRequest{
-			HeaderID:   strings.ToLower(strings.ReplaceAll(exp.Header, " ", "_")),
-			HeaderName: exp.Header,
-			Amount:     exp.Amount,
-		})
-		calculatedExpenseAmount += exp.Amount
-	}
-
-	// Determine final expense amount: prefer request header value, fallback to calculated from items
-	totalExpenseAmount := calculatedExpenseAmount
-	if req.TotalExpenseAmount > 0 {
-		totalExpenseAmount = req.TotalExpenseAmount
-		if utils.AbsFloat(totalExpenseAmount-calculatedExpenseAmount) > 0.01 {
-			// Expense mismatch - use request value
-		}
-	}
-
-	// ===== CALCULATE ITEMS TOTAL =====
-	calculatedItemsTotal := totalSalesAmount
-
-	// Check if request total differs from calculated total (items were filtered)
-	if req.TotalSalesAmount > 0 && utils.AbsFloat(req.TotalSalesAmount-calculatedItemsTotal) > 0.01 {
-		// Items total mismatch - using calculated total
-	}
-
-	// ALWAYS use calculated total from actual items to ensure consistency
-	// The request total might include items that were filtered (zero quantity, invalid product_id)
-	// totalSalesAmount is already set correctly from the items loop above
-
-	// ===== RECALCULATE PAYMENT BREAKDOWN =====
-	// Payment formula: Cash + Card + UPI + Credit + Expenses = TotalSalesAmount
-	// We must ensure this formula holds with the calculated items total
-	totalPayment := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
-
-	if totalPayment == 0 {
-		// If no payment breakdown provided, default all to cash (minus expenses)
-		req.TotalCashAmount = totalSalesAmount - totalExpenseAmount
-		totalPayment = req.TotalCashAmount
-	} else if req.TotalSalesAmount > 0 && utils.AbsFloat(req.TotalSalesAmount-calculatedItemsTotal) > 0.01 {
-		// Items were filtered, recalculate payment proportionally
-		// The payment amounts should sum to (calculatedItemsTotal - expenses)
-		netPaymentNeeded := calculatedItemsTotal - totalExpenseAmount
-		originalNetPayment := totalPayment // Cash + Card + UPI + Credit from request
-
-		if originalNetPayment > 0 {
-			ratio := netPaymentNeeded / originalNetPayment
-			req.TotalCashAmount = req.TotalCashAmount * ratio
-			req.TotalCardAmount = req.TotalCardAmount * ratio
-			req.TotalUpiAmount = req.TotalUpiAmount * ratio
-			req.TotalCreditAmount = req.TotalCreditAmount * ratio
-
-			// Recalculate to fix rounding
-			totalPayment = req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
-
-			// Adjust cash for any rounding difference
-			diff := netPaymentNeeded - totalPayment
-			if utils.AbsFloat(diff) > 0.001 {
-				req.TotalCashAmount += diff
-				totalPayment = req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
-			}
-		}
-	}
-
-	// ===== FINAL VALIDATION CHECK =====
-	// Ensure the payment formula holds before proceeding
-	finalPaymentSum := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount + totalExpenseAmount
-	if utils.AbsFloat(finalPaymentSum-totalSalesAmount) > 0.01 {
-		// Auto-adjust cash to make it balance
-		diff := totalSalesAmount - finalPaymentSum
-		req.TotalCashAmount += diff
-	}
-
-	// Second pass: create items with distributed payment amounts
-	var items []services.DailySalesItemRequest
-	var distributedCash, distributedCard, distributedUPI, distributedCredit float64
-
-	for i, data := range itemsData {
-		// Calculate this item's proportion of total
-		proportion := data.Amount / totalSalesAmount
-
-		// Distribute payment amounts proportionally (using normalized standard field names)
-		itemCash := req.TotalCashAmount * proportion
-		itemCard := req.TotalCardAmount * proportion
-		itemUPI := req.TotalUpiAmount * proportion
-		itemCredit := req.TotalCreditAmount * proportion
-
-		// For the last item, use remaining amounts to avoid rounding errors
-		if i == len(itemsData)-1 {
-			itemCash = req.TotalCashAmount - distributedCash
-			itemCard = req.TotalCardAmount - distributedCard
-			itemUPI = req.TotalUpiAmount - distributedUPI
-			itemCredit = req.TotalCreditAmount - distributedCredit
-		}
-
-		// Round to 2 decimal places
-		itemCash = float64(int(itemCash*100+0.5)) / 100
-		itemCard = float64(int(itemCard*100+0.5)) / 100
-		itemUPI = float64(int(itemUPI*100+0.5)) / 100
-		itemCredit = float64(int(itemCredit*100+0.5)) / 100
-
-		// Ensure payment sum equals item total (adjust cash if needed)
-		paymentSum := itemCash + itemCard + itemUPI + itemCredit
-		if diff := data.Amount - paymentSum; diff != 0 {
-			itemCash += diff // Adjust cash to make it balance
-		}
-
-		items = append(items, services.DailySalesItemRequest{
-			ProductID:    data.ProductID,
-			Quantity:     data.Quantity,
-			UnitPrice:    data.Rate,
-			TotalAmount:  data.Amount,
-			CashAmount:   itemCash,
-			CardAmount:   itemCard,
-			UpiAmount:    itemUPI,
-			CreditAmount: itemCredit,
-			OpeningStock: data.OpeningStock,
-			ClosingStock: data.ClosingStock,
-			// OCR-extracted data for manager review
-			OCRBrandName: data.OCRBrandName,
-			OCRSize:      data.OCRSize,
-			OCRReceipt:   data.OCRReceipt,
-			OCRTotal:     data.OCRTotal,
-			DBStock:      data.DBStock,
-			OCRRate:      data.OCRRate,
-		})
-
-		distributedCash += itemCash
-		distributedCard += itemCard
-		distributedUPI += itemUPI
-		distributedCredit += itemCredit
-	}
-
-	// Build the daily sales record request (using normalized standard field names)
-	dailySalesReq := services.DailySalesRecordRequest{
-		RecordDate:         recordDate,
-		ShopID:             shopID,
-		TotalSalesAmount:   totalSalesAmount,
-		TotalCashAmount:    req.TotalCashAmount,
-		TotalCardAmount:    req.TotalCardAmount,
-		TotalUpiAmount:     req.TotalUpiAmount,
-		TotalCreditAmount:  req.TotalCreditAmount,
-		TotalExpenseAmount: totalExpenseAmount,
-		Notes:              req.Notes,
-		Items:              items,
-		Expenses:           expenses,
-		ImageURLs:          req.ImageURLs,
-	}
-
-	// Validate payment breakdown matches total (including expenses paid from cash)
-	paymentTotal := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount + totalExpenseAmount
-	if paymentTotal > 0 && utils.AbsFloat(paymentTotal-totalSalesAmount) > 0.01 {
-		// Payment breakdown mismatch detected
-	}
-
-	// Create the daily sales record
-	record, err := h.dailySalesService.CreateDailySalesRecord(c.Request.Context(), dailySalesReq, tenantID, createdByID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sale: " + err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"success": true,
-		"sale_id": record.ID,
-		"message": "Sale submitted successfully",
+	c.JSON(http.StatusOK, gin.H{
+		"days":        days,
+		"since":       since.UTC().Format(time.RFC3339),
+		"suggestions": out,
+		"count":       len(out),
 	})
 }

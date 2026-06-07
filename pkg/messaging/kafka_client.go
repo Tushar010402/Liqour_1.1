@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -22,10 +23,11 @@ type KafkaConfig struct {
 
 // KafkaClient handles Kafka operations
 type KafkaClient struct {
-	config  KafkaConfig
-	writer  *kafka.Writer
-	readers map[string]*kafka.Reader
-	logger  *zap.Logger
+	config    KafkaConfig
+	writer    *kafka.Writer
+	readers   map[string]*kafka.Reader
+	readersMu sync.RWMutex  // Protect concurrent map access
+	logger    *zap.Logger
 }
 
 // Message represents a Kafka message
@@ -163,7 +165,10 @@ func (k *KafkaClient) Subscribe(topic string, groupID string, handler func(ctx c
 		ErrorLogger:    kafka.LoggerFunc(k.logKafkaError),
 	})
 
+	// Thread-safe map write
+	k.readersMu.Lock()
 	k.readers[topic] = reader
+	k.readersMu.Unlock()
 
 	// Start consuming in a goroutine
 	go k.consumeMessages(reader, handler)
@@ -275,7 +280,8 @@ func (k *KafkaClient) Close() error {
 		}
 	}
 
-	// Close all readers
+	// Close all readers (thread-safe)
+	k.readersMu.Lock()
 	for topic, reader := range k.readers {
 		if err := reader.Close(); err != nil {
 			k.logger.Error("Failed to close Kafka reader",
@@ -283,6 +289,7 @@ func (k *KafkaClient) Close() error {
 				zap.String("topic", topic))
 		}
 	}
+	k.readersMu.Unlock()
 
 	return nil
 }

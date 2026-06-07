@@ -71,6 +71,18 @@ func RoundToTwoDecimals(amount float64) float64 {
 	return float64(int(amount*100)) / 100
 }
 
+// IST timezone utilities
+var IST = time.FixedZone("IST", 5*3600+30*60)
+
+func StartOfDayIST(t time.Time) time.Time {
+	ist := t.In(IST)
+	return time.Date(ist.Year(), ist.Month(), ist.Day(), 0, 0, 0, 0, IST)
+}
+
+func NowIST() time.Time {
+	return time.Now().In(IST)
+}
+
 // Date utilities
 func FormatDate(t time.Time) string {
 	return t.Format("2006-01-02")

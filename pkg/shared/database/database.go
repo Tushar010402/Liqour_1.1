@@ -18,13 +18,17 @@ type DB struct {
 
 // Config holds database configuration
 type Config struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	DBName   string
-	SSLMode  string
-	TimeZone string
+	Host            string
+	Port            int
+	User            string
+	Password        string
+	DBName          string
+	SSLMode         string
+	TimeZone        string
+	MaxOpenConns    int           // Maximum number of open connections
+	MaxIdleConns    int           // Maximum number of idle connections
+	ConnMaxLifetime time.Duration // Maximum connection lifetime
+	ConnMaxIdleTime time.Duration // Maximum connection idle time
 }
 
 // NewDatabase creates a new database connection
@@ -33,7 +37,7 @@ func NewDatabase(config Config) (*DB, error) {
 		config.Host, config.Port, config.User, config.Password, config.DBName, config.SSLMode, config.TimeZone)
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: logger.Default.LogMode(logger.Info),
 		NowFunc: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -47,12 +51,34 @@ func NewDatabase(config Config) (*DB, error) {
 		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
 	}
 
-	// Connection pool settings - optimized for 6 microservices sharing PostgreSQL
-	// PostgreSQL max_connections=300, so 6 services x 50 = 300 max
-	sqlDB.SetMaxOpenConns(50)                     // Scaled for 100K concurrent users
-	sqlDB.SetMaxIdleConns(20)                     // Keep more warm connections for burst traffic
-	sqlDB.SetConnMaxLifetime(15 * time.Minute)    // Faster recycling for better load distribution
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)     // Release idle connections faster
+	// Connection pool settings with high-performance defaults
+	maxOpenConns := config.MaxOpenConns
+	if maxOpenConns == 0 {
+		maxOpenConns = 200 // High-performance default (was 25)
+	}
+
+	maxIdleConns := config.MaxIdleConns
+	if maxIdleConns == 0 {
+		maxIdleConns = 50 // Keep more idle connections ready (was 25)
+	}
+
+	connMaxLifetime := config.ConnMaxLifetime
+	if connMaxLifetime == 0 {
+		connMaxLifetime = 30 * time.Minute // Longer lifetime for stability (was 5 min)
+	}
+
+	connMaxIdleTime := config.ConnMaxIdleTime
+	if connMaxIdleTime == 0 {
+		connMaxIdleTime = 10 * time.Minute // Close idle connections after 10 min
+	}
+
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	sqlDB.SetMaxIdleConns(maxIdleConns)
+	sqlDB.SetConnMaxLifetime(connMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(connMaxIdleTime)
+
+	log.Printf("Database connection pool configured: MaxOpen=%d, MaxIdle=%d, MaxLifetime=%v, MaxIdleTime=%v",
+		maxOpenConns, maxIdleConns, connMaxLifetime, connMaxIdleTime)
 
 	return &DB{db}, nil
 }

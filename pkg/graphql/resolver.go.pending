@@ -1,0 +1,732 @@
+package graphql
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/liquorpro/go-backend/pkg/cqrs"
+	"github.com/liquorpro/go-backend/pkg/messaging"
+	"github.com/liquorpro/go-backend/pkg/observability"
+	"github.com/liquorpro/go-backend/pkg/security"
+	"github.com/liquorpro/go-backend/pkg/shared/models"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+)
+
+// Resolver is the root resolver
+type Resolver struct {
+	DB              *gorm.DB
+	Redis           *redis.Client
+	DataLoaders     *DataLoaders
+	CommandBus      *cqrs.CommandBus
+	QueryBus        *cqrs.QueryBus
+	EventBus        *messaging.KafkaClient
+	Logger          *zap.Logger
+	Tracer          *observability.TracingProvider
+	SecurityManager *security.SecurityManager
+}
+
+// Query resolver
+
+func (r *Resolver) Query() QueryResolver {
+	return &queryResolver{r}
+}
+
+type queryResolver struct{ *Resolver }
+
+// User queries
+
+func (r *queryResolver) Me(ctx context.Context) (*models.User, error) {
+	userID := ctx.Value("user_id").(string)
+	return r.DataLoaders.UserByID.Load(ctx, userID)()
+}
+
+func (r *queryResolver) User(ctx context.Context, id string) (*models.User, error) {
+	return r.DataLoaders.UserByID.Load(ctx, id)()
+}
+
+func (r *queryResolver) Users(ctx context.Context, filter map[string]interface{}, pagination *PaginationInput) ([]*models.User, error) {
+	query := r.DB.WithContext(ctx)
+
+	// Apply filters
+	if filter != nil {
+		for key, value := range filter {
+			query = query.Where(fmt.Sprintf("%s = ?", key), value)
+		}
+	}
+
+	// Apply pagination
+	if pagination != nil {
+		query = query.Limit(pagination.Limit).Offset(pagination.Offset)
+		if pagination.SortBy != "" {
+			query = query.Order(fmt.Sprintf("%s %s", pagination.SortBy, pagination.SortOrder))
+		}
+	}
+
+	var users []*models.User
+	err := query.Find(&users).Error
+	return users, err
+}
+
+// Shop queries
+
+func (r *queryResolver) Shop(ctx context.Context, id string) (*models.Shop, error) {
+	return r.DataLoaders.ShopByID.Load(ctx, id)()
+}
+
+func (r *queryResolver) Shops(ctx context.Context, pagination *PaginationInput) ([]*models.Shop, error) {
+	query := r.DB.WithContext(ctx)
+
+	if pagination != nil {
+		query = query.Limit(pagination.Limit).Offset(pagination.Offset)
+	}
+
+	var shops []*models.Shop
+	err := query.Find(&shops).Error
+	return shops, err
+}
+
+func (r *queryResolver) MyShops(ctx context.Context) ([]*models.Shop, error) {
+	userID := ctx.Value("user_id").(string)
+	tenantID := ctx.Value("tenant_id").(string)
+
+	var shops []*models.Shop
+	err := r.DB.WithContext(ctx).
+		Joins("JOIN user_shops ON shops.id = user_shops.shop_id").
+		Where("user_shops.user_id = ? AND shops.tenant_id = ?", userID, tenantID).
+		Find(&shops).Error
+
+	return shops, err
+}
+
+// Product queries
+
+func (r *queryResolver) Product(ctx context.Context, id string) (*models.Product, error) {
+	return r.DataLoaders.ProductByID.Load(ctx, id)()
+}
+
+func (r *queryResolver) Products(ctx context.Context, filter *ProductFilter, pagination *PaginationInput) ([]*models.Product, error) {
+	// Use CQRS query bus for complex queries
+	query := &cqrs.ListProductsQuery{
+		BaseQuery: cqrs.BaseQuery{
+			Type:     cqrs.QueryTypeListProducts,
+			TenantID: ctx.Value("tenant_id").(string),
+		},
+	}
+
+	if filter != nil {
+		query.CategoryID = filter.CategoryID
+		query.BrandID = filter.BrandID
+		query.ShopID = filter.ShopID
+		query.Search = filter.Search
+	}
+
+	if pagination != nil {
+		query.Limit = pagination.Limit
+		query.Offset = pagination.Offset
+		query.SortBy = pagination.SortBy
+		query.SortOrder = pagination.SortOrder
+	}
+
+	result, err := r.QueryBus.Send(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	return result.([]*models.Product), nil
+}
+
+func (r *queryResolver) SearchProducts(ctx context.Context, query string, limit int) ([]*models.Product, error) {
+	var products []*models.Product
+
+	// Use PostgreSQL full-text search
+	err := r.DB.WithContext(ctx).
+		Where("search_vector @@ plainto_tsquery('english', ?)", query).
+		Limit(limit).
+		Find(&products).Error
+
+	return products, err
+}
+
+// Brand queries
+
+func (r *queryResolver) Brand(ctx context.Context, id string) (*models.Brand, error) {
+	return r.DataLoaders.BrandByID.Load(ctx, id)()
+}
+
+func (r *queryResolver) Brands(ctx context.Context, pagination *PaginationInput) ([]*models.Brand, error) {
+	query := r.DB.WithContext(ctx)
+
+	if pagination != nil {
+		query = query.Limit(pagination.Limit).Offset(pagination.Offset)
+	}
+
+	var brands []*models.Brand
+	err := query.Find(&brands).Error
+	return brands, err
+}
+
+// Stock queries
+
+func (r *queryResolver) Stock(ctx context.Context, productID, shopID string) (*models.Stock, error) {
+	key := ProductShopKey{ProductID: productID, ShopID: shopID}
+	return r.DataLoaders.StockByProductID.Load(ctx, key)()
+}
+
+func (r *queryResolver) ShopInventory(ctx context.Context, shopID string, filter *ProductFilter) ([]*models.Stock, error) {
+	return r.DataLoaders.StocksByShopID.Load(ctx, shopID)()
+}
+
+func (r *queryResolver) LowStockProducts(ctx context.Context, shopID *string, threshold int) ([]*models.Stock, error) {
+	query := r.DB.WithContext(ctx).
+		Preload("Product").
+		Where("quantity <= ?", threshold)
+
+	if shopID != nil {
+		query = query.Where("shop_id = ?", *shopID)
+	}
+
+	var stocks []*models.Stock
+	err := query.Find(&stocks).Error
+	return stocks, err
+}
+
+// Sales queries
+
+func (r *queryResolver) Sale(ctx context.Context, id string) (*models.Sale, error) {
+	var sale models.Sale
+	err := r.DB.WithContext(ctx).
+		Preload("SaleItems.Product").
+		Preload("Shop").
+		Preload("Salesman").
+		First(&sale, "id = ?", id).Error
+	return &sale, err
+}
+
+func (r *queryResolver) Sales(ctx context.Context, shopID *string, filter *DateRangeInput, pagination *PaginationInput) ([]*models.Sale, error) {
+	query := r.DB.WithContext(ctx).
+		Preload("SaleItems.Product")
+
+	if shopID != nil {
+		query = query.Where("shop_id = ?", *shopID)
+	}
+
+	if filter != nil {
+		query = query.Where("created_at BETWEEN ? AND ?", filter.StartDate, filter.EndDate)
+	}
+
+	if pagination != nil {
+		query = query.Limit(pagination.Limit).Offset(pagination.Offset)
+	}
+
+	var sales []*models.Sale
+	err := query.Find(&sales).Error
+	return sales, err
+}
+
+func (r *queryResolver) MySales(ctx context.Context, filter *DateRangeInput, pagination *PaginationInput) ([]*models.Sale, error) {
+	userID := ctx.Value("user_id").(string)
+
+	query := r.DB.WithContext(ctx).
+		Preload("SaleItems.Product").
+		Where("salesman_id = ?", userID)
+
+	if filter != nil {
+		query = query.Where("created_at BETWEEN ? AND ?", filter.StartDate, filter.EndDate)
+	}
+
+	if pagination != nil {
+		query = query.Limit(pagination.Limit).Offset(pagination.Offset)
+	}
+
+	var sales []*models.Sale
+	err := query.Find(&sales).Error
+	return sales, err
+}
+
+// Analytics queries
+
+func (r *queryResolver) SalesAnalytics(ctx context.Context, shopID *string, filter DateRangeInput) (*SalesAnalytics, error) {
+	// Use CQRS query for analytics
+	query := &cqrs.GetSalesSummaryQuery{
+		BaseQuery: cqrs.BaseQuery{
+			Type:     cqrs.QueryTypeGetSalesSummary,
+			TenantID: ctx.Value("tenant_id").(string),
+		},
+		StartDate: filter.StartDate,
+		EndDate:   filter.EndDate,
+		GroupBy:   "day",
+	}
+
+	if shopID != nil {
+		query.ShopID = *shopID
+	}
+
+	result, err := r.QueryBus.Send(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	summary := result.(*cqrs.SalesSummaryReadModel)
+
+	// Convert to GraphQL type
+	analytics := &SalesAnalytics{
+		Period:            filter,
+		TotalSales:        summary.TotalSales,
+		TotalQuantity:     summary.TotalQuantity,
+		TotalOrders:       summary.TotalOrders,
+		AverageOrderValue: summary.AverageOrder,
+	}
+
+	return analytics, nil
+}
+
+func (r *queryResolver) InventoryAnalytics(ctx context.Context, shopID *string) (*InventoryAnalytics, error) {
+	tenantID := ctx.Value("tenant_id").(string)
+
+	analytics := &InventoryAnalytics{}
+
+	// Total products
+	r.DB.Model(&models.Product{}).
+		Where("tenant_id = ?", tenantID).
+		Count(&analytics.TotalProducts)
+
+	// Total value
+	r.DB.Model(&models.Stock{}).
+		Select("SUM(quantity * price)").
+		Joins("JOIN products ON stocks.product_id = products.id").
+		Where("products.tenant_id = ?", tenantID).
+		Scan(&analytics.TotalValue)
+
+	// Low stock products
+	r.DB.Model(&models.Product{}).
+		Joins("JOIN stocks ON products.id = stocks.product_id").
+		Where("products.tenant_id = ? AND stocks.quantity < stocks.minimum_level", tenantID).
+		Find(&analytics.LowStockProducts)
+
+	// Out of stock products
+	r.DB.Model(&models.Product{}).
+		Joins("JOIN stocks ON products.id = stocks.product_id").
+		Where("products.tenant_id = ? AND stocks.quantity = 0", tenantID).
+		Find(&analytics.OutOfStockProducts)
+
+	return analytics, nil
+}
+
+func (r *queryResolver) DashboardStats(ctx context.Context) (map[string]interface{}, error) {
+	tenantID := ctx.Value("tenant_id").(string)
+	userID := ctx.Value("user_id").(string)
+
+	stats := make(map[string]interface{})
+
+	// Today's sales
+	var todaySales float64
+	r.DB.Model(&models.Sale{}).
+		Select("COALESCE(SUM(total), 0)").
+		Where("tenant_id = ? AND DATE(created_at) = CURRENT_DATE", tenantID).
+		Scan(&todaySales)
+	stats["todaySales"] = todaySales
+
+	// Monthly sales
+	var monthlySales float64
+	r.DB.Model(&models.Sale{}).
+		Select("COALESCE(SUM(total), 0)").
+		Where("tenant_id = ? AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)", tenantID).
+		Scan(&monthlySales)
+	stats["monthlySales"] = monthlySales
+
+	// Total products
+	var totalProducts int64
+	r.DB.Model(&models.Product{}).
+		Where("tenant_id = ?", tenantID).
+		Count(&totalProducts)
+	stats["totalProducts"] = totalProducts
+
+	// Low stock alerts
+	var lowStockCount int64
+	r.DB.Model(&models.Stock{}).
+		Joins("JOIN products ON stocks.product_id = products.id").
+		Where("products.tenant_id = ? AND stocks.quantity < stocks.minimum_level", tenantID).
+		Count(&lowStockCount)
+	stats["lowStockAlerts"] = lowStockCount
+
+	// My sales (for salesman)
+	var mySales float64
+	r.DB.Model(&models.Sale{}).
+		Select("COALESCE(SUM(total), 0)").
+		Where("salesman_id = ? AND DATE(created_at) = CURRENT_DATE", userID).
+		Scan(&mySales)
+	stats["mySalesToday"] = mySales
+
+	return stats, nil
+}
+
+// Mutation resolver
+
+func (r *Resolver) Mutation() MutationResolver {
+	return &mutationResolver{r}
+}
+
+type mutationResolver struct{ *Resolver }
+
+// Product mutations
+
+func (r *mutationResolver) CreateProduct(ctx context.Context, input CreateProductInput) (*ProductResponse, error) {
+	// Use CQRS command bus
+	cmd := cqrs.NewCreateProductCommand(
+		ctx.Value("tenant_id").(string),
+		ctx.Value("user_id").(string),
+		input.Name,
+		input.SKU,
+		input.Price,
+	)
+
+	cmd.BrandID = input.BrandID
+	cmd.CategoryID = input.CategoryID
+	cmd.InitialStock = 0
+	cmd.Metadata = input.Metadata
+
+	err := r.CommandBus.Send(ctx, cmd)
+	if err != nil {
+		return &ProductResponse{
+			Success: false,
+			Message: err.Error(),
+			Errors:  []string{err.Error()},
+		}, nil
+	}
+
+	// Fetch created product
+	product, _ := r.DataLoaders.ProductByID.Load(ctx, cmd.AggregateID)()
+
+	// Publish event
+	r.EventBus.PublishEvent(ctx, messaging.BusinessEvent{
+		Type:     messaging.EventTypeProductCreated,
+		Subject:  cmd.AggregateID,
+		Data:     product,
+		TenantID: ctx.Value("tenant_id").(string),
+	})
+
+	return &ProductResponse{
+		Success: true,
+		Product: product,
+		Message: "Product created successfully",
+	}, nil
+}
+
+func (r *mutationResolver) UpdateProduct(ctx context.Context, input UpdateProductInput) (*ProductResponse, error) {
+	updates := make(map[string]interface{})
+
+	if input.Name != nil {
+		updates["name"] = *input.Name
+	}
+	if input.Price != nil {
+		updates["price"] = *input.Price
+	}
+	if input.Description != nil {
+		updates["description"] = *input.Description
+	}
+	if input.Status != nil {
+		updates["status"] = *input.Status
+	}
+
+	cmd := &cqrs.UpdateProductCommand{
+		BaseCommand: cqrs.BaseCommand{
+			Type:        cqrs.CommandTypeUpdateProduct,
+			AggregateID: input.ID,
+			TenantID:    ctx.Value("tenant_id").(string),
+			UserID:      ctx.Value("user_id").(string),
+			Timestamp:   time.Now(),
+		},
+		ProductID: input.ID,
+		Updates:   updates,
+	}
+
+	err := r.CommandBus.Send(ctx, cmd)
+	if err != nil {
+		return &ProductResponse{
+			Success: false,
+			Message: err.Error(),
+			Errors:  []string{err.Error()},
+		}, nil
+	}
+
+	// Invalidate cache
+	r.DataLoaders.ProductByID.Clear(ctx, input.ID)
+
+	// Fetch updated product
+	product, _ := r.DataLoaders.ProductByID.Load(ctx, input.ID)()
+
+	return &ProductResponse{
+		Success: true,
+		Product: product,
+		Message: "Product updated successfully",
+	}, nil
+}
+
+// Stock mutations
+
+func (r *mutationResolver) AdjustStock(ctx context.Context, input StockAdjustmentInput) (*StockResponse, error) {
+	cmd := cqrs.NewAdjustStockCommand(
+		ctx.Value("tenant_id").(string),
+		ctx.Value("user_id").(string),
+		input.ProductID,
+		input.ShopID,
+		input.Adjustment,
+		string(input.Reason),
+	)
+
+	cmd.Reference = input.Reference
+
+	err := r.CommandBus.Send(ctx, cmd)
+	if err != nil {
+		return &StockResponse{
+			Success: false,
+			Message: err.Error(),
+			Errors:  []string{err.Error()},
+		}, nil
+	}
+
+	// Fetch updated stock
+	key := ProductShopKey{ProductID: input.ProductID, ShopID: input.ShopID}
+	stock, _ := r.DataLoaders.StockByProductID.Load(ctx, key)()
+
+	// Publish stock update event
+	r.EventBus.PublishEvent(ctx, messaging.BusinessEvent{
+		Type:    messaging.EventTypeStockAdjusted,
+		Subject: input.ProductID,
+		Data: map[string]interface{}{
+			"product_id": input.ProductID,
+			"shop_id":    input.ShopID,
+			"adjustment": input.Adjustment,
+			"new_stock":  stock.Quantity,
+		},
+		TenantID: ctx.Value("tenant_id").(string),
+	})
+
+	return &StockResponse{
+		Success: true,
+		Stock:   stock,
+		Message: "Stock adjusted successfully",
+	}, nil
+}
+
+// Sales mutations
+
+func (r *mutationResolver) CreateSale(ctx context.Context, input CreateSaleInput) (*SaleResponse, error) {
+	// Convert input to command
+	items := make([]cqrs.SaleItem, len(input.Items))
+	for i, item := range input.Items {
+		items[i] = cqrs.SaleItem{
+			ProductID: item.ProductID,
+			Quantity:  item.Quantity,
+			Price:     item.Price,
+			Discount:  item.Discount,
+		}
+	}
+
+	cmd := &cqrs.ProcessSaleCommand{
+		BaseCommand: cqrs.BaseCommand{
+			Type:        cqrs.CommandTypeProcessSale,
+			TenantID:    ctx.Value("tenant_id").(string),
+			UserID:      ctx.Value("user_id").(string),
+			Timestamp:   time.Now(),
+		},
+		SaleID:      generateSaleID(),
+		ShopID:      input.ShopID,
+		Items:       items,
+		PaymentType: string(input.PaymentType),
+		CustomerID:  input.CustomerID,
+		Metadata:    input.Metadata,
+	}
+
+	// Calculate total
+	var total float64
+	for _, item := range items {
+		total += (item.Price - item.Discount) * float64(item.Quantity)
+	}
+	cmd.Total = total - input.Discount
+
+	err := r.CommandBus.Send(ctx, cmd)
+	if err != nil {
+		return &SaleResponse{
+			Success: false,
+			Message: err.Error(),
+			Errors:  []string{err.Error()},
+		}, nil
+	}
+
+	// Create sale in database
+	sale := &models.Sale{
+		ID:          cmd.SaleID,
+		TenantID:    cmd.TenantID,
+		ShopID:      cmd.ShopID,
+		SalesmanID:  cmd.UserID,
+		CustomerID:  cmd.CustomerID,
+		Total:       cmd.Total,
+		PaymentType: cmd.PaymentType,
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+	}
+
+	if err := r.DB.Create(sale).Error; err != nil {
+		return &SaleResponse{
+			Success: false,
+			Message: err.Error(),
+			Errors:  []string{err.Error()},
+		}, nil
+	}
+
+	// Publish sale event
+	r.EventBus.PublishEvent(ctx, messaging.BusinessEvent{
+		Type:     messaging.EventTypeSaleCreated,
+		Subject:  sale.ID,
+		Data:     sale,
+		TenantID: ctx.Value("tenant_id").(string),
+	})
+
+	return &SaleResponse{
+		Success: true,
+		Sale:    sale,
+		Message: "Sale created successfully",
+	}, nil
+}
+
+// User mutations
+
+func (r *mutationResolver) UpdateProfile(ctx context.Context, input map[string]interface{}) (*models.User, error) {
+	userID := ctx.Value("user_id").(string)
+
+	// Validate and sanitize input
+	if name, ok := input["name"].(string); ok {
+		input["name"] = r.SecurityManager.SanitizeHTML(name)
+	}
+
+	err := r.DB.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(input).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Clear cache and reload
+	r.DataLoaders.UserByID.Clear(ctx, userID)
+	return r.DataLoaders.UserByID.Load(ctx, userID)()
+}
+
+func (r *mutationResolver) ChangePassword(ctx context.Context, oldPassword, newPassword string) (bool, error) {
+	userID := ctx.Value("user_id").(string)
+
+	// Fetch user
+	var user models.User
+	if err := r.DB.First(&user, "id = ?", userID).Error; err != nil {
+		return false, err
+	}
+
+	// Verify old password
+	if !r.SecurityManager.VerifyPassword(oldPassword, user.Password) {
+		return false, fmt.Errorf("incorrect password")
+	}
+
+	// Hash new password
+	hashedPassword, err := r.SecurityManager.HashPassword(newPassword)
+	if err != nil {
+		return false, err
+	}
+
+	// Update password
+	err = r.DB.Model(&user).Update("password", hashedPassword).Error
+	return err == nil, err
+}
+
+// Subscription resolver
+
+func (r *Resolver) Subscription() SubscriptionResolver {
+	return &subscriptionResolver{r}
+}
+
+type subscriptionResolver struct{ *Resolver }
+
+func (r *subscriptionResolver) StockUpdated(ctx context.Context, productID, shopID *string) (<-chan *StockUpdate, error) {
+	ch := make(chan *StockUpdate, 1)
+
+	// Subscribe to Kafka topic for stock updates
+	go func() {
+		defer close(ch)
+
+		// Implementation would subscribe to Kafka and filter events
+		// For now, returning a placeholder
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Send mock update
+				ch <- &StockUpdate{
+					ProductID:   "test-product",
+					ShopID:      "test-shop",
+					OldQuantity: 100,
+					NewQuantity: 95,
+					Adjustment:  -5,
+					Reason:      StockAdjustmentReasonSale,
+					Timestamp:   time.Now(),
+				}
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+func (r *subscriptionResolver) SaleCreated(ctx context.Context, shopID *string) (<-chan *SaleUpdate, error) {
+	ch := make(chan *SaleUpdate, 1)
+
+	// Subscribe to sales events
+	go func() {
+		defer close(ch)
+
+		// Implementation would subscribe to Kafka/WebSocket
+		// Placeholder implementation
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Mock sale update
+				ch <- &SaleUpdate{
+					Sale: &models.Sale{
+						ID:    generateSaleID(),
+						Total: 1000.00,
+					},
+					Action: "created",
+				}
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// Helper functions
+
+func generateSaleID() string {
+	return fmt.Sprintf("SALE-%d", time.Now().Unix())
+}
+
+func (r *Resolver) Schema() string {
+	// Return the GraphQL schema as string
+	schema, _ := json.Marshal(map[string]interface{}{
+		"version": "1.0.0",
+		"description": "Liquor Management System GraphQL API",
+	})
+	return string(schema)
+}

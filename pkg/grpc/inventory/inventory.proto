@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package inventory;
+
+option go_package = "github.com/liquorpro/go-backend/pkg/grpc/inventory;inventory";
+
+// InventoryService provides high-performance inventory operations via gRPC
+service InventoryService {
+  // Product operations
+  rpc GetProduct(GetProductRequest) returns (ProductResponse);
+  rpc ListProducts(ListProductsRequest) returns (ListProductsResponse);
+  rpc CreateProduct(CreateProductRequest) returns (ProductResponse);
+  rpc UpdateProduct(UpdateProductRequest) returns (ProductResponse);
+  rpc DeleteProduct(DeleteProductRequest) returns (DeleteResponse);
+
+  // Stock operations (high-frequency calls)
+  rpc GetStock(GetStockRequest) returns (StockResponse);
+  rpc AdjustStock(AdjustStockRequest) returns (StockResponse);
+  rpc BulkStockUpdate(BulkStockUpdateRequest) returns (BulkStockUpdateResponse);
+
+  // Stream operations for real-time updates
+  rpc StreamStockUpdates(StreamStockRequest) returns (stream StockUpdateEvent);
+  rpc StreamProductChanges(StreamProductRequest) returns (stream ProductChangeEvent);
+}
+
+// Messages
+message GetProductRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+message ListProductsRequest {
+  string tenant_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  string category_id = 4;
+  string search = 5;
+}
+
+message CreateProductRequest {
+  string tenant_id = 1;
+  string name = 2;
+  string category_id = 3;
+  string brand_id = 4;
+  double price = 5;
+  double cost = 6;
+  string barcode = 7;
+  string sku = 8;
+  string description = 9;
+  string size = 10;
+  double alcohol_content = 11;
+}
+
+message UpdateProductRequest {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string category_id = 4;
+  double price = 5;
+  double cost = 6;
+  string description = 7;
+}
+
+message DeleteProductRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+message ProductResponse {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string category_id = 4;
+  string brand_id = 5;
+  double price = 6;
+  double cost = 7;
+  string barcode = 8;
+  string sku = 9;
+  string description = 10;
+  string size = 11;
+  double alcohol_content = 12;
+  double mrp = 13;
+  string created_at = 14;
+  string updated_at = 15;
+}
+
+message ListProductsResponse {
+  repeated ProductResponse products = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message GetStockRequest {
+  string product_id = 1;
+  string shop_id = 2;
+  string tenant_id = 3;
+}
+
+message AdjustStockRequest {
+  string product_id = 1;
+  string shop_id = 2;
+  string tenant_id = 3;
+  int32 quantity = 4;
+  string reason = 5;
+  string adjusted_by = 6;
+}
+
+message StockResponse {
+  string product_id = 1;
+  string shop_id = 2;
+  int32 quantity = 3;
+  int32 reserved_quantity = 4;
+  int32 available_quantity = 5;
+  string last_updated = 6;
+}
+
+message BulkStockUpdateRequest {
+  string tenant_id = 1;
+  string shop_id = 2;
+  repeated StockUpdate updates = 3;
+
+  message StockUpdate {
+    string product_id = 1;
+    int32 quantity = 2;
+    string reason = 3;
+  }
+}
+
+message BulkStockUpdateResponse {
+  int32 updated_count = 1;
+  int32 failed_count = 2;
+  repeated string errors = 3;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StreamStockRequest {
+  string tenant_id = 1;
+  string shop_id = 2;
+  repeated string product_ids = 3;
+}
+
+message StockUpdateEvent {
+  string product_id = 1;
+  string shop_id = 2;
+  int32 old_quantity = 3;
+  int32 new_quantity = 4;
+  string reason = 5;
+  string timestamp = 6;
+}
+
+message StreamProductRequest {
+  string tenant_id = 1;
+  string shop_id = 2;
+}
+
+message ProductChangeEvent {
+  string event_type = 1; // "created", "updated", "deleted"
+  ProductResponse product = 2;
+  string timestamp = 3;
+}

@@ -108,10 +108,31 @@ func WithGinContext(c *gin.Context) *zap.Logger {
 		zap.String("client_ip", c.ClientIP()),
 	)
 
+	// Add correlation ID for distributed tracing
+	if correlationID := c.GetString("correlation_id"); correlationID != "" {
+		logger = logger.With(zap.String("correlation_id", correlationID))
+	}
+
+	// Add request ID (may be same as correlation ID)
 	if requestID := c.GetString("request_id"); requestID != "" {
 		logger = logger.With(zap.String("request_id", requestID))
 	}
 
+	// Add span ID for trace spans
+	if spanID := c.GetString("span_id"); spanID != "" {
+		logger = logger.With(zap.String("span_id", spanID))
+	}
+
+	// Add service metadata
+	if serviceName := c.GetString("service_name"); serviceName != "" {
+		logger = logger.With(zap.String("service_name", serviceName))
+	}
+
+	if serviceVersion := c.GetString("service_version"); serviceVersion != "" {
+		logger = logger.With(zap.String("service_version", serviceVersion))
+	}
+
+	// Add user context
 	if userID := c.GetString("user_id"); userID != "" {
 		logger = logger.With(zap.String("user_id", userID))
 	}
@@ -317,23 +338,4 @@ func Sync() error {
 		return Logger.Sync()
 	}
 	return nil
-}
-
-// NewLogger creates a new logger instance for a given environment
-func NewLogger(environment string) (*zap.Logger, error) {
-	var config zap.Config
-
-	if environment == "production" {
-		config = zap.NewProductionConfig()
-		config.EncoderConfig.TimeKey = "timestamp"
-		config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	} else {
-		config = zap.NewDevelopmentConfig()
-		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	}
-
-	return config.Build(
-		zap.AddCaller(),
-		zap.AddStacktrace(zapcore.ErrorLevel),
-	)
 }

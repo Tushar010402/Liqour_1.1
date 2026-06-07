@@ -3,14 +3,14 @@ package services
 import (
 	"context"
 	"fmt"
-	"log"
-	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
 	"github.com/liquorpro/go-backend/pkg/shared/models"
+	"github.com/liquorpro/go-backend/pkg/shared/utils"
 	"gorm.io/gorm"
 )
 
@@ -47,12 +47,19 @@ type DashboardSummaryResponse struct {
 	PendingReturns int `json:"pending_returns"`
 
 	// Financial summary
-	TotalRevenue float64 `json:"total_revenue"`
-	TotalDue     float64 `json:"total_due"`
-	CashAmount   float64 `json:"cash_amount"`
-	CardAmount   float64 `json:"card_amount"`
-	UpiAmount    float64 `json:"upi_amount"`
-	CreditAmount float64 `json:"credit_amount"`
+	TotalRevenue    float64 `json:"total_revenue"`
+	TotalDue        float64 `json:"total_due"`
+	CashAmount      float64 `json:"cash_amount"`
+	CardAmount      float64 `json:"card_amount"`
+	UpiAmount       float64 `json:"upi_amount"`
+	CreditAmount    float64 `json:"credit_amount"`
+	PurchaseAmount  float64 `json:"purchase_amount"`
+	PurchaseCount   int     `json:"purchase_count"`
+	ExpenseAmount   float64 `json:"expense_amount"`
+
+	// Product coverage (for progress bar)
+	UniqueProductsSold   int `json:"unique_products_sold"`
+	TotalStockedProducts int `json:"total_stocked_products"`
 
 	// Shop-wise breakdown
 	ShopSummaries []ShopSummary `json:"shop_summaries"`
@@ -65,11 +72,6 @@ type DashboardSummaryResponse struct {
 
 	// Generated at
 	GeneratedAt time.Time `json:"generated_at"`
-
-	// Role-aware additions
-	TeamStatus *TeamSubmissionStatus `json:"team_status,omitempty"`
-	RoleCtx    *RoleContext          `json:"role_context,omitempty"`
-	MyStatus   *MySubmissionStatus   `json:"my_status,omitempty"`
 }
 
 // DailySalesStats represents daily sales statistics
@@ -100,23 +102,16 @@ type ShopSummary struct {
 	TotalAmount   float64   `json:"total_amount"`
 	PendingSales  int       `json:"pending_sales"`
 	PendingAmount float64   `json:"pending_amount"`
-	CashAmount    float64   `json:"cash_amount"`
-	CardAmount    float64   `json:"card_amount"`
-	UpiAmount     float64   `json:"upi_amount"`
-	CreditAmount  float64   `json:"credit_amount"`
-	SalesmanName  string    `json:"salesman_name"`
 }
 
 // TopProductSummary represents top-selling products
 type TopProductSummary struct {
-	ProductID       uuid.UUID `json:"product_id"`
-	ProductName     string    `json:"product_name"`
-	BrandName       string    `json:"brand_name"`
-	CategoryName    string    `json:"category_name"`
-	SubcategoryName string    `json:"subcategory_name,omitempty"`
-	ImageURL        string    `json:"image_url"`
-	TotalQuantity   int       `json:"total_quantity"`
-	TotalAmount     float64   `json:"total_amount"`
+	ProductID     uuid.UUID `json:"product_id"`
+	ProductName   string    `json:"product_name"`
+	BrandName     string    `json:"brand_name"`
+	CategoryName  string    `json:"category_name"`
+	TotalQuantity int       `json:"total_quantity"`
+	TotalAmount   float64   `json:"total_amount"`
 }
 
 // RecentSaleActivity represents recent sale activities
@@ -131,71 +126,71 @@ type RecentSaleActivity struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// SalesmanSubmissionStatus tracks per-salesman submission for a date
-type SalesmanSubmissionStatus struct {
-	SalesmanID   uuid.UUID  `json:"salesman_id"`
-	SalesmanName string     `json:"salesman_name"`
-	ShopID       uuid.UUID  `json:"shop_id"`
-	ShopName     string     `json:"shop_name"`
-	Status       string     `json:"status"`        // "submitted" or "missing"
-	RecordID     *uuid.UUID `json:"record_id"`     // nil if missing
-	RecordStatus string     `json:"record_status"` // "pending"/"approved"/"rejected" or ""
-	SubmittedAt  *time.Time `json:"submitted_at"`
-	TotalAmount  float64    `json:"total_amount"`
+// GetSalesmanShopID looks up the shop assigned to a salesman by user_id
+func (s *DashboardService) GetSalesmanShopID(userID uuid.UUID) (*uuid.UUID, error) {
+	var shopIDStr string
+	err := s.db.Table("salesmen").
+		Select("shop_id::text").
+		Where("user_id = ? AND deleted_at IS NULL AND is_active = true", userID).
+		Limit(1).
+		Scan(&shopIDStr).Error
+	if err != nil {
+		return nil, err
+	}
+	if shopIDStr == "" {
+		return nil, nil
+	}
+	shopID, err := uuid.Parse(shopIDStr)
+	if err != nil {
+		return nil, err
+	}
+	return &shopID, nil
 }
 
-// ShopSubmissionSummary is per-shop rollup of salesman submissions
-type ShopSubmissionSummary struct {
-	ShopID         uuid.UUID                  `json:"shop_id"`
-	ShopName       string                     `json:"shop_name"`
-	TotalSalesmen  int                        `json:"total_salesmen"`
-	SubmittedCount int                        `json:"submitted_count"`
-	MissingCount   int                        `json:"missing_count"`
-	Salesmen       []SalesmanSubmissionStatus `json:"salesmen"`
-}
+// getDateRange converts a date_filter string to start/end time range
+func (s *DashboardService) getDateRange(dateFilter, startDateStr, endDateStr string) (time.Time, time.Time) {
+	now := time.Now()
+	today := utils.StartOfDay(now)
+	tomorrow := today.AddDate(0, 0, 1)
 
-// TeamSubmissionStatus is the top-level team submission tracker
-type TeamSubmissionStatus struct {
-	Date           string                  `json:"date"`
-	TotalSalesmen  int                     `json:"total_salesmen"`
-	TotalSubmitted int                     `json:"total_submitted"`
-	TotalMissing   int                     `json:"total_missing"`
-	SubmissionRate float64                 `json:"submission_rate"` // 0-100
-	Shops          []ShopSubmissionSummary `json:"shops"`
-}
-
-// RoleContext tells the client what to show per role
-type RoleContext struct {
-	Role            string `json:"role"`
-	DisplayRole     string `json:"display_role"`
-	ShowAllShops    bool   `json:"show_all_shops"`
-	ShowTeamTracker bool   `json:"show_team_tracker"`
-	ShowApprovals   bool   `json:"show_approvals"`
-	ShowOwnStatus   bool   `json:"show_own_status"`
-	CanApprove      bool   `json:"can_approve"`
-	CanRevert       bool   `json:"can_revert"`
-}
-
-// MySubmissionStatus is a salesman's own submission status
-type MySubmissionStatus struct {
-	HasSubmitted bool       `json:"has_submitted"`
-	RecordID     *uuid.UUID `json:"record_id"`
-	RecordStatus string     `json:"record_status"`
-	SubmittedAt  *time.Time `json:"submitted_at"`
-	TotalAmount  float64    `json:"total_amount"`
-	ShopID       uuid.UUID  `json:"shop_id"`
-	ShopName     string     `json:"shop_name"`
+	switch dateFilter {
+	case "custom":
+		// Parse custom start_date and end_date (format: 2026-03-22)
+		start, err1 := time.ParseInLocation("2006-01-02", startDateStr, now.Location())
+		end, err2 := time.ParseInLocation("2006-01-02", endDateStr, now.Location())
+		if err1 == nil && err2 == nil {
+			// end_date is inclusive, so add 1 day
+			return start, end.AddDate(0, 0, 1)
+		}
+		// Fallback to today if parsing fails
+		return today, tomorrow
+	case "yesterday":
+		yesterday := today.AddDate(0, 0, -1)
+		return yesterday, today
+	case "last_7_days", "7days", "week":
+		return today.AddDate(0, 0, -7), tomorrow
+	case "last_30_days", "30days", "month":
+		return today.AddDate(0, 0, -30), tomorrow
+	case "this_month":
+		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		return monthStart, tomorrow
+	case "last_month":
+		monthStart := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, now.Location())
+		monthEnd := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		return monthStart, monthEnd
+	case "all_time", "all":
+		return time.Date(2020, 1, 1, 0, 0, 0, 0, now.Location()), tomorrow
+	default: // "today"
+		return today, tomorrow
+	}
 }
 
 // GetDashboardSummary returns dashboard summary for a tenant
-func (s *DashboardService) GetDashboardSummary(ctx context.Context, tenantID, userID uuid.UUID, role string, shopID *uuid.UUID, startDate, endDate time.Time) (*DashboardSummaryResponse, error) {
-	// Try to get from cache first — include role (and userID for salesman) since response differs per role
-	cacheKey := fmt.Sprintf("dashboard_summary:%s:%s:%s:%s", tenantID.String(), role, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+func (s *DashboardService) GetDashboardSummary(ctx context.Context, tenantID uuid.UUID, shopID *uuid.UUID, dateFilter, startDateStr, endDateStr string) (*DashboardSummaryResponse, error) {
+	// Try to get from cache first
+	cacheKey := fmt.Sprintf("dashboard_summary:%s:%s:%s:%s", tenantID.String(), dateFilter, startDateStr, endDateStr)
 	if shopID != nil {
-		cacheKey = fmt.Sprintf("dashboard_summary:%s:%s:%s:%s:%s", tenantID.String(), role, shopID.String(), startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
-	}
-	if role == models.RoleSalesman {
-		cacheKey += ":" + userID.String()
+		cacheKey = fmt.Sprintf("dashboard_summary:%s:%s:%s:%s:%s", tenantID.String(), shopID.String(), dateFilter, startDateStr, endDateStr)
 	}
 
 	var cached DashboardSummaryResponse
@@ -211,6 +206,8 @@ func (s *DashboardService) GetDashboardSummary(ctx context.Context, tenantID, us
 		GeneratedAt: time.Now(),
 	}
 
+	startDate, endDate := s.getDateRange(dateFilter, startDateStr, endDateStr)
+
 	// Get sales stats for the date range
 	if err := s.getTodaysSalesStats(tenantID, shopID, startDate, endDate, summary); err != nil {
 		return nil, fmt.Errorf("failed to get sales stats: %w", err)
@@ -221,7 +218,7 @@ func (s *DashboardService) GetDashboardSummary(ctx context.Context, tenantID, us
 		return nil, fmt.Errorf("failed to get returns stats: %w", err)
 	}
 
-	// Get pending approvals count
+	// Get pending approvals count (always all-time, not filtered by date)
 	if err := s.getPendingApprovalsCount(tenantID, shopID, summary); err != nil {
 		return nil, fmt.Errorf("failed to get pending approvals: %w", err)
 	}
@@ -232,11 +229,13 @@ func (s *DashboardService) GetDashboardSummary(ctx context.Context, tenantID, us
 	}
 
 	// Get shop-wise breakdown
-	if err := s.getShopSummaries(tenantID, shopID, startDate, endDate, summary); err != nil {
-		return nil, fmt.Errorf("failed to get shop summaries: %w", err)
+	if shopID == nil { // Only for tenant-wide view
+		if err := s.getShopSummaries(tenantID, startDate, endDate, summary); err != nil {
+			return nil, fmt.Errorf("failed to get shop summaries: %w", err)
+		}
 	}
 
-	// Get top products (this month)
+	// Get top products for the date range
 	if err := s.getTopProducts(tenantID, shopID, summary); err != nil {
 		return nil, fmt.Errorf("failed to get top products: %w", err)
 	}
@@ -246,23 +245,9 @@ func (s *DashboardService) GetDashboardSummary(ctx context.Context, tenantID, us
 		return nil, fmt.Errorf("failed to get recent activities: %w", err)
 	}
 
-	// Role-aware additions
-	summary.RoleCtx = s.buildRoleContext(role)
-
-	if summary.RoleCtx.ShowTeamTracker {
-		if ts, err := s.getTeamSubmissionStatus(tenantID, shopID, startDate, endDate); err != nil {
-			log.Printf("[dashboard] warning: failed to get team submission status: %v", err)
-		} else {
-			summary.TeamStatus = ts
-		}
-	}
-
-	if summary.RoleCtx.ShowOwnStatus {
-		if ms, err := s.getMySubmissionStatus(tenantID, userID, shopID, startDate, endDate); err != nil {
-			log.Printf("[dashboard] warning: failed to get my submission status: %v", err)
-		} else {
-			summary.MyStatus = ms
-		}
+	// Get product coverage stats (for progress bar)
+	if err := s.getProductCoverage(tenantID, shopID, startDate, endDate, summary); err != nil {
+		return nil, fmt.Errorf("failed to get product coverage: %w", err)
 	}
 
 	// Cache the result for 5 minutes
@@ -295,6 +280,7 @@ func (s *DashboardService) getTodaysSalesStats(tenantID uuid.UUID, shopID *uuid.
 		PendingAmount   float64 `gorm:"column:pending_amount"`
 	}
 
+	// Query with actual status-based counts
 	err := dailySalesQuery.Select(`
 		COUNT(*) as total_records,
 		COALESCE(SUM(total_sales_amount), 0) as total_amount,
@@ -338,14 +324,14 @@ func (s *DashboardService) getTodaysSalesStats(tenantID uuid.UUID, shopID *uuid.
 		PendingAmount  float64 `gorm:"column:pending_amount"`
 	}
 
-	// Simplified query for existing sales table - treat all sales as approved for now
+	// Query with actual status-based counts
 	err = individualSalesQuery.Select(`
 		COUNT(*) as total_sales,
 		COALESCE(SUM(total_amount), 0) as total_amount,
-		COUNT(*) as approved_sales,
-		COALESCE(SUM(total_amount), 0) as approved_amount,
-		0 as pending_sales,
-		0 as pending_amount
+		COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_sales,
+		COALESCE(SUM(CASE WHEN status = 'approved' THEN total_amount ELSE 0 END), 0) as approved_amount,
+		COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_sales,
+		COALESCE(SUM(CASE WHEN status = 'pending' THEN total_amount ELSE 0 END), 0) as pending_amount
 	`).Scan(&individualSalesStats).Error
 
 	if err != nil {
@@ -375,128 +361,283 @@ func (s *DashboardService) getTodaysSalesStats(tenantID uuid.UUID, shopID *uuid.
 
 // getTodaysReturnsStats gets today's returns statistics
 func (s *DashboardService) getTodaysReturnsStats(tenantID uuid.UUID, shopID *uuid.UUID, today, tomorrow time.Time, summary *DashboardSummaryResponse) error {
-	// For now, return empty stats since returns table doesn't exist yet
-	// This will be implemented when returns functionality is added
-	summary.TodayReturns = DailyReturnsStats{
-		TotalReturns:    0,
-		TotalAmount:     0,
-		ApprovedReturns: 0,
-		ApprovedAmount:  0,
-		PendingReturns:  0,
-		PendingAmount:   0,
-	}
-	return nil
-}
-
-// getPendingApprovalsCount gets count of pending approvals
-func (s *DashboardService) getPendingApprovalsCount(tenantID uuid.UUID, shopID *uuid.UUID, summary *DashboardSummaryResponse) error {
-	query := s.db.Model(&models.DailySalesRecord{}).Where("status = ?", "pending")
+	// Query returns for today
+	returnsQuery := s.db.Model(&models.SaleReturn{}).
+		Where("return_date >= ? AND return_date < ?", today, tomorrow)
 
 	if tenantID != uuid.Nil {
-		query = query.Where("tenant_id = ?", tenantID)
-	}
-	if shopID != nil {
-		query = query.Where("shop_id = ?", *shopID)
+		returnsQuery = returnsQuery.Where("tenant_id = ?", tenantID)
 	}
 
-	var count int64
-	if err := query.Count(&count).Error; err != nil {
-		count = 0
+	// Note: SaleReturn doesn't have shop_id directly - skip shop filtering for now
+	// If shop filtering is needed, would require joining with sales table
+
+	var returnsStats struct {
+		TotalReturns    int64   `gorm:"column:total_returns"`
+		TotalAmount     float64 `gorm:"column:total_amount"`
+		ApprovedReturns int64   `gorm:"column:approved_returns"`
+		ApprovedAmount  float64 `gorm:"column:approved_amount"`
+		PendingReturns  int64   `gorm:"column:pending_returns"`
+		PendingAmount   float64 `gorm:"column:pending_amount"`
 	}
 
-	summary.PendingSales = int(count)
-	summary.PendingReturns = 0
+	err := returnsQuery.Select(`
+		COUNT(*) as total_returns,
+		COALESCE(SUM(total_amount), 0) as total_amount,
+		COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_returns,
+		COALESCE(SUM(CASE WHEN status = 'approved' THEN total_amount ELSE 0 END), 0) as approved_amount,
+		COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_returns,
+		COALESCE(SUM(CASE WHEN status = 'pending' THEN total_amount ELSE 0 END), 0) as pending_amount
+	`).Scan(&returnsStats).Error
+
+	if err != nil {
+		// If query fails, use default values
+		returnsStats = struct {
+			TotalReturns    int64   `gorm:"column:total_returns"`
+			TotalAmount     float64 `gorm:"column:total_amount"`
+			ApprovedReturns int64   `gorm:"column:approved_returns"`
+			ApprovedAmount  float64 `gorm:"column:approved_amount"`
+			PendingReturns  int64   `gorm:"column:pending_returns"`
+			PendingAmount   float64 `gorm:"column:pending_amount"`
+		}{0, 0, 0, 0, 0, 0}
+	}
+
+	summary.TodayReturns = DailyReturnsStats{
+		TotalReturns:    int(returnsStats.TotalReturns),
+		TotalAmount:     returnsStats.TotalAmount,
+		ApprovedReturns: int(returnsStats.ApprovedReturns),
+		ApprovedAmount:  returnsStats.ApprovedAmount,
+		PendingReturns:  int(returnsStats.PendingReturns),
+		PendingAmount:   returnsStats.PendingAmount,
+	}
+
 	return nil
 }
 
-// getFinancialSummary gets financial summary for date range
+// getPendingApprovalsCount gets count of pending approvals (total across all time, not just today)
+func (s *DashboardService) getPendingApprovalsCount(tenantID uuid.UUID, shopID *uuid.UUID, summary *DashboardSummaryResponse) error {
+	// Count pending daily sales records
+	dailySalesQuery := s.db.Model(&models.DailySalesRecord{}).
+		Where("status = ?", "pending")
+
+	if tenantID != uuid.Nil {
+		dailySalesQuery = dailySalesQuery.Where("tenant_id = ?", tenantID)
+	}
+
+	if shopID != nil {
+		dailySalesQuery = dailySalesQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var pendingDailyRecords int64
+	if err := dailySalesQuery.Count(&pendingDailyRecords).Error; err != nil {
+		pendingDailyRecords = 0
+	}
+
+	// Count pending individual sales
+	individualSalesQuery := s.db.Model(&models.Sale{}).
+		Where("status = ?", "pending")
+
+	if tenantID != uuid.Nil {
+		individualSalesQuery = individualSalesQuery.Where("tenant_id = ?", tenantID)
+	}
+
+	if shopID != nil {
+		individualSalesQuery = individualSalesQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var pendingIndividualSales int64
+	if err := individualSalesQuery.Count(&pendingIndividualSales).Error; err != nil {
+		pendingIndividualSales = 0
+	}
+
+	// Count pending returns
+	returnsQuery := s.db.Model(&models.SaleReturn{}).
+		Where("status = ?", "pending")
+
+	if tenantID != uuid.Nil {
+		returnsQuery = returnsQuery.Where("tenant_id = ?", tenantID)
+	}
+
+	// Note: SaleReturn doesn't have shop_id directly, need to join with Sale table if filtering by shop
+	// For now, we skip shop filtering on returns since they're linked to sales
+
+	var pendingReturns int64
+	if err := returnsQuery.Count(&pendingReturns).Error; err != nil {
+		pendingReturns = 0
+	}
+
+	// Total pending sales = daily records + individual sales
+	summary.PendingSales = int(pendingDailyRecords + pendingIndividualSales)
+	summary.PendingReturns = int(pendingReturns)
+
+	return nil
+}
+
+// getFinancialSummary gets financial summary for the given date range
 func (s *DashboardService) getFinancialSummary(tenantID uuid.UUID, shopID *uuid.UUID, startDate, endDate time.Time, summary *DashboardSummaryResponse) error {
-	query := s.db.Model(&models.DailySalesRecord{}).
+	// Get basic revenue from daily sales records
+	dailySalesQuery := s.db.Model(&models.DailySalesRecord{}).
 		Where("record_date >= ? AND record_date < ?", startDate, endDate)
 
+	// Apply tenant filtering for non-system admin users
 	if tenantID != uuid.Nil {
-		query = query.Where("tenant_id = ?", tenantID)
-	}
-	if shopID != nil {
-		query = query.Where("shop_id = ?", *shopID)
+		dailySalesQuery = dailySalesQuery.Where("tenant_id = ?", tenantID)
 	}
 
-	var result struct {
-		TotalRevenue float64 `gorm:"column:total_revenue"`
+	if shopID != nil {
+		dailySalesQuery = dailySalesQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var dailyRevenue float64
+	err := dailySalesQuery.Select("COALESCE(SUM(total_sales_amount), 0)").Scan(&dailyRevenue).Error
+	if err != nil {
+		dailyRevenue = 0 // Default to 0 if query fails
+	}
+
+	// Get revenue from individual sales
+	salesQuery := s.db.Model(&models.Sale{}).
+		Where("sale_date >= ? AND sale_date < ?", startDate, endDate)
+
+	// Apply tenant filtering for non-system admin users
+	if tenantID != uuid.Nil {
+		salesQuery = salesQuery.Where("tenant_id = ?", tenantID)
+	}
+
+	if shopID != nil {
+		salesQuery = salesQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var salesRevenue float64
+	err = salesQuery.Select("COALESCE(SUM(total_amount), 0)").Scan(&salesRevenue).Error
+	if err != nil {
+		salesRevenue = 0 // Default to 0 if query fails
+	}
+
+	// Get purchase totals for the date range from stock_purchases
+	purchaseQuery := s.db.Table("stock_purchases").
+		Where("purchase_date >= ? AND purchase_date < ?", startDate, endDate).
+		Where("deleted_at IS NULL")
+
+	if tenantID != uuid.Nil {
+		purchaseQuery = purchaseQuery.Where("tenant_id = ?", tenantID)
+	}
+	if shopID != nil {
+		purchaseQuery = purchaseQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var purchaseResult struct {
+		Amount float64 `gorm:"column:amount"`
+		Count  int     `gorm:"column:count"`
+	}
+	if err := purchaseQuery.Select("COALESCE(SUM(total_amount), 0) as amount, COUNT(*) as count").Scan(&purchaseResult).Error; err != nil {
+		purchaseResult.Amount = 0
+		purchaseResult.Count = 0
+	}
+
+	// Get expense totals for the date range from expenses
+	expenseQuery := s.db.Table("expenses").
+		Where("expense_date >= ? AND expense_date < ?", startDate, endDate).
+		Where("deleted_at IS NULL")
+
+	if tenantID != uuid.Nil {
+		expenseQuery = expenseQuery.Where("tenant_id = ?", tenantID)
+	}
+	if shopID != nil {
+		expenseQuery = expenseQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var expenseAmount float64
+	if err := expenseQuery.Select("COALESCE(SUM(amount), 0)").Scan(&expenseAmount).Error; err != nil {
+		expenseAmount = 0
+	}
+
+	// Get payment method breakdown from daily sales records
+	paymentQuery := s.db.Model(&models.DailySalesRecord{}).
+		Where("record_date >= ? AND record_date < ?", startDate, endDate)
+	if tenantID != uuid.Nil {
+		paymentQuery = paymentQuery.Where("tenant_id = ?", tenantID)
+	}
+	if shopID != nil {
+		paymentQuery = paymentQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var paymentBreakdown struct {
 		CashAmount   float64 `gorm:"column:cash_amount"`
 		CardAmount   float64 `gorm:"column:card_amount"`
 		UpiAmount    float64 `gorm:"column:upi_amount"`
 		CreditAmount float64 `gorm:"column:credit_amount"`
 	}
-
-	err := query.Select(`
-		COALESCE(SUM(total_sales_amount), 0) as total_revenue,
+	if err := paymentQuery.Select(`
 		COALESCE(SUM(total_cash_amount), 0) as cash_amount,
 		COALESCE(SUM(total_card_amount), 0) as card_amount,
 		COALESCE(SUM(total_upi_amount), 0) as upi_amount,
 		COALESCE(SUM(total_credit_amount), 0) as credit_amount
-	`).Scan(&result).Error
-
-	if err != nil {
-		result = struct {
-			TotalRevenue float64 `gorm:"column:total_revenue"`
-			CashAmount   float64 `gorm:"column:cash_amount"`
-			CardAmount   float64 `gorm:"column:card_amount"`
-			UpiAmount    float64 `gorm:"column:upi_amount"`
-			CreditAmount float64 `gorm:"column:credit_amount"`
-		}{0, 0, 0, 0, 0}
+	`).Scan(&paymentBreakdown).Error; err != nil {
+		paymentBreakdown.CashAmount = 0
+		paymentBreakdown.CardAmount = 0
+		paymentBreakdown.UpiAmount = 0
+		paymentBreakdown.CreditAmount = 0
 	}
 
-	summary.TotalRevenue = result.TotalRevenue
-	summary.TotalDue = result.CreditAmount
-	summary.CashAmount = result.CashAmount
-	summary.CardAmount = result.CardAmount
-	summary.UpiAmount = result.UpiAmount
-	summary.CreditAmount = result.CreditAmount
+	// Check for day-closing records (manual reconciliation from salesman)
+	dayClosingQuery := s.db.Model(&models.DayClosingRecord{}).
+		Where("date >= ? AND date < ? AND deleted_at IS NULL", startDate, endDate)
+	if tenantID != uuid.Nil {
+		dayClosingQuery = dayClosingQuery.Where("tenant_id = ?", tenantID)
+	}
+	if shopID != nil {
+		dayClosingQuery = dayClosingQuery.Where("shop_id = ?", *shopID)
+	}
+
+	var dayClosingTotals struct {
+		CashTotal    float64 `gorm:"column:cash_total"`
+		UpiTotal     float64 `gorm:"column:upi_total"`
+		ExpenseTotal float64 `gorm:"column:expense_total"`
+	}
+	hasDayClosing := false
+	if err := dayClosingQuery.Select(`
+		COALESCE(SUM(cash_total), 0) as cash_total,
+		COALESCE(SUM(upi_total), 0) as upi_total,
+		COALESCE(SUM(expense_total), 0) as expense_total
+	`).Scan(&dayClosingTotals).Error; err == nil {
+		if dayClosingTotals.CashTotal > 0 || dayClosingTotals.UpiTotal > 0 || dayClosingTotals.ExpenseTotal > 0 {
+			hasDayClosing = true
+		}
+	}
+
+	// Set financial summary
+	summary.TotalRevenue = dailyRevenue + salesRevenue
+	summary.TotalDue = 0
+	summary.PurchaseAmount = purchaseResult.Amount
+	summary.PurchaseCount = purchaseResult.Count
+
+	if hasDayClosing {
+		// Use day-closing data: expenses reduce cash in hand
+		summary.CashAmount = dayClosingTotals.CashTotal - dayClosingTotals.ExpenseTotal
+		if summary.CashAmount < 0 {
+			summary.CashAmount = 0
+		}
+		summary.UpiAmount = dayClosingTotals.UpiTotal
+		summary.ExpenseAmount = dayClosingTotals.ExpenseTotal
+		summary.CardAmount = paymentBreakdown.CardAmount
+		summary.CreditAmount = paymentBreakdown.CreditAmount
+	} else {
+		// Fallback: use payment breakdown from daily sales records
+		summary.CashAmount = paymentBreakdown.CashAmount
+		summary.CardAmount = paymentBreakdown.CardAmount
+		summary.UpiAmount = paymentBreakdown.UpiAmount
+		summary.CreditAmount = paymentBreakdown.CreditAmount
+		summary.ExpenseAmount = expenseAmount
+	}
 
 	return nil
 }
 
 // getShopSummaries gets shop-wise summaries
-func (s *DashboardService) getShopSummaries(tenantID uuid.UUID, shopID *uuid.UUID, startDate, endDate time.Time, summary *DashboardSummaryResponse) error {
-	query := s.db.Model(&models.DailySalesRecord{}).
-		Select(`
-			d.shop_id,
-			s.name as shop_name,
-			COUNT(*) as total_sales,
-			COALESCE(SUM(d.total_sales_amount), 0) as total_amount,
-			COUNT(CASE WHEN d.status = 'pending' THEN 1 END) as pending_sales,
-			COALESCE(SUM(CASE WHEN d.status = 'pending' THEN d.total_sales_amount ELSE 0 END), 0) as pending_amount,
-			COALESCE(SUM(d.total_cash_amount), 0) as cash_amount,
-			COALESCE(SUM(d.total_card_amount), 0) as card_amount,
-			COALESCE(SUM(d.total_upi_amount), 0) as upi_amount,
-			COALESCE(SUM(d.total_credit_amount), 0) as credit_amount,
-			COALESCE(MAX(sm.name), '') as salesman_name
-		`).
-		Table("daily_sales_records d").
-		Joins("LEFT JOIN shops s ON s.id = d.shop_id").
-		Joins("LEFT JOIN salesmen sm ON sm.id = d.salesman_id").
-		Where("d.record_date >= ? AND d.record_date < ?", startDate, endDate)
-
-	if tenantID != uuid.Nil {
-		query = query.Where("d.tenant_id = ?", tenantID)
-	}
-	if shopID != nil {
-		query = query.Where("d.shop_id = ?", *shopID)
-	}
-
-	query = query.Group("d.shop_id, s.name")
-
-	var shops []ShopSummary
-	if err := query.Scan(&shops).Error; err != nil {
-		summary.ShopSummaries = []ShopSummary{}
-		return nil
-	}
-
-	if shops == nil {
-		shops = []ShopSummary{}
-	}
-	summary.ShopSummaries = shops
+func (s *DashboardService) getShopSummaries(tenantID uuid.UUID, today, tomorrow time.Time, summary *DashboardSummaryResponse) error {
+	// For new users, return empty shop summaries for now
+	// This will be implemented when shop management is fully set up
+	summary.ShopSummaries = []ShopSummary{}
 	return nil
 }
 
@@ -510,315 +651,199 @@ func (s *DashboardService) getTopProducts(tenantID uuid.UUID, shopID *uuid.UUID,
 
 // getRecentActivities gets recent sale activities
 func (s *DashboardService) getRecentActivities(tenantID uuid.UUID, shopID *uuid.UUID, summary *DashboardSummaryResponse) error {
-	var records []models.DailySalesRecord
-
-	query := s.db.Preload("Shop").Preload("Salesman").
-		Order("created_at DESC").
-		Limit(10)
-
-	if tenantID != uuid.Nil {
-		query = query.Where("tenant_id = ?", tenantID)
-	}
-	if shopID != nil {
-		query = query.Where("shop_id = ?", *shopID)
-	}
-
-	if err := query.Find(&records).Error; err != nil {
-		summary.RecentSales = []RecentSaleActivity{}
-		return nil
-	}
-
-	activities := make([]RecentSaleActivity, 0, len(records))
-	for _, r := range records {
-		shopName := ""
-		if r.Shop != nil {
-			shopName = r.Shop.Name
-		}
-		salesmanName := ""
-		if r.Salesman != nil {
-			salesmanName = r.Salesman.Name
-		}
-
-		activities = append(activities, RecentSaleActivity{
-			ID:           r.ID,
-			Type:         "daily_record",
-			Number:       r.RecordDate.Format("2006-01-02"),
-			ShopName:     shopName,
-			SalesmanName: salesmanName,
-			Amount:       r.TotalSalesAmount,
-			Status:       r.Status,
-			CreatedAt:    r.CreatedAt,
-		})
-	}
-
-	summary.RecentSales = activities
+	// For new users, return empty recent activities for now
+	// This will be implemented when activity tracking is fully set up
+	summary.RecentSales = []RecentSaleActivity{}
 	return nil
 }
 
-// buildRoleContext maps a role string to display flags for the client
-func (s *DashboardService) buildRoleContext(role string) *RoleContext {
-	rc := &RoleContext{Role: role}
+// getProductCoverage calculates unique category+size-range "packs" sold vs
+// total stocked category+size-range packs.
+//
+// Definition of a "pack" — matches the user's mental model and mirrors
+// the SizeRangeConstants groups the Flutter app uses everywhere else:
+//
+//   A pack is one unique (category_id, size_range_bucket) tuple that the
+//   shop has in stock. A shop stocking whisky 750ml AND whisky 700ml
+//   counts as ONE whisky pack — both sizes fall in the same "750ml
+//   (Full)" bucket. Beer uses a different set of buckets (330ml, 500ml,
+//   650ml, Keg/Bulk). Unique-size-string counting (the prior approach)
+//   over-counted when a shop had close-but-not-identical sizes in the
+//   same range.
+//
+// Buckets mirror SizeRangeConstants.dart:
+//   Non-beer (whisky / rum / vodka / etc.):
+//     1-100     → 90ml
+//     101-250   → 180ml
+//     251-400   → 375ml
+//     401-999   → 750ml
+//     1000+     → 1L+
+//   Beer:
+//     1-400     → 330ml & Below
+//     401-550   → 500ml
+//     551-999   → 650ml
+//     1000+     → Keg/Bulk
+//
+// Implementation note: the bucketing runs in Go (not SQL) because the
+// rules depend on category being "beer" vs not. Doing it in SQL would
+// need a big CASE WHEN with a LIKE '%beer%' join — more fragile. Fetch
+// the raw (category_name, size) rows and map in the worker. For any
+// reasonable shop the set is small (tens of rows), so the extra DB
+// round-trip is worth the readability.
+func (s *DashboardService) getProductCoverage(tenantID uuid.UUID, shopID *uuid.UUID, startDate, endDate time.Time, summary *DashboardSummaryResponse) error {
+	// Denominator: distinct (category_id, size_range_bucket) the shop stocks.
+	var stockRows []struct {
+		CategoryID   string
+		CategoryName string
+		Size         string
+	}
+	{
+		args := []interface{}{}
+		sql := `SELECT DISTINCT products.category_id::text AS category_id,
+		                 COALESCE(categories.name, '') AS category_name,
+		                 products.size
+		        FROM stocks
+		        JOIN products ON products.id = stocks.product_id
+		        LEFT JOIN categories ON categories.id = products.category_id
+		        WHERE stocks.quantity > 0
+		          AND stocks.deleted_at IS NULL
+		          AND products.size IS NOT NULL AND products.size != ''`
+		if tenantID != uuid.Nil {
+			sql += " AND stocks.tenant_id = ?"
+			args = append(args, tenantID)
+		}
+		if shopID != nil {
+			sql += " AND stocks.shop_id = ?"
+			args = append(args, *shopID)
+		}
+		if err := s.db.Raw(sql, args...).Scan(&stockRows).Error; err != nil {
+			stockRows = nil
+		}
+	}
+	// Group identity: "english" (all non-beer categories together) OR
+	// "beer". Size doesn't subdivide the count — the user's mental model
+	// is "1 slot for English, 1 for Beer", regardless of how many size
+	// buckets the shop actually stocks under each. Matches the English
+	// chip semantics used in Inventory + DSE. So a shop with Gin 750ml
+	// + Vodka 750ml + Whisky 180ml + Whisky 375ml + Whisky 750ml = ONE
+	// English slot. Add beer stock → total becomes 2.
+	stockedPacks := map[string]struct{}{}
+	for _, r := range stockRows {
+		stockedPacks[salesGroupLabel(r.CategoryName)] = struct{}{}
+	}
+	summary.TotalStockedProducts = len(stockedPacks)
 
-	switch role {
-	case models.RoleSaasAdmin:
-		rc.DisplayRole = "SaaS Admin"
-		rc.ShowAllShops = true
-		rc.ShowTeamTracker = true
-		rc.ShowApprovals = true
-		rc.CanApprove = true
-		rc.CanRevert = true
-	case models.RoleOwner:
-		rc.DisplayRole = "Owner"
-		rc.ShowAllShops = true
-		rc.ShowTeamTracker = true
-		rc.ShowApprovals = true
-		rc.CanApprove = true
-		rc.CanRevert = true
-	case models.RoleAdmin:
-		rc.DisplayRole = "Admin"
-		rc.ShowAllShops = true
-		rc.ShowTeamTracker = true
-		rc.ShowApprovals = true
-		rc.CanApprove = true
-		rc.CanRevert = true
-	case models.RoleManager:
-		rc.DisplayRole = "Manager"
-		rc.ShowAllShops = true
-		rc.ShowTeamTracker = true
-		rc.ShowApprovals = true
-		rc.CanApprove = true
-	case models.RoleAssistantManager:
-		rc.DisplayRole = "Assistant Manager"
-		rc.ShowAllShops = true
-		rc.ShowTeamTracker = true
-		rc.ShowApprovals = true
-		rc.CanApprove = true
-	case models.RoleExecutive:
-		rc.DisplayRole = "Executive"
-		rc.ShowAllShops = true
-		rc.ShowTeamTracker = true
-	case models.RoleSalesman:
-		rc.DisplayRole = "Salesman"
-		rc.ShowOwnStatus = true
+	// Numerator: distinct (category_id, size_range_bucket) sold in the window.
+	var soldRows []struct {
+		CategoryID   string
+		CategoryName string
+		Size         string
+	}
+	{
+		args := []interface{}{startDate, endDate}
+		sql := `SELECT DISTINCT products.category_id::text AS category_id,
+		                 COALESCE(categories.name, '') AS category_name,
+		                 products.size
+		        FROM daily_sales_items
+		        JOIN daily_sales_records ON daily_sales_records.id = daily_sales_items.daily_sales_record_id
+		        JOIN products ON products.id = daily_sales_items.product_id
+		        LEFT JOIN categories ON categories.id = products.category_id
+		        WHERE daily_sales_records.record_date >= ?
+		          AND daily_sales_records.record_date < ?
+		          AND daily_sales_items.deleted_at IS NULL
+		          AND daily_sales_records.deleted_at IS NULL
+		          AND products.size IS NOT NULL AND products.size != ''`
+		if tenantID != uuid.Nil {
+			sql += " AND daily_sales_records.tenant_id = ?"
+			args = append(args, tenantID)
+		}
+		if shopID != nil {
+			sql += " AND daily_sales_records.shop_id = ?"
+			args = append(args, *shopID)
+		}
+		if err := s.db.Raw(sql, args...).Scan(&soldRows).Error; err != nil {
+			soldRows = nil
+		}
+	}
+	soldPacks := map[string]struct{}{}
+	for _, r := range soldRows {
+		soldPacks[salesGroupLabel(r.CategoryName)] = struct{}{}
+	}
+	summary.UniqueProductsSold = len(soldPacks)
+
+	return nil
+}
+
+// sizeRangeBucket returns the SizeRangeConstants bucket label for a given
+// size string + category. Mirrors Flutter's SizeRangeConstants so the home
+// progress bar, Add Missing filters, and AI extraction all agree on which
+// "pack" a product belongs to.
+//
+// The extractMl helper handles common forms: "750ML", "750 ml", "1L",
+// "700ml" → numeric ml. For "1L"-style labels (no "ml"), a number < 100
+// is treated as litres (500 is unchanged; 1 → 1000).
+func sizeRangeBucket(categoryName, size string) string {
+	ml := extractSizeMl(size)
+	isBeer := strings.Contains(strings.ToLower(categoryName), "beer")
+	if isBeer {
+		switch {
+		case ml <= 400:
+			return "330ml & Below"
+		case ml <= 550:
+			return "500ml"
+		case ml <= 999:
+			return "650ml"
+		default:
+			return "Keg/Bulk"
+		}
+	}
+	switch {
+	case ml <= 100:
+		return "90ml"
+	case ml <= 250:
+		return "180ml"
+	case ml <= 400:
+		return "375ml"
+	case ml <= 999:
+		return "750ml"
 	default:
-		rc.DisplayRole = role
+		return "1L+"
 	}
-
-	return rc
 }
 
-// getTeamSubmissionStatus builds per-salesman submission tracking for a date range.
-// Uses 2 SQL queries total (no N+1) and cross-references in Go.
-// Matches records via salesman_id OR created_by_id (since salesman_id is often NULL).
-func (s *DashboardService) getTeamSubmissionStatus(tenantID uuid.UUID, shopID *uuid.UUID, startDate, endDate time.Time) (*TeamSubmissionStatus, error) {
-	// Query 1: All active salesmen with their shop names and user_id
-	type salesmanRow struct {
-		ID       uuid.UUID `gorm:"column:id"`
-		UserID   uuid.UUID `gorm:"column:user_id"`
-		Name     string    `gorm:"column:name"`
-		ShopID   uuid.UUID `gorm:"column:shop_id"`
-		ShopName string    `gorm:"column:shop_name"`
+// salesGroupLabel returns "beer" for beer-category products and "english"
+// for everything else. Mirrors the "English chip = not Beer" convention
+// used in Inventory + DSE — a single non-beer bucket means Gin + Vodka +
+// Whisky + Rum + Brandy all share one slot per size bucket, matching how
+// users mentally group their catalog (English vs Beer).
+func salesGroupLabel(categoryName string) string {
+	if strings.Contains(strings.ToLower(categoryName), "beer") {
+		return "beer"
 	}
-
-	salesmenQuery := s.db.Table("salesmen sm").
-		Select("sm.id, sm.user_id, sm.name, sm.shop_id, s.name as shop_name").
-		Joins("JOIN shops s ON s.id = sm.shop_id").
-		Where("sm.is_active = true AND sm.deleted_at IS NULL AND s.is_active = true AND s.deleted_at IS NULL")
-
-	if tenantID != uuid.Nil {
-		salesmenQuery = salesmenQuery.Where("sm.tenant_id = ?", tenantID)
-	}
-	if shopID != nil {
-		salesmenQuery = salesmenQuery.Where("sm.shop_id = ?", *shopID)
-	}
-
-	salesmenQuery = salesmenQuery.Order("s.name, sm.name")
-
-	var salesmen []salesmanRow
-	if err := salesmenQuery.Scan(&salesmen).Error; err != nil {
-		return nil, fmt.Errorf("failed to query salesmen: %w", err)
-	}
-
-	// Query 2: Daily sales records for the date range (include both salesman_id and created_by_id)
-	type recordRow struct {
-		SalesmanID       *uuid.UUID `gorm:"column:salesman_id"`
-		CreatedByID      uuid.UUID  `gorm:"column:created_by_id"`
-		ID               uuid.UUID  `gorm:"column:id"`
-		Status           string     `gorm:"column:status"`
-		CreatedAt        time.Time  `gorm:"column:created_at"`
-		TotalSalesAmount float64    `gorm:"column:total_sales_amount"`
-		ShopID           uuid.UUID  `gorm:"column:shop_id"`
-	}
-
-	recordsQuery := s.db.Table("daily_sales_records d").
-		Select("d.salesman_id, d.created_by_id, d.id, d.status, d.created_at, d.total_sales_amount, d.shop_id").
-		Where("d.record_date >= ? AND d.record_date < ?", startDate, endDate).
-		Where("d.deleted_at IS NULL")
-
-	if tenantID != uuid.Nil {
-		recordsQuery = recordsQuery.Where("d.tenant_id = ?", tenantID)
-	}
-	if shopID != nil {
-		recordsQuery = recordsQuery.Where("d.shop_id = ?", *shopID)
-	}
-
-	var records []recordRow
-	if err := recordsQuery.Scan(&records).Error; err != nil {
-		return nil, fmt.Errorf("failed to query daily sales records: %w", err)
-	}
-
-	// Build two maps for cross-referencing:
-	// 1. salesman_id -> record (for records that have salesman_id set)
-	// 2. created_by_id -> record (for matching via user_id)
-	// Latest record wins in both maps.
-	bySalesmanID := make(map[uuid.UUID]recordRow, len(records))
-	byCreatedByID := make(map[uuid.UUID]recordRow, len(records))
-	for _, r := range records {
-		if r.SalesmanID != nil {
-			if existing, ok := bySalesmanID[*r.SalesmanID]; !ok || r.CreatedAt.After(existing.CreatedAt) {
-				bySalesmanID[*r.SalesmanID] = r
-			}
-		}
-		if existing, ok := byCreatedByID[r.CreatedByID]; !ok || r.CreatedAt.After(existing.CreatedAt) {
-			byCreatedByID[r.CreatedByID] = r
-		}
-	}
-
-	// Group salesmen by shop and cross-reference with records
-	shopMap := make(map[uuid.UUID]*ShopSubmissionSummary)
-	shopOrder := make([]uuid.UUID, 0)
-	totalSubmitted := 0
-
-	for _, sm := range salesmen {
-		// Ensure shop entry exists
-		if _, ok := shopMap[sm.ShopID]; !ok {
-			shopMap[sm.ShopID] = &ShopSubmissionSummary{
-				ShopID:   sm.ShopID,
-				ShopName: sm.ShopName,
-				Salesmen: []SalesmanSubmissionStatus{},
-			}
-			shopOrder = append(shopOrder, sm.ShopID)
-		}
-		shop := shopMap[sm.ShopID]
-
-		entry := SalesmanSubmissionStatus{
-			SalesmanID:   sm.ID,
-			SalesmanName: sm.Name,
-			ShopID:       sm.ShopID,
-			ShopName:     sm.ShopName,
-		}
-
-		// Check by salesman_id first, then fall back to created_by_id (user_id)
-		rec, found := bySalesmanID[sm.ID]
-		if !found {
-			rec, found = byCreatedByID[sm.UserID]
-		}
-
-		if found {
-			entry.Status = "submitted"
-			recID := rec.ID
-			entry.RecordID = &recID
-			entry.RecordStatus = rec.Status
-			createdAt := rec.CreatedAt
-			entry.SubmittedAt = &createdAt
-			entry.TotalAmount = rec.TotalSalesAmount
-			shop.SubmittedCount++
-			totalSubmitted++
-		} else {
-			entry.Status = "missing"
-			shop.MissingCount++
-		}
-
-		shop.Salesmen = append(shop.Salesmen, entry)
-		shop.TotalSalesmen++
-	}
-
-	// Build ordered shops slice
-	shops := make([]ShopSubmissionSummary, 0, len(shopOrder))
-	for _, sid := range shopOrder {
-		shops = append(shops, *shopMap[sid])
-	}
-
-	totalSalesmen := len(salesmen)
-	var submissionRate float64
-	if totalSalesmen > 0 {
-		submissionRate = math.Round(float64(totalSubmitted)/float64(totalSalesmen)*10000) / 100
-	}
-
-	return &TeamSubmissionStatus{
-		Date:           startDate.Format("2006-01-02"),
-		TotalSalesmen:  totalSalesmen,
-		TotalSubmitted: totalSubmitted,
-		TotalMissing:   totalSalesmen - totalSubmitted,
-		SubmissionRate: submissionRate,
-		Shops:          shops,
-	}, nil
+	return "english"
 }
 
-// getMySubmissionStatus checks if the logged-in salesman has submitted for the date range
-func (s *DashboardService) getMySubmissionStatus(tenantID, userID uuid.UUID, shopID *uuid.UUID, startDate, endDate time.Time) (*MySubmissionStatus, error) {
-	// Find salesman record for this user
-	type salesmanInfo struct {
-		ID       uuid.UUID `gorm:"column:id"`
-		ShopID   uuid.UUID `gorm:"column:shop_id"`
-		ShopName string    `gorm:"column:shop_name"`
+// extractSizeMl parses a size string into milliliters. Matches Flutter's
+// SizeRangeConstants.extractMl semantics: strip non-digits, then upgrade
+// small numbers with a bare "L" suffix (no "ML") from litres to ml.
+func extractSizeMl(size string) int {
+	digits := make([]byte, 0, len(size))
+	for i := 0; i < len(size); i++ {
+		c := size[i]
+		if c >= '0' && c <= '9' {
+			digits = append(digits, c)
+		}
 	}
-
-	var sm salesmanInfo
-	err := s.db.Table("salesmen s").
-		Select("s.id, s.shop_id, sh.name as shop_name").
-		Joins("JOIN shops sh ON sh.id = s.shop_id").
-		Where("s.user_id = ? AND s.deleted_at IS NULL", userID).
-		Where("s.tenant_id = ?", tenantID).
-		Limit(1).
-		Scan(&sm).Error
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to find salesman record: %w", err)
+	if len(digits) == 0 {
+		return 0
 	}
-	if sm.ID == uuid.Nil {
-		// User is not a salesman in any shop
-		return &MySubmissionStatus{HasSubmitted: false}, nil
+	n := 0
+	for _, c := range digits {
+		n = n*10 + int(c-'0')
 	}
-
-	// Find their submission for the date range
-	type recordInfo struct {
-		ID               uuid.UUID `gorm:"column:id"`
-		Status           string    `gorm:"column:status"`
-		CreatedAt        time.Time `gorm:"column:created_at"`
-		TotalSalesAmount float64   `gorm:"column:total_sales_amount"`
+	upper := strings.ToUpper(size)
+	if strings.Contains(upper, "L") && !strings.Contains(upper, "ML") && n < 100 {
+		return n * 1000
 	}
-
-	var rec recordInfo
-	recordQuery := s.db.Table("daily_sales_records").
-		Select("id, status, created_at, total_sales_amount").
-		Where("(created_by_id = ? OR salesman_id = ?)", userID, sm.ID).
-		Where("record_date >= ? AND record_date < ?", startDate, endDate).
-		Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
-
-	if shopID != nil {
-		recordQuery = recordQuery.Where("shop_id = ?", *shopID)
-	}
-
-	err = recordQuery.Order("created_at DESC").Limit(1).Scan(&rec).Error
-	if err != nil {
-		return nil, fmt.Errorf("failed to query submission: %w", err)
-	}
-
-	ms := &MySubmissionStatus{
-		ShopID:   sm.ShopID,
-		ShopName: sm.ShopName,
-	}
-
-	if rec.ID != uuid.Nil {
-		ms.HasSubmitted = true
-		recID := rec.ID
-		ms.RecordID = &recID
-		ms.RecordStatus = rec.Status
-		createdAt := rec.CreatedAt
-		ms.SubmittedAt = &createdAt
-		ms.TotalAmount = rec.TotalSalesAmount
-	}
-
-	return ms, nil
+	return n
 }

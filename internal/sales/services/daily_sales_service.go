@@ -2,37 +2,75 @@ package services
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/tls"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"math/big"
-	"net/http"
-	"net/smtp"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/liquorpro/go-backend/internal/sales/validators"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
 	"github.com/liquorpro/go-backend/pkg/shared/models"
 	"github.com/liquorpro/go-backend/pkg/shared/utils"
-	notifservices "github.com/liquorpro/go-backend/internal/notifications/services"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // DailySalesService handles daily sales operations - the critical bulk entry workflow
 type DailySalesService struct {
-	db                   *database.DB
-	cache                *cache.Cache
-	workflowNotification *notifservices.WorkflowNotificationService
+	db    *database.DB
+	cache *cache.Cache
+}
+
+// propagateMRPFromDailySale stamps products.mrp / audit columns AND upserts
+// shop_product_rates whenever the operator enters a unit_price on the DSE form
+// that differs from the current product MRP by ≥ ₹0.5. Mirrors what Smart Sale
+// apply does at v1.0.123 / v1.0.125 — DSE flow had been silently dropping
+// these edits since v1.0.86 (chhotu's 8 PM Rare 460→470 case on May 2 2026).
+//
+// Best-effort: a failure here logs but never fails the sale write. Called
+// AFTER the daily_sales_items have been persisted. v1.0.161.
+func (s *DailySalesService) propagateMRPFromDailySale(tenantID, shopID, actorID uuid.UUID, items []DailySalesItemRequest) {
+	if len(items) == 0 {
+		return
+	}
+	actorName := resolveActorName(s.db.DB, actorID)
+	for _, it := range items {
+		if it.UnitPrice <= 1 || it.ProductID == uuid.Nil {
+			continue
+		}
+		var current models.Product
+		if err := s.db.Select("id, mrp").
+			Where("id = ? AND tenant_id = ?", it.ProductID, tenantID).
+			First(&current).Error; err != nil {
+			continue
+		}
+		if utils.AbsFloat(current.MRP-it.UnitPrice) < 0.5 {
+			continue
+		}
+		if err := applyProductMRPUpdate(s.db.DB, it.ProductID, tenantID, it.UnitPrice, actorID, actorName); err != nil {
+			log.Printf("⚠️ [DailySales] MRP audit update failed for product %s: %v", it.ProductID, err)
+		} else {
+			log.Printf("💸 [DailySales] MRP edit by %s — product %s: ₹%.2f → ₹%.2f", actorName, it.ProductID, current.MRP, it.UnitPrice)
+		}
+		upsertSQL := `
+			INSERT INTO shop_product_rates
+				(tenant_id, shop_id, product_id, last_user_rate, last_corrected_at, last_corrected_by_id, occurrence_count, source)
+			VALUES (?, ?, ?, ?, NOW(), ?, 1, 'dse_correction')
+			ON CONFLICT (tenant_id, shop_id, product_id) DO UPDATE
+			SET last_user_rate = EXCLUDED.last_user_rate,
+			    last_corrected_at = NOW(),
+			    last_corrected_by_id = EXCLUDED.last_corrected_by_id,
+			    occurrence_count = shop_product_rates.occurrence_count + 1,
+			    source = 'dse_correction',
+			    updated_at = NOW()
+		`
+		if err := s.db.Exec(upsertSQL, tenantID, shopID, it.ProductID, it.UnitPrice, actorID).Error; err != nil {
+			log.Printf("⚠️ [DailySales] shop_product_rates upsert failed for product %s: %v", it.ProductID, err)
+		}
+	}
 }
 
 // NewDailySalesService creates a new daily sales service
@@ -43,83 +81,29 @@ func NewDailySalesService(db *database.DB, cache *cache.Cache) *DailySalesServic
 	}
 }
 
-// SetWorkflowNotificationService sets the workflow notification service for sending approval notifications
-func (s *DailySalesService) SetWorkflowNotificationService(wn *notifservices.WorkflowNotificationService) {
-	s.workflowNotification = wn
-}
-
-// GetDB returns the underlying database connection for direct queries
-func (s *DailySalesService) GetDB() *database.DB {
-	return s.db
-}
-
-// DebugDatabaseTest runs raw SQL queries to diagnose database connection issues
-func (s *DailySalesService) DebugDatabaseTest(tenantID uuid.UUID) map[string]interface{} {
-	result := make(map[string]interface{})
-
-	// Test 1: Raw SQL COUNT
-	var rawCount int64
-	rawErr := s.db.Raw("SELECT COUNT(*) FROM daily_sales_records WHERE tenant_id = ? AND deleted_at IS NULL", tenantID.String()).Scan(&rawCount).Error
-	result["raw_count"] = rawCount
-	result["raw_count_error"] = fmt.Sprintf("%v", rawErr)
-
-	// Test 2: Raw SQL to get IDs
-	var ids []string
-	rawIDsErr := s.db.Raw("SELECT id::text FROM daily_sales_records WHERE tenant_id = ? AND deleted_at IS NULL LIMIT 5", tenantID.String()).Scan(&ids).Error
-	result["raw_ids"] = ids
-	result["raw_ids_error"] = fmt.Sprintf("%v", rawIDsErr)
-
-	// Test 3: GORM Model query count
-	var gormCount int64
-	gormErr := s.db.Model(&models.DailySalesRecord{}).Where("tenant_id = ?", tenantID).Count(&gormCount).Error
-	result["gorm_count"] = gormCount
-	result["gorm_count_error"] = fmt.Sprintf("%v", gormErr)
-
-	// Test 4: Database connection info
-	sqlDB, _ := s.db.DB.DB()
-	stats := sqlDB.Stats()
-	result["db_open_connections"] = stats.OpenConnections
-	result["db_in_use"] = stats.InUse
-	result["db_idle"] = stats.Idle
-
-	// Test 5: Check current database
-	var dbName string
-	s.db.Raw("SELECT current_database()").Scan(&dbName)
-	result["current_database"] = dbName
-
-	// Test 6: Check current user
-	var dbUser string
-	s.db.Raw("SELECT current_user").Scan(&dbUser)
-	result["current_user"] = dbUser
-
-	return result
-}
-
 // DailySalesRecordRequest represents daily sales record creation/update request
 type DailySalesRecordRequest struct {
-	RecordDate         time.Time               `json:"record_date" binding:"required"`
-	ShopID             uuid.UUID               `json:"shop_id" binding:"required"`
-	SalesmanID         *uuid.UUID              `json:"salesman_id"`
-	TotalSalesAmount   float64                 `json:"total_sales_amount" binding:"required,gt=0"`
-	TotalCashAmount    float64                 `json:"total_cash_amount"`
-	TotalCardAmount    float64                 `json:"total_card_amount"`
-	TotalUpiAmount     float64                 `json:"total_upi_amount"`
-	TotalCreditAmount  float64                 `json:"total_credit_amount"`
-	TotalExpenseAmount float64                 `json:"total_expense_amount"` // NEW: Total expenses
-	Notes              string                  `json:"notes"`
-	Items              []DailySalesItemRequest `json:"items" binding:"required,min=1"`
+	RecordDate        time.Time               `json:"record_date" binding:"required"`
+	ShopID            uuid.UUID               `json:"shop_id" binding:"required"`
+	SalesmanID        *uuid.UUID              `json:"salesman_id"`
+	TotalSalesAmount  float64                 `json:"total_sales_amount" binding:"required,gt=0"`
+	TotalCashAmount   float64                 `json:"total_cash_amount"`
+	TotalCardAmount   float64                 `json:"total_card_amount"`
+	TotalUpiAmount    float64                 `json:"total_upi_amount"`
+	TotalCreditAmount float64                 `json:"total_credit_amount"`
+	Notes             string                  `json:"notes"`
+	ReceiptImages     []string                `json:"receipt_images"`
+	ImageURLs         []string                `json:"image_urls"`        // Flutter app sends this field name
+	IdempotencyKey    *string                 `json:"idempotency_key"`   // Prevent duplicate submissions
+	Items             []DailySalesItemRequest `json:"items" binding:"required,min=1"`
+}
 
-	// Expense breakdown (NEW - Expense Table Feature)
-	Expenses []DailySalesExpenseRequest `json:"expenses"`
-
-	// Location tracking (optional)
-	Latitude           *float64 `json:"latitude,omitempty"`
-	Longitude          *float64 `json:"longitude,omitempty"`
-	LocationAccuracy   *string  `json:"location_accuracy,omitempty"`
-	LocationCapturedAt *string  `json:"location_captured_at,omitempty"` // ISO8601 format
-
-	// Image URLs (uploaded images)
-	ImageURLs []string `json:"image_urls"`
+// GetReceiptImages returns receipt images from either field (web sends receipt_images, Flutter sends image_urls)
+func (r *DailySalesRecordRequest) GetReceiptImages() []string {
+	if len(r.ReceiptImages) > 0 {
+		return r.ReceiptImages
+	}
+	return r.ImageURLs
 }
 
 // DailySalesItemRequest represents individual product sales within daily record
@@ -132,134 +116,127 @@ type DailySalesItemRequest struct {
 	CardAmount   float64   `json:"card_amount"`
 	UpiAmount    float64   `json:"upi_amount"`
 	CreditAmount float64   `json:"credit_amount"`
-
-	// Stock audit fields
-	OpeningStock int `json:"opening_stock"`
-	ClosingStock int `json:"closing_stock"`
-
-	// OCR-extracted data (from Smart Sale / GPT-5.2) - for manager review
-	OCRBrandName string  `json:"ocr_brand_name"` // Brand name extracted from image
-	OCRSize      string  `json:"ocr_size"`       // Size extracted from image
-	OCRReceipt   int     `json:"ocr_receipt"`    // New stock received (from image)
-	OCRTotal     int     `json:"ocr_total"`      // Opening + Receipt (from image)
-	DBStock      int     `json:"db_stock"`       // Stock in database at submission time
-	OCRRate      float64 `json:"ocr_rate"`       // Rate from image (for comparison)
-}
-
-// DailySalesExpenseRequest represents expense entry within daily record
-type DailySalesExpenseRequest struct {
-	HeaderID   string  `json:"header_id" binding:"required"`   // e.g., "godam_charges", "transport"
-	HeaderName string  `json:"header_name" binding:"required"` // e.g., "Godam Charges", "Transport"
-	Amount     float64 `json:"amount" binding:"required,gt=0"`
 }
 
 // DailySalesRecordResponse represents daily sales record in responses
 type DailySalesRecordResponse struct {
-	ID                 uuid.UUID                `json:"id"`
-	RecordDate         time.Time                `json:"record_date"`
-	ShopID             uuid.UUID                `json:"shop_id"`
-	ShopName           string                   `json:"shop_name"`
-	SalesmanID         *uuid.UUID               `json:"salesman_id"`
-	SalesmanName       string                   `json:"salesman_name"`
-	TotalSalesAmount   float64                  `json:"total_sales_amount"`
-	TotalCashAmount    float64                  `json:"total_cash_amount"`
-	TotalCardAmount    float64                  `json:"total_card_amount"`
-	TotalUpiAmount     float64                  `json:"total_upi_amount"`
-	TotalCreditAmount  float64                  `json:"total_credit_amount"`
-	TotalExpenseAmount float64                  `json:"total_expense_amount"` // NEW: Total expenses
-	Status             string                   `json:"status"`
-	ApprovedAt         *time.Time               `json:"approved_at"`
-	ApprovedByName     string                   `json:"approved_by_name"`
-	CreatedByName      string                   `json:"created_by_name"`
-	Notes              string                   `json:"notes"`
-	CreatedAt          time.Time                `json:"created_at"`
-	UpdatedAt          time.Time                `json:"updated_at"`
-	Items              []DailySalesItemResponse `json:"items"`
-	TotalItems         int                      `json:"total_items"`
-
-	// Revert tracking
-	RevertedAt     *time.Time `json:"reverted_at,omitempty"`
-	RevertedByName string     `json:"reverted_by_name,omitempty"`
-	RevertReason   string     `json:"revert_reason,omitempty"`
-
-	// Expense breakdown (NEW - Expense Table Feature)
-	Expenses      []DailySalesExpenseResponse `json:"expenses"`
-	TotalExpenses int                         `json:"total_expenses"`
-
-	// Location tracking (optional)
-	Latitude           *float64   `json:"latitude,omitempty"`
-	Longitude          *float64   `json:"longitude,omitempty"`
-	LocationAccuracy   *string    `json:"location_accuracy,omitempty"`
-	LocationCapturedAt *time.Time `json:"location_captured_at,omitempty"`
-
-	// Image URLs
-	ImageURLs []string `json:"image_urls"`
+	ID                uuid.UUID                `json:"id"`
+	RecordDate        time.Time                `json:"record_date"`
+	ShopID            uuid.UUID                `json:"shop_id"`
+	ShopName          string                   `json:"shop_name"`
+	SalesmanID        *uuid.UUID               `json:"salesman_id"`
+	SalesmanName      string                   `json:"salesman_name"`
+	TotalSalesAmount  float64                  `json:"total_sales_amount"`
+	TotalCashAmount   float64                  `json:"total_cash_amount"`
+	TotalCardAmount   float64                  `json:"total_card_amount"`
+	TotalUpiAmount    float64                  `json:"total_upi_amount"`
+	TotalCreditAmount float64                  `json:"total_credit_amount"`
+	Status            string                   `json:"status"`
+	ApprovedAt        *time.Time               `json:"approved_at"`
+	ApprovedByName    string                   `json:"approved_by_name"`
+	CreatedByName     string                   `json:"created_by_name"`
+	Notes             string                   `json:"notes"`
+	HasAlerts         bool                     `json:"has_alerts,omitempty"`
+	AlertCount        int                      `json:"alert_count,omitempty"`
+	ReceiptImages     []string                 `json:"receipt_images,omitempty"`
+	// v1.0.157 — duplicate the receipt images under image_urls because
+	// the Flutter receipt-image viewer parses image_urls only. Without
+	// this, tapping the attached image on Sales Summary shows "Failed
+	// to load image".
+	ImageURLs         []string                 `json:"image_urls,omitempty"`
+	CreatedAt         time.Time                `json:"created_at"`
+	UpdatedAt         time.Time                `json:"updated_at"`
+	Items             []DailySalesItemResponse `json:"items"`
+	TotalItems        int                      `json:"total_items"`
 }
 
-// DailySalesExpenseResponse represents expense entry in responses
-type DailySalesExpenseResponse struct {
-	ID         uuid.UUID `json:"id"`
-	HeaderID   string    `json:"header_id"`
-	HeaderName string    `json:"header_name"`
-	Amount     float64   `json:"amount"`
-}
-
-// DailySalesItemResponse represents daily sales item in responses
+// DailySalesItemResponse represents daily sales item in responses.
+// DisplayName + bold indices flow through so the web admin renders the
+// admin-configured bold + small treatment on the daily sales detail view
+// (which is the highest-traffic list after the sales list itself).
 type DailySalesItemResponse struct {
-	ID           uuid.UUID `json:"id"`
-	ProductID    uuid.UUID `json:"product_id"`
-	ProductName  string    `json:"product_name"`
-	BrandName    string    `json:"brand_name"`
-	CategoryName string    `json:"category_name"`
-	Size         string    `json:"size"`
-	ImageURL     string    `json:"image_url"`
-	Quantity     int       `json:"quantity"`
-	UnitPrice    float64   `json:"unit_price"`
-	TotalAmount  float64   `json:"total_amount"`
-	CashAmount   float64   `json:"cash_amount"`
-	CardAmount   float64   `json:"card_amount"`
-	UpiAmount    float64   `json:"upi_amount"`
-	CreditAmount float64   `json:"credit_amount"`
-
-	// Stock audit fields - for inventory tracking and mismatch detection
-	OpeningStock int `json:"opening_stock"` // Stock BEFORE this sale was recorded
-	ClosingStock int `json:"closing_stock"` // Expected stock AFTER (opening - quantity)
-
-	// OCR-extracted data (from Smart Sale / GPT-5.2) - for manager review
-	// These show what was extracted from the image for comparison with system data
-	OCRBrandName string  `json:"ocr_brand_name,omitempty"` // Brand name extracted from image
-	OCRSize      string  `json:"ocr_size,omitempty"`       // Size extracted from image
-	OCRReceipt   int     `json:"ocr_receipt,omitempty"`    // New stock received (from image)
-	OCRTotal     int     `json:"ocr_total,omitempty"`      // Opening + Receipt (from image)
-	DBStock      int     `json:"db_stock,omitempty"`       // Stock in database at submission time
-	OCRRate      float64 `json:"ocr_rate,omitempty"`       // Rate from image (for comparison)
+	ID                    uuid.UUID `json:"id"`
+	ProductID             uuid.UUID `json:"product_id"`
+	ProductName           string    `json:"product_name"`
+	BrandName             string    `json:"brand_name"`
+	DisplayName           string    `json:"display_name,omitempty"`
+	DisplayNameBoldStart  *int      `json:"display_name_bold_start,omitempty"`
+	DisplayNameBoldLength *int      `json:"display_name_bold_length,omitempty"`
+	CategoryName          string    `json:"category_name"`
+	Size                  string    `json:"size"`
+	Quantity              int       `json:"quantity"`
+	UnitPrice             float64   `json:"unit_price"`
+	TotalAmount           float64   `json:"total_amount"`
+	CashAmount            float64   `json:"cash_amount"`
+	CardAmount            float64   `json:"card_amount"`
+	UpiAmount             float64   `json:"upi_amount"`
+	CreditAmount          float64   `json:"credit_amount"`
+	OpeningStock          int       `json:"opening_stock"`
+	ClosingStock          int       `json:"closing_stock"`
+	StockAlert            string    `json:"stock_alert,omitempty"`
+	StockAlertQty         int       `json:"stock_alert_qty,omitempty"`
+	// v1.0.156 — current product MRP + audit. Sales summary view must show
+	// the live shop MRP alongside the historical applied unit_price so the
+	// operator can see whether the sold rate diverges from the current
+	// price (chhotu's M2 Cranberry case: applied at ₹770 but products.mrp
+	// is ₹760 — both numbers should be visible on the same row).
+	ProductMRP              float64    `json:"product_mrp"`
+	LastMRPChangeAt         *time.Time `json:"last_mrp_change_at,omitempty"`
+	LastMRPChangeByName     string     `json:"last_mrp_change_by_name,omitempty"`
+	LastMRPChangePrevious   float64    `json:"last_mrp_change_previous,omitempty"`
 }
 
-// RecordExistsResponse - Response for record existence check (SINGLE SOURCE OF TRUTH for draft management)
-type RecordExistsResponse struct {
-	Exists      bool       `json:"exists"`
-	RecordID    *uuid.UUID `json:"record_id,omitempty"`
-	Status      string     `json:"status,omitempty"`  // "pending", "approved", "rejected"
-	CanSubmit   bool       `json:"can_submit"`        // true if can create new record
-	RecordDate  time.Time  `json:"record_date"`
-	ShopID      uuid.UUID  `json:"shop_id"`
-	RecordCount int        `json:"record_count"`
+// rebuildRegisterChain re-derives daily_sales_items.opening_stock/closing_stock
+// from the authoritative `daily_sale` stock_histories rows for the given (shop,
+// product) set, so the per-day register always chains (open[d] == close[d-1])
+// regardless of back-dating or multiple records per day. The stock ledger is the
+// single source of truth; the register is a DERIVED projection of it — this
+// replaces the old create-time live-snapshot capture that broke when several
+// back-dated records were submitted together (all captured the same live
+// balance). Pure register fix: never touches stocks.quantity or writes history.
+// Idempotent (only divergent rows updated). Best-effort — a failure here must
+// never block a sale, so we log and continue. v1.0.389.
+func (s *DailySalesService) rebuildRegisterChain(tx *gorm.DB, tenantID, shopID uuid.UUID, productIDs []uuid.UUID) {
+	if len(productIDs) == 0 {
+		return
+	}
+	if err := tx.Exec(`
+		WITH moved AS (
+		  SELECT DISTINCT ON (sh.reference_id, sh.product_id)
+		         sh.reference_id AS rec, sh.product_id AS pid,
+		         sh.previous_quantity AS topen, sh.new_quantity AS tclose
+		  FROM stock_histories sh
+		  JOIN daily_sales_records r ON r.id = sh.reference_id AND r.deleted_at IS NULL AND r.status <> 'rejected'
+		  WHERE sh.movement_type = 'daily_sale' AND sh.tenant_id = ? AND sh.shop_id = ?
+		    AND sh.product_id IN ? AND sh.deleted_at IS NULL
+		  ORDER BY sh.reference_id, sh.product_id, sh.created_at DESC)
+		UPDATE daily_sales_items i SET opening_stock = m.topen, closing_stock = m.tclose, updated_at = NOW()
+		FROM moved m
+		WHERE m.rec = i.daily_sales_record_id AND m.pid = i.product_id AND i.deleted_at IS NULL
+		  AND (i.opening_stock <> m.topen OR i.closing_stock <> m.tclose)
+	`, tenantID, shopID, productIDs).Error; err != nil {
+		log.Printf("⚠️ [DailySales] rebuildRegisterChain (shop=%s, %d products): %v — non-fatal", shopID, len(productIDs), err)
+	}
 }
 
 // CreateDailySalesRecord creates a new daily sales record with bulk items
-func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req DailySalesRecordRequest, tenantID, createdByID uuid.UUID) (*DailySalesRecordResponse, error) {
-	// Validate payment amounts using centralized validator
-	// Formula: Cash + Card + UPI + Credit + Expenses = TotalSalesAmount
-	// Expenses are paid from collected cash, so they count towards the total
-	if err := validators.ValidatePaymentAmounts(
-		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount,
-		req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount,
-	); err != nil {
-		log.Printf("❌ [DailySales] Payment validation failed: %v", err)
+func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req DailySalesRecordRequest, tenantID, createdByID uuid.UUID, createdByRole string) (*DailySalesRecordResponse, error) {
+	// Validate payment amounts sum up correctly
+	totalPaymentAmount := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
+	if utils.AbsFloat(totalPaymentAmount-req.TotalSalesAmount) > 0.01 {
 		return nil, errors.New("total payment amounts do not match total sales amount")
 	}
-	log.Printf("✅ [DailySales] Payment validation passed: Cash=%.2f + Card=%.2f + UPI=%.2f + Credit=%.2f + Expenses=%.2f = %.2f",
-		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount, req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount)
+
+	// Validate record date — must not be in the future or more than 7 days in the past (IST)
+	recordDate := utils.StartOfDayIST(req.RecordDate)
+	todayIST := utils.StartOfDayIST(utils.NowIST())
+	if recordDate.After(todayIST) {
+		return nil, errors.New("record date cannot be in the future")
+	}
+	maxPastDate := todayIST.AddDate(0, 0, -7)
+	if recordDate.Before(maxPastDate) {
+		return nil, fmt.Errorf("record date cannot be more than 7 days in the past (earliest: %s)", maxPastDate.Format("2006-01-02"))
+	}
 
 	// Verify shop exists and belongs to tenant FIRST (before checking duplicates)
 	var shop models.Shop
@@ -271,9 +248,20 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 
 	// Allow multiple daily sales records for the same date and shop
 	// This enables corrections, adjustments, and multiple entries per day
-	checkDate := utils.StartOfDay(req.RecordDate)
+	checkDate := utils.StartOfDayIST(req.RecordDate)
 	log.Printf("📅 [DailySales] Processing record for date=%v, shop_id=%s, tenant_id=%s", checkDate, req.ShopID, tenantID)
 	log.Printf("✅ [DailySales] Multiple entries allowed for same date/shop - proceeding with creation")
+
+	// Check idempotency key to prevent duplicate submissions
+	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
+		var existing models.DailySalesRecord
+		if err := s.db.Where("idempotency_key = ? AND tenant_id = ? AND deleted_at IS NULL",
+			*req.IdempotencyKey, tenantID).First(&existing).Error; err == nil {
+			log.Printf("⚠️ [DailySales] Idempotency key already used: %s (existing record %s)", *req.IdempotencyKey, existing.ID)
+			// Return the existing record instead of creating a duplicate
+			return s.GetDailySalesRecordByID(ctx, existing.ID, tenantID)
+		}
+	}
 
 	// Verify salesman if provided
 	if req.SalesmanID != nil {
@@ -284,27 +272,27 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 		}
 	}
 
-	// Parse location captured time if provided
-	var locationCapturedAt *time.Time
-	if req.LocationCapturedAt != nil && *req.LocationCapturedAt != "" {
-		parsedTime, err := time.Parse(time.RFC3339, *req.LocationCapturedAt)
-		if err == nil {
-			locationCapturedAt = &parsedTime
-		}
+	// ✅ UPFRONT STOCK VALIDATION - Check stock availability for ALL users
+	// This ensures immediate feedback without deducting stock for pending records
+	log.Printf("🔍 [DailySales] Validating stock availability for %d items...", len(req.Items))
+	if err := s.validateStockAvailability(tenantID, req.ShopID, req.Items); err != nil {
+		log.Printf("❌ [DailySales] Stock validation failed: %v", err)
+		return nil, err
 	}
+	log.Printf("✅ [DailySales] Stock validation passed - all items available")
 
-	// Deduplicate and convert image URLs to JSON string for storage
-	imageURLsJSON := ""
-	if len(req.ImageURLs) > 0 {
-		uniqueURLs := deduplicateImageURLs(req.ImageURLs)
-		if len(uniqueURLs) != len(req.ImageURLs) {
-			log.Printf("📸 [DailySales] Deduplicated image URLs: %d -> %d (removed %d duplicates)",
-				len(req.ImageURLs), len(uniqueURLs), len(req.ImageURLs)-len(uniqueURLs))
-		}
-		imageBytes, err := json.Marshal(uniqueURLs)
-		if err == nil {
-			imageURLsJSON = string(imageBytes)
-		}
+	// Determine if auto-approval based on user role
+	// Roles that can auto-approve: admin, manager, assistant_manager
+	autoApprove := createdByRole == models.RoleAdmin ||
+		createdByRole == models.RoleManager ||
+		createdByRole == models.RoleAssistantManager
+
+	initialStatus := models.StatusPending
+	if autoApprove {
+		initialStatus = models.StatusApproved
+		log.Printf("✅ [DailySales] Auto-approving record for privileged user (role=%s)", createdByRole)
+	} else {
+		log.Printf("⏳ [DailySales] Creating pending record for user (role=%s) - requires approval", createdByRole)
 	}
 
 	// Start transaction for atomic creation
@@ -312,25 +300,27 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		// Create daily sales record
 		record = &models.DailySalesRecord{
-			TenantModel:        models.TenantModel{TenantID: &tenantID},
-			RecordDate:         utils.StartOfDay(req.RecordDate),
-			ShopID:             req.ShopID,
-			SalesmanID:         req.SalesmanID,
-			TotalSalesAmount:   req.TotalSalesAmount,
-			TotalCashAmount:    req.TotalCashAmount,
-			TotalCardAmount:    req.TotalCardAmount,
-			TotalUpiAmount:     req.TotalUpiAmount,
-			TotalCreditAmount:  req.TotalCreditAmount,
-			TotalExpenseAmount: req.TotalExpenseAmount, // NEW: Total expenses
-			Status:             models.StatusPending,
-			CreatedByID:        createdByID,
-			Notes:              req.Notes,
-			ImageURLs:          imageURLsJSON,
-			// Location tracking (optional)
-			Latitude:           req.Latitude,
-			Longitude:          req.Longitude,
-			LocationAccuracy:   req.LocationAccuracy,
-			LocationCapturedAt: locationCapturedAt,
+			TenantModel:       models.TenantModel{TenantID: &tenantID},
+			RecordDate:        utils.StartOfDayIST(req.RecordDate),
+			ShopID:            req.ShopID,
+			SalesmanID:        req.SalesmanID,
+			TotalSalesAmount:  req.TotalSalesAmount,
+			TotalCashAmount:   req.TotalCashAmount,
+			TotalCardAmount:   req.TotalCardAmount,
+			TotalUpiAmount:    req.TotalUpiAmount,
+			TotalCreditAmount: req.TotalCreditAmount,
+			Status:            initialStatus,
+			CreatedByID:       createdByID,
+			Notes:             req.Notes,
+			ReceiptImages:     models.JSONStringList(req.GetReceiptImages()),
+			IdempotencyKey:    req.IdempotencyKey,
+		}
+
+		// If auto-approved, set approval metadata
+		if autoApprove {
+			now := time.Now()
+			record.ApprovedAt = &now
+			record.ApprovedByID = &createdByID
 		}
 
 		if err := tx.Create(&record).Error; err != nil {
@@ -352,47 +342,91 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 				return fmt.Errorf("payment amounts for product %s do not match total amount", product.Name)
 			}
 
-			// Capture current stock level for audit trail (before any changes)
-			var currentStock int
-			stockResult := tx.Table("stocks").
-				Select("quantity").
-				Where("tenant_id = ? AND shop_id = ? AND product_id = ?", tenantID, req.ShopID, itemReq.ProductID).
-				Scan(&currentStock)
-			// If no stock record exists or query fails, default to 0
-			if stockResult.Error != nil || stockResult.RowsAffected == 0 {
-				currentStock = 0
+			// ✅ ALWAYS DEDUCT STOCK at creation time (for both pending and auto-approved).
+			// Opening/closing stock is captured and locked in the item.
+			// If rejected later, stock will be restored.
+			var stock models.Stock
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+				req.ShopID, itemReq.ProductID, tenantID).First(&stock).Error
+
+			openingStock := 0
+			closingStock := 0
+			if err == nil {
+				openingStock = stock.Quantity
+				newQuantity := stock.Quantity - itemReq.Quantity
+				if newQuantity < 0 {
+					return fmt.Errorf("insufficient stock for %s: available %d, requested %d",
+						product.Name, stock.Quantity, itemReq.Quantity)
+				}
+				closingStock = newQuantity
+
+				// Deduct stock
+				if err := tx.Model(&stock).Update("quantity", newQuantity).Error; err != nil {
+					return fmt.Errorf("failed to update stock for product %s: %w", product.Name, err)
+				}
+
+				// Create stock history for audit trail
+				approvalNote := "auto-approved"
+				if !autoApprove {
+					approvalNote = "pending"
+				}
+				// v1.0.162 — use the pre-update `openingStock` snapshot. After
+				// `tx.Model(&stock).Update(...)`, GORM mutates `stock.Quantity`
+				// to `newQuantity` in-place; reading it here would record
+				// PreviousQuantity == NewQuantity (the corruption pattern that
+				// silently broke chhotu's May 4 audit trail on 97 rows).
+				shopRef, prodRef := stock.ShopID, stock.ProductID
+				stockHistory := models.StockHistory{
+					TenantModel:      models.TenantModel{TenantID: &tenantID},
+					StockID:          stock.ID,
+					ShopID:           &shopRef,
+					ProductID:        &prodRef,
+					MovementType:     "daily_sale",
+					Quantity:         -itemReq.Quantity,
+					PreviousQuantity: openingStock,
+					NewQuantity:      newQuantity,
+					UnitCost:         itemReq.UnitPrice,
+					TotalCost:        itemReq.TotalAmount,
+					Reference:        fmt.Sprintf("Daily Sales Record %s", record.ID),
+					ReferenceID:      &record.ID,
+					CreatedByID:      createdByID,
+					Notes:            fmt.Sprintf("Daily sales entry for %s (%s)", product.Name, approvalNote),
+				}
+
+				// v1.0.256 — FAIL LOUD (atomic stock+audit). Was swallowed →
+				// FM Tower 1133-missing-rows class (breaks reject-baseline/heal).
+				if err := tx.Create(&stockHistory).Error; err != nil {
+					log.Printf("ERROR: stock history create failed — rolling back sale: %v", err)
+					return fmt.Errorf("failed to record stock history (sale not saved, please retry): %w", err)
+				}
+
+				log.Printf("✅ [DailySales] Stock deducted for %s: %d → %d (-%d) [%s]",
+					product.Name, openingStock, newQuantity, itemReq.Quantity, approvalNote)
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("failed to get stock for product %s: %w", product.Name, err)
 			}
 
-			// Create item with stock audit fields and OCR data
+			// Create item with locked opening/closing stock
 			item := models.DailySalesItem{
 				TenantModel:        models.TenantModel{TenantID: &tenantID},
 				DailySalesRecordID: record.ID,
 				ProductID:          itemReq.ProductID,
 				Quantity:           itemReq.Quantity,
+				QuantitySold:       itemReq.Quantity,
 				UnitPrice:          itemReq.UnitPrice,
 				TotalAmount:        itemReq.TotalAmount,
 				CashAmount:         itemReq.CashAmount,
 				CardAmount:         itemReq.CardAmount,
 				UpiAmount:          itemReq.UpiAmount,
 				CreditAmount:       itemReq.CreditAmount,
-				OpeningStock:       currentStock,                    // Stock BEFORE this sale
-				ClosingStock:       currentStock - itemReq.Quantity, // Expected stock AFTER
-				// OCR-extracted data for manager review
-				OCRBrandName: itemReq.OCRBrandName,
-				OCRSize:      itemReq.OCRSize,
-				OCRReceipt:   itemReq.OCRReceipt,
-				OCRTotal:     itemReq.OCRTotal,
-				DBStock:      itemReq.DBStock,
-				OCRRate:      itemReq.OCRRate,
+				OpeningStock:       openingStock,
+				ClosingStock:       closingStock,
 			}
 
 			if err := tx.Create(&item).Error; err != nil {
 				return fmt.Errorf("failed to create daily sales item: %w", err)
 			}
-
-			// NOTE: Stock deduction is deferred to ApproveDailySalesRecord
-			// This ensures rejected sales don't affect inventory
-			// Stock will be validated and deducted only when the sale is approved
 
 			totalItemsAmount += itemReq.TotalAmount
 		}
@@ -402,24 +436,13 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 			return errors.New("total items amount does not match record total sales amount")
 		}
 
-		// Create expense entries in batch (single INSERT instead of N)
-		totalExpensesAmount := 0.0
-		if len(req.Expenses) > 0 {
-			expenses := make([]models.DailySalesExpense, 0, len(req.Expenses))
-			for _, expenseReq := range req.Expenses {
-				expenses = append(expenses, models.DailySalesExpense{
-					TenantModel:        models.TenantModel{TenantID: &tenantID},
-					DailySalesRecordID: record.ID,
-					HeaderID:           expenseReq.HeaderID,
-					HeaderName:         expenseReq.HeaderName,
-					Amount:             expenseReq.Amount,
-				})
-				totalExpensesAmount += expenseReq.Amount
-			}
-			if err := tx.CreateInBatches(&expenses, 100).Error; err != nil {
-				return fmt.Errorf("failed to create expense entries: %w", err)
-			}
+		// v1.0.389 — keep the per-day register a clean projection of the ledger
+		// (chains across this + any prior back-dated records for these products).
+		regProducts := make([]uuid.UUID, 0, len(req.Items))
+		for _, it := range req.Items {
+			regProducts = append(regProducts, it.ProductID)
 		}
+		s.rebuildRegisterChain(tx, tenantID, req.ShopID, regProducts)
 
 		return nil
 	})
@@ -428,17 +451,45 @@ func (s *DailySalesService) CreateDailySalesRecord(ctx context.Context, req Dail
 		return nil, err
 	}
 
+	// v1.0.161 — propagate operator-edited MRPs to products + shop_product_rates.
+	// DSE form lets the user override unit_price per row; before this hook those
+	// edits stayed locked inside daily_sales_items (Chhotu's 8 PM Rare 460→470
+	// on FM Tower May 2). Best-effort, async-safe, ₹0.5 no-op gate.
+	go s.propagateMRPFromDailySale(tenantID, req.ShopID, createdByID, req.Items)
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// 💵 AUTO CASH TRACKING - Update user's cash holding
+	// ═══════════════════════════════════════════════════════════════════════════
+	// For approved records with cash payments, automatically update cash holdings
+	if autoApprove && record.TotalCashAmount > 0 {
+		// Create cash service instance (lightweight, no external deps)
+		cashService := &CashServiceAdapter{db: s.db}
+
+		err := cashService.UpdateCashBalance(
+			ctx,
+			createdByID,      // User who created the sale has the cash
+			req.ShopID,       // Cash is at this shop
+			tenantID,         // Tenant
+			record.TotalCashAmount, // Cash amount to add
+			"sale",           // Transaction type
+			fmt.Sprintf("Daily sales - Record ID: %s, Date: %s", record.ID, record.RecordDate.Format("2006-01-02")),
+			"daily_sales",    // Related entity type
+			&record.ID,       // Related entity ID
+			createdByID,      // Created by
+		)
+
+		if err != nil {
+			// ⚠️ Don't fail the sale - just log the error
+			// The sale succeeded, cash tracking is secondary
+			log.Printf("⚠️ [DailySales] Failed to update cash holding (non-critical): %v", err)
+		} else {
+			log.Printf("✅ [DailySales] Cash holding updated: +%.2f for user %s at shop %s",
+				record.TotalCashAmount, createdByID, req.ShopID)
+		}
+	}
+
 	// Clear cache for pending sales
 	s.clearDailySalesCache(ctx, tenantID, req.ShopID)
-
-	// Notify approvers about new daily sales record requiring approval
-	if s.workflowNotification != nil {
-		go func() {
-			if err := s.workflowNotification.NotifyDailySalesCreated(context.Background(), record); err != nil {
-				log.Printf("[DAILY_SALES] Failed to send record creation notification: %v", err)
-			}
-		}()
-	}
 
 	// Load and return complete record
 	return s.GetDailySalesRecordByID(ctx, record.ID, tenantID)
@@ -450,47 +501,161 @@ func (s *DailySalesService) GetDailySalesRecords(ctx context.Context, tenantID u
 	var totalCount int64
 
 	query := s.db.Model(&models.DailySalesRecord{}).
-		Where("daily_sales_records.tenant_id = ?", tenantID).
-		Joins("Shop").Joins("Salesman").Joins("CreatedBy").Joins("ApprovedBy").
+		Where("tenant_id = ?", tenantID).
+		Preload("Shop").
+		Preload("Salesman").
+		Preload("CreatedBy").
+		Preload("ApprovedBy").
+		Preload("Items", func(db *gorm.DB) *gorm.DB {
+			// v1.0.149 — every list view sorts by operator-defined position so
+			// the IMAGE order (set on Smart Sale apply) and any subsequent
+			// drag-reorder propagate to web admin, Sales Summary, daily entry.
+			return db.Order("position ASC").Order("unit_price ASC")
+		}).
 		Preload("Items.Product.Brand").
-		Preload("Items.Product.Category").
-		Preload("Expenses")
+		Preload("Items.Product.Category")
 
-	// Apply filters (qualify with table name to avoid ambiguity from joins)
-	if filters.ShopID != uuid.Nil {
-		query = query.Where("daily_sales_records.shop_id = ?", filters.ShopID)
+	// BASE filters = everything EXCEPT size/category (shop, salesman, status,
+	// date, alerts). Size/category are applied separately so each breakdown can
+	// ignore its own facet (selecting a size still shows every size; selecting a
+	// category still shows every category).
+	applyBaseFilters := func(q *gorm.DB) *gorm.DB {
+		if filters.ShopID != "" {
+			if shopUUID, err := uuid.Parse(filters.ShopID); err == nil {
+				q = q.Where("shop_id = ?", shopUUID)
+			}
+		}
+		if filters.SalesmanID != "" {
+			if salesmanUUID, err := uuid.Parse(filters.SalesmanID); err == nil {
+				q = q.Where("salesman_id = ?", salesmanUUID)
+			}
+		}
+		if filters.Status != "" {
+			q = q.Where("status = ?", filters.Status)
+		}
+		if !filters.StartDate.IsZero() {
+			q = q.Where("record_date >= ?", filters.StartDate)
+		}
+		if !filters.EndDate.IsZero() {
+			q = q.Where("record_date < ?", filters.EndDate)
+		}
+		if filters.HasAlerts != nil {
+			q = q.Where("has_alerts = ?", *filters.HasAlerts)
+		}
+		return q
 	}
-	if filters.SalesmanID != uuid.Nil {
-		query = query.Where("daily_sales_records.salesman_id = ?", filters.SalesmanID)
+
+	// Item-level facet predicates — operate on a query that aliased the items as
+	// `i`, with products `p` and categories `c` joined.
+	sz := strings.ToLower(strings.TrimSpace(filters.Size))
+	cat := strings.TrimSpace(filters.Category)
+	itemSizeWhere := func(q *gorm.DB) *gorm.DB {
+		if sz == "" {
+			return q
+		}
+		if sz == "beer" {
+			return q.Where("LOWER(COALESCE(c.name,'')) LIKE ?", "%beer%")
+		}
+		like := sz + "%"
+		return q.Where(
+			"LOWER(REGEXP_REPLACE(COALESCE(p.size,''), '[^0-9a-zA-Z]', '', 'g')) LIKE ? OR "+
+				"LOWER(REGEXP_REPLACE(COALESCE(i.ocr_size,''), '[^0-9a-zA-Z]', '', 'g')) LIKE ?",
+			like, like)
 	}
-	if filters.Status != "" {
-		query = query.Where("daily_sales_records.status = ?", filters.Status)
+	itemCatWhere := func(q *gorm.DB) *gorm.DB {
+		if cat == "" {
+			return q
+		}
+		return q.Where("LOWER(c.name) = LOWER(?)", cat)
 	}
-	if !filters.StartDate.IsZero() {
-		query = query.Where("daily_sales_records.record_date >= ?", filters.StartDate)
+
+	// Record-level facet: keep records that contain at least one item matching
+	// BOTH the size AND the category (so a 375ml-vodka + 180ml-whisky day is not a
+	// false match for size=375 & category=whisky).
+	applyRecordFacets := func(q *gorm.DB) *gorm.DB {
+		if sz == "" && cat == "" {
+			return q
+		}
+		sub := s.db.Table("daily_sales_items AS i").
+			Select("i.daily_sales_record_id").
+			Joins("JOIN products p ON p.id = i.product_id").
+			Joins("LEFT JOIN categories c ON c.id = p.category_id").
+			Where("i.deleted_at IS NULL")
+		sub = itemCatWhere(itemSizeWhere(sub))
+		return q.Where("id IN (?)", sub)
 	}
-	if !filters.EndDate.IsZero() {
-		query = query.Where("daily_sales_records.record_date <= ?", filters.EndDate)
-	}
+
+	query = applyRecordFacets(applyBaseFilters(query))
 
 	// Count total records
 	if err := query.Count(&totalCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count daily sales records: %w", err)
 	}
 
+	// v1.0.392 — FACETED summary over the FULL filtered set (independent of
+	// pagination). Record-level totals reflect ALL active filters; per-category /
+	// per-size breakdowns each IGNORE their own facet so the other options stay
+	// visible; FilteredQty/Amount is the exact item-level total for the active
+	// size+category so the cards reconcile with the table.
+	summary := &DailySalesSummary{}
+	applyRecordFacets(applyBaseFilters(s.db.Model(&models.DailySalesRecord{}).Where("tenant_id = ?", tenantID))).
+		Select("COUNT(*) AS total_records, COALESCE(SUM(total_sales_amount),0) AS total_amount, " +
+			"COUNT(*) FILTER (WHERE status = 'pending') AS pending, " +
+			"COUNT(*) FILTER (WHERE status = 'approved') AS approved").
+		Scan(summary)
+
+	baseIDs := applyBaseFilters(s.db.Model(&models.DailySalesRecord{}).Where("tenant_id = ?", tenantID)).Select("id")
+	baseItems := func() *gorm.DB {
+		return s.db.Table("daily_sales_items AS i").
+			Joins("JOIN products p ON p.id = i.product_id").
+			Joins("LEFT JOIN categories c ON c.id = p.category_id").
+			Where("i.daily_sales_record_id IN (?)", baseIDs).
+			Where("i.deleted_at IS NULL")
+	}
+	// By category — apply the SIZE facet, group all categories.
+	itemSizeWhere(baseItems()).
+		Select("COALESCE(NULLIF(c.name,''),'Uncategorized') AS label, COALESCE(SUM(i.quantity),0) AS qty, COALESCE(SUM(i.total_amount),0) AS amount").
+		Group("label").Order("amount DESC").Scan(&summary.ByCategory)
+	// By size — apply the CATEGORY facet, group all sizes.
+	itemCatWhere(baseItems()).
+		Select("CASE WHEN LOWER(COALESCE(c.name,'')) LIKE '%beer%' THEN 'Beer' ELSE COALESCE(NULLIF(REGEXP_REPLACE(COALESCE(p.size,''), '[^0-9]', '', 'g'), ''), 'Other') END AS label, COALESCE(SUM(i.quantity),0) AS qty, COALESCE(SUM(i.total_amount),0) AS amount").
+		Group("label").Order("qty DESC").Scan(&summary.BySize)
+	// Exact item-level total for the ACTIVE size+category (cards reconcile w/ table).
+	var ft struct {
+		Qty    int64
+		Amount float64
+	}
+	itemCatWhere(itemSizeWhere(baseItems())).
+		Select("COALESCE(SUM(i.quantity),0) AS qty, COALESCE(SUM(i.total_amount),0) AS amount").
+		Scan(&ft)
+	summary.FilteredQty = ft.Qty
+	summary.FilteredAmount = ft.Amount
+	baseItems().Select("COALESCE(SUM(i.quantity),0)").Scan(&summary.TotalQty)
+
 	// Get paginated records
 	offset := (filters.Page - 1) * filters.PageSize
 	if err := query.Offset(offset).
 		Limit(filters.PageSize).
-		Order("daily_sales_records.record_date DESC, daily_sales_records.created_at DESC").
+		Order("record_date DESC, created_at DESC").
 		Find(&records).Error; err != nil {
 		return nil, fmt.Errorf("failed to get daily sales records: %w", err)
 	}
 
-	// Convert to response format
+	// Convert to response format.
+	//
+	// Each response also gets run through enrichItemsWithStock so the
+	// opening/closing values captured at sale-creation time surface to the
+	// client. mapDailySalesRecordToResponse deliberately leaves those
+	// fields unset (kept separate so the legacy StockHistory fallback can
+	// fill them for old rows), so calling the enricher here is required —
+	// otherwise the list endpoint returns 0/0 even when the underlying row
+	// has locked values, and the Flutter summary renders "0 in stock,
+	// 0 closing" on every line. Matches the pattern GetDailySalesRecordByID
+	// already uses at line ~466.
 	responses := make([]*DailySalesRecordResponse, len(records))
 	for i, record := range records {
 		responses[i] = s.mapDailySalesRecordToResponse(&record)
+		s.enrichItemsWithStock(responses[i], &record, tenantID)
 	}
 
 	totalPages := int((totalCount + int64(filters.PageSize) - 1) / int64(filters.PageSize))
@@ -501,6 +666,7 @@ func (s *DailySalesService) GetDailySalesRecords(ctx context.Context, tenantID u
 		Page:       filters.Page,
 		PageSize:   filters.PageSize,
 		TotalPages: totalPages,
+		Summary:    summary,
 	}, nil
 }
 
@@ -508,11 +674,19 @@ func (s *DailySalesService) GetDailySalesRecords(ctx context.Context, tenantID u
 func (s *DailySalesService) GetDailySalesRecordByID(ctx context.Context, recordID, tenantID uuid.UUID) (*DailySalesRecordResponse, error) {
 	var record models.DailySalesRecord
 
-	err := s.db.Where("daily_sales_records.id = ? AND daily_sales_records.tenant_id = ?", recordID, tenantID).
-		Joins("Shop").Joins("Salesman").Joins("CreatedBy").Joins("ApprovedBy").
+	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
+		Preload("Shop").
+		Preload("Salesman").
+		Preload("CreatedBy").
+		Preload("ApprovedBy").
+		Preload("Items", func(db *gorm.DB) *gorm.DB {
+			// v1.0.149 — every list view sorts by operator-defined position so
+			// the IMAGE order (set on Smart Sale apply) and any subsequent
+			// drag-reorder propagate to web admin, Sales Summary, daily entry.
+			return db.Order("position ASC").Order("unit_price ASC")
+		}).
 		Preload("Items.Product.Brand").
 		Preload("Items.Product.Category").
-		Preload("Expenses").
 		First(&record).Error
 
 	if err != nil {
@@ -522,64 +696,62 @@ func (s *DailySalesService) GetDailySalesRecordByID(ctx context.Context, recordI
 		return nil, fmt.Errorf("failed to get daily sales record: %w", err)
 	}
 
-	return s.mapDailySalesRecordToResponse(&record), nil
-}
+	response := s.mapDailySalesRecordToResponse(&record)
 
-// CheckRecordExistsForShopDate - SINGLE SOURCE OF TRUTH for draft management
-// Returns information about whether a record exists for the given shop and date
-// Used by Flutter app to determine if a draft should be restored or blocked
-func (s *DailySalesService) CheckRecordExistsForShopDate(
-	ctx context.Context,
-	tenantID, shopID uuid.UUID,
-	recordDate time.Time,
-) (*RecordExistsResponse, error) {
-	checkDate := utils.StartOfDay(recordDate)
-
-	var records []models.DailySalesRecord
-	nextDay := checkDate.AddDate(0, 0, 1)
-	err := s.db.Where(
-		"tenant_id = ? AND shop_id = ? AND record_date >= ? AND record_date < ?",
-		tenantID, shopID, checkDate, nextDay,
-	).Order("created_at DESC").Find(&records).Error
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to check record existence: %w", err)
-	}
-
-	response := &RecordExistsResponse{
-		RecordDate:  checkDate,
-		ShopID:      shopID,
-		RecordCount: len(records),
-		Exists:      len(records) > 0,
-		CanSubmit:   true,
-	}
-
-	if len(records) > 0 {
-		response.RecordID = &records[0].ID
-		response.Status = records[0].Status
-
-		// Block submission if approved or pending exists
-		for _, r := range records {
-			if r.Status == "approved" || r.Status == "pending" {
-				response.CanSubmit = false
-				break
-			}
-		}
-	}
-
-	log.Printf("📋 [DailySales] CheckRecordExists: shop=%s, date=%s, exists=%v, can_submit=%v, count=%d",
-		shopID, checkDate.Format("2006-01-02"), response.Exists, response.CanSubmit, response.RecordCount)
+	// Enrich items with opening/closing stock
+	s.enrichItemsWithStock(response, &record, tenantID)
 
 	return response, nil
 }
 
+// UpdateDailySalesRecordDate is a date-only PATCH for the sales list. Lighter
+// than UpdateDailySalesRecord (which deletes + recreates items) so the admin
+// can fix a wrong sale date inline without restock churn. Validates the same
+// not-future / max-7-days-past window as create. Allowed for pending AND
+// approved records — admin needs to correct attribution mistakes that may
+// only surface after approval. v1.0.121.
+func (s *DailySalesService) UpdateDailySalesRecordDate(ctx context.Context, recordID, tenantID uuid.UUID, newDate time.Time) (*DailySalesRecordResponse, error) {
+	var record models.DailySalesRecord
+	if err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("daily sales record not found")
+		}
+		return nil, fmt.Errorf("failed to find daily sales record: %w", err)
+	}
+
+	candidate := utils.StartOfDayIST(newDate)
+	todayIST := utils.StartOfDayIST(utils.NowIST())
+	if candidate.After(todayIST) {
+		return nil, errors.New("record date cannot be in the future")
+	}
+	maxPastDate := todayIST.AddDate(0, 0, -7)
+	if candidate.Before(maxPastDate) {
+		return nil, fmt.Errorf("record date cannot be more than 7 days in the past (earliest: %s)", maxPastDate.Format("2006-01-02"))
+	}
+	existingDate := utils.StartOfDayIST(record.RecordDate)
+	if candidate.Equal(existingDate) {
+		// No-op — return current state without touching the row.
+		return s.GetDailySalesRecordByID(ctx, recordID, tenantID)
+	}
+
+	if err := s.db.Model(&record).Update("record_date", candidate).Error; err != nil {
+		return nil, fmt.Errorf("failed to update record date: %w", err)
+	}
+	log.Printf("📅 [DailySales] Date updated: record %s %s → %s",
+		recordID, existingDate.Format("2006-01-02"), candidate.Format("2006-01-02"))
+
+	return s.GetDailySalesRecordByID(ctx, recordID, tenantID)
+}
+
 // UpdateDailySalesRecord updates existing daily sales record
-// userRole parameter allows admin/manager override for approved records
-// For approved records: handles stock reversal and re-deduction to maintain inventory integrity
-func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID, tenantID uuid.UUID, userRole string, req DailySalesRecordRequest) (*DailySalesRecordResponse, error) {
+func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID, tenantID uuid.UUID, req DailySalesRecordRequest) (*DailySalesRecordResponse, error) {
 	var record models.DailySalesRecord
 
-	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error
+	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
+		Preload("Items", func(db *gorm.DB) *gorm.DB {
+			return db.Order("position ASC").Order("unit_price ASC")
+		}).
+		First(&record).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("daily sales record not found")
@@ -587,170 +759,190 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 		return nil, fmt.Errorf("failed to find daily sales record: %w", err)
 	}
 
-	// Check if user can update this record based on status and role
-	isAdmin := userRole == "admin" || userRole == "manager"
-	isApprovedEdit := record.Status == models.StatusApproved
+	// Only pending records can be updated
 	if record.Status != models.StatusPending {
-		if !isAdmin {
-			return nil, errors.New("only pending records can be updated")
-		}
-		// Admin/manager can edit approved records, but not rejected ones
-		if record.Status == models.StatusRejected {
-			return nil, errors.New("rejected records cannot be updated - please create a copy instead")
-		}
-		log.Printf("⚠️ [DailySales] Admin override: %s editing %s record %s", userRole, record.Status, recordID)
+		return nil, errors.New("only pending records can be updated")
 	}
 
-	// Validate payment amounts using centralized validator
-	// Formula: Cash + Card + UPI + Credit + Expenses = TotalSalesAmount
-	if err := validators.ValidatePaymentAmounts(
-		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount,
-		req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount,
-	); err != nil {
-		log.Printf("❌ [DailySales] Update payment validation failed: %v", err)
+	// Validate payment amounts
+	totalPaymentAmount := req.TotalCashAmount + req.TotalCardAmount + req.TotalUpiAmount + req.TotalCreditAmount
+	if utils.AbsFloat(totalPaymentAmount-req.TotalSalesAmount) > 0.01 {
 		return nil, errors.New("total payment amounts do not match total sales amount")
 	}
-	log.Printf("✅ [DailySales] Update payment validation passed: Cash=%.2f + Card=%.2f + UPI=%.2f + Credit=%.2f + Expenses=%.2f = %.2f",
-		req.TotalCashAmount, req.TotalCardAmount, req.TotalUpiAmount, req.TotalCreditAmount, req.TotalExpenseAmount, req.TotalSalesAmount)
 
-	// Load original items BEFORE deletion (needed for stock reversal on approved records)
-	var originalItems []models.DailySalesItem
-	if isApprovedEdit {
-		if err := s.db.Where("daily_sales_record_id = ?", recordID).Find(&originalItems).Error; err != nil {
-			return nil, fmt.Errorf("failed to load original items: %w", err)
+	// v1.0.121: allow admin/manager to fix the record_date when shopkeeper
+	// recorded a sale on the wrong day. Same constraints as create — not in
+	// the future, not more than 7 days in the past. Empty req.RecordDate
+	// means the client didn't send a date and we keep the existing value.
+	var newRecordDate *time.Time
+	if !req.RecordDate.IsZero() {
+		candidate := utils.StartOfDayIST(req.RecordDate)
+		todayIST := utils.StartOfDayIST(utils.NowIST())
+		if candidate.After(todayIST) {
+			return nil, errors.New("record date cannot be in the future")
 		}
-		log.Printf("📦 [DailySales] Editing approved record - loaded %d original items for stock adjustment", len(originalItems))
+		maxPastDate := todayIST.AddDate(0, 0, -7)
+		if candidate.Before(maxPastDate) {
+			return nil, fmt.Errorf("record date cannot be more than 7 days in the past (earliest: %s)", maxPastDate.Format("2006-01-02"))
+		}
+		// Only stage the update when the date actually changed — avoids audit
+		// noise on no-op edits.
+		existingDate := utils.StartOfDayIST(record.RecordDate)
+		if !candidate.Equal(existingDate) {
+			newRecordDate = &candidate
+			log.Printf("📅 [DailySales] Date change requested: record %s %s → %s",
+				recordID, existingDate.Format("2006-01-02"), candidate.Format("2006-01-02"))
+		}
 	}
-
-	// Store original cash amount for cash holding adjustment
-	originalCashAmount := record.TotalCashAmount
 
 	// Start transaction for atomic update
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		// ✅ STEP 1: For approved records, RETURN original stock before making changes
-		// This ensures inventory integrity when editing approved sales
-		if isApprovedEdit && len(originalItems) > 0 {
-			log.Printf("📦 [DailySales] STEP 1: Returning stock for %d original items", len(originalItems))
-			for _, item := range originalItems {
+		// Step 1: Restore stock for old items (if stock was deducted at creation)
+		for _, oldItem := range record.Items {
+			if oldItem.OpeningStock > 0 || oldItem.ClosingStock != 0 {
 				var stock models.Stock
-				err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
-					record.ShopID, item.ProductID, tenantID).First(&stock).Error
-				if err != nil {
-					if errors.Is(err, gorm.ErrRecordNotFound) {
-						log.Printf("⚠️ [DailySales] Stock not found for product %s, skipping return", item.ProductID)
-						continue
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+					record.ShopID, oldItem.ProductID, tenantID).First(&stock).Error; err == nil {
+					prevQty := stock.Quantity
+					newQty := prevQty + oldItem.Quantity
+					tx.Model(&stock).Update("quantity", newQty)
+
+					// v1.0.216 — every stock-balance change must leave an audit
+					// row. Pre-fix this restore was silent: stocks.quantity
+					// bumped without a stock_histories entry, contributing to
+					// the FM Tower-style audit drift class.
+					rsShopRef, rsProdRef := stock.ShopID, stock.ProductID
+					restoreHist := models.StockHistory{
+						TenantModel:      models.TenantModel{TenantID: &tenantID},
+						StockID:          stock.ID,
+						ShopID:           &rsShopRef,
+						ProductID:        &rsProdRef,
+						MovementType:     "daily_sale_edit_restore",
+						Quantity:         oldItem.Quantity,
+						PreviousQuantity: prevQty,
+						NewQuantity:      newQty,
+						UnitCost:         oldItem.UnitPrice,
+						TotalCost:        oldItem.TotalAmount,
+						Reference:        fmt.Sprintf("Daily Sales Record %s (edit restore)", record.ID),
+						ReferenceID:      &record.ID,
+						CreatedByID:      record.CreatedByID,
+						Notes:            fmt.Sprintf("Restored %d units of %s on record edit", oldItem.Quantity, oldItem.ProductID),
 					}
-					return fmt.Errorf("failed to get stock for reversal: %w", err)
+					tx.Create(&restoreHist)
+
+					log.Printf("🔄 [DailySales] Update: restored %d units of product %s (stock %d → %d)",
+						oldItem.Quantity, oldItem.ProductID, prevQty, newQty)
 				}
-
-				// Return stock (add back the original quantity)
-				previousQty := stock.Quantity
-				newQty := stock.Quantity + item.Quantity
-				newAvailable := newQty - stock.ReservedQuantity - stock.DamagedQuantity
-
-				if err := tx.Model(&stock).Updates(map[string]interface{}{
-					"quantity":           newQty,
-					"available_quantity": newAvailable,
-				}).Error; err != nil {
-					return fmt.Errorf("failed to return stock: %w", err)
-				}
-
-				// Create stock history for audit trail
-				stockHistory := models.StockHistory{
-					TenantModel:      models.TenantModel{TenantID: &tenantID},
-					StockID:          stock.ID,
-					MovementType:     "daily_sale_edit_return",
-					Quantity:         item.Quantity, // Positive = returned
-					PreviousQuantity: previousQty,
-					NewQuantity:      newQty,
-					UnitCost:         item.UnitPrice,
-					TotalCost:        item.TotalAmount,
-					Reference:        fmt.Sprintf("Daily Sales Edit - Stock Returned %s", record.ID),
-					ReferenceID:      &record.ID,
-					Notes:            "Stock returned for approved sale edit",
-				}
-				tx.Create(&stockHistory)
-
-				log.Printf("📦 [DailySales] Stock returned for product %s: %d -> %d (+%d)",
-					item.ProductID.String(), previousQty, newQty, item.Quantity)
 			}
 		}
 
-		// Delete existing items
+		// Step 2: Delete existing items
 		if err := tx.Where("daily_sales_record_id = ?", recordID).Delete(&models.DailySalesItem{}).Error; err != nil {
 			return fmt.Errorf("failed to delete existing items: %w", err)
 		}
 
-		// Delete existing expenses (NEW - Expense Table Feature)
-		if err := tx.Where("daily_sales_record_id = ?", recordID).Delete(&models.DailySalesExpense{}).Error; err != nil {
-			return fmt.Errorf("failed to delete existing expenses: %w", err)
-		}
+		// Delete old StockHistory entries for this record
+		tx.Where("reference_id = ? AND movement_type = ?", recordID, "daily_sale").Delete(&models.StockHistory{})
 
 		// Update record
-		updates := map[string]interface{}{
-			"record_date":          utils.StartOfDay(req.RecordDate), // Allow date updates
-			"total_sales_amount":   req.TotalSalesAmount,
-			"total_cash_amount":    req.TotalCashAmount,
-			"total_card_amount":    req.TotalCardAmount,
-			"total_upi_amount":     req.TotalUpiAmount,
-			"total_credit_amount":  req.TotalCreditAmount,
-			"total_expense_amount": req.TotalExpenseAmount, // NEW: Total expenses
-			"notes":                req.Notes,
+		// Preserve receipt images on updates
+		receiptImages := req.GetReceiptImages()
+		if len(receiptImages) == 0 {
+			receiptImages = []string(record.ReceiptImages)
 		}
 
-		// Add ImageURLs update support with deduplication
-		if len(req.ImageURLs) > 0 {
-			uniqueURLs := deduplicateImageURLs(req.ImageURLs)
-			if len(uniqueURLs) != len(req.ImageURLs) {
-				log.Printf("📸 [DailySales] Update: Deduplicated image URLs: %d -> %d (removed %d duplicates)",
-					len(req.ImageURLs), len(uniqueURLs), len(req.ImageURLs)-len(uniqueURLs))
-			}
-			imageBytes, _ := json.Marshal(uniqueURLs)
-			updates["image_urls"] = string(imageBytes)
-		} else if req.ImageURLs != nil {
-			updates["image_urls"] = "" // Allow clearing images
+		updates := map[string]interface{}{
+			"total_sales_amount":  req.TotalSalesAmount,
+			"total_cash_amount":   req.TotalCashAmount,
+			"total_card_amount":   req.TotalCardAmount,
+			"total_upi_amount":    req.TotalUpiAmount,
+			"total_credit_amount": req.TotalCreditAmount,
+			"notes":               req.Notes,
+			"receipt_images":      models.JSONStringList(receiptImages),
+		}
+		// v1.0.121: persist record_date update only when caller actually changed it.
+		// Stock-deduct logic above runs against current stocks regardless of date,
+		// so changing the date doesn't require re-running stock math — it's purely
+		// an attribution change for reports + dashboards.
+		if newRecordDate != nil {
+			updates["record_date"] = *newRecordDate
 		}
 
 		if err := tx.Model(&record).Updates(updates).Error; err != nil {
 			return fmt.Errorf("failed to update daily sales record: %w", err)
 		}
 
-		// Create new items
+		// Step 3: Create new items with fresh stock deduction
 		totalItemsAmount := 0.0
 		for _, itemReq := range req.Items {
-			// Verify product exists
 			var product models.Product
 			if err := tx.Where("id = ? AND tenant_id = ?", itemReq.ProductID, tenantID).First(&product).Error; err != nil {
 				return fmt.Errorf("product %s not found", itemReq.ProductID)
 			}
 
-			// Validate item payment amounts
 			itemPaymentTotal := itemReq.CashAmount + itemReq.CardAmount + itemReq.UpiAmount + itemReq.CreditAmount
 			if utils.AbsFloat(itemPaymentTotal-itemReq.TotalAmount) > 0.01 {
 				return fmt.Errorf("payment amounts for product %s do not match total amount", product.Name)
 			}
 
-			// Create new item with OCR data for manager review
+			// Deduct stock and capture opening/closing
+			openingStock := 0
+			closingStock := 0
+			var stock models.Stock
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+				record.ShopID, itemReq.ProductID, tenantID).First(&stock).Error; err == nil {
+				openingStock = stock.Quantity
+				closingStock = stock.Quantity - itemReq.Quantity
+				if closingStock < 0 {
+					return fmt.Errorf("insufficient stock for %s: available %d, requested %d",
+						product.Name, stock.Quantity, itemReq.Quantity)
+				}
+				tx.Model(&stock).Update("quantity", closingStock)
+
+				// v1.0.162 — use `openingStock` snapshot, not `stock.Quantity`,
+				// to avoid GORM in-place mutation poisoning the audit trail.
+				shopRef, prodRef := stock.ShopID, stock.ProductID
+				stockHistory := models.StockHistory{
+					TenantModel:      models.TenantModel{TenantID: &tenantID},
+					StockID:          stock.ID,
+					ShopID:           &shopRef,
+					ProductID:        &prodRef,
+					MovementType:     "daily_sale",
+					Quantity:         -itemReq.Quantity,
+					PreviousQuantity: openingStock,
+					NewQuantity:      closingStock,
+					UnitCost:         itemReq.UnitPrice,
+					TotalCost:        itemReq.TotalAmount,
+					Reference:        fmt.Sprintf("Daily Sales Record %s (updated)", record.ID),
+					ReferenceID:      &record.ID,
+					CreatedByID:      record.CreatedByID,
+					Notes:            fmt.Sprintf("Updated sale entry for %s", product.Name),
+				}
+				// v1.0.256 — FAIL LOUD (atomic stock+audit). Was a bare
+				// ignored Create → update moved stock with no audit row.
+				if err := tx.Create(&stockHistory).Error; err != nil {
+					log.Printf("ERROR: stock history create failed — rolling back update: %v", err)
+					return fmt.Errorf("failed to record stock history (update not saved, please retry): %w", err)
+				}
+
+				log.Printf("✅ [DailySales] Update: deducted %d units of %s (stock %d → %d)",
+					itemReq.Quantity, product.Name, openingStock, closingStock)
+			}
+
 			item := models.DailySalesItem{
 				TenantModel:        models.TenantModel{TenantID: &tenantID},
 				DailySalesRecordID: recordID,
 				ProductID:          itemReq.ProductID,
 				Quantity:           itemReq.Quantity,
+				QuantitySold:       itemReq.Quantity,
 				UnitPrice:          itemReq.UnitPrice,
 				TotalAmount:        itemReq.TotalAmount,
 				CashAmount:         itemReq.CashAmount,
 				CardAmount:         itemReq.CardAmount,
 				UpiAmount:          itemReq.UpiAmount,
 				CreditAmount:       itemReq.CreditAmount,
-				OpeningStock:       itemReq.OpeningStock,
-				ClosingStock:       itemReq.ClosingStock,
-				// OCR-extracted data for manager review
-				OCRBrandName: itemReq.OCRBrandName,
-				OCRSize:      itemReq.OCRSize,
-				OCRReceipt:   itemReq.OCRReceipt,
-				OCRTotal:     itemReq.OCRTotal,
-				DBStock:      itemReq.DBStock,
-				OCRRate:      itemReq.OCRRate,
+				OpeningStock:       openingStock,
+				ClosingStock:       closingStock,
 			}
 
 			if err := tx.Create(&item).Error; err != nil {
@@ -760,94 +952,8 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 			totalItemsAmount += itemReq.TotalAmount
 		}
 
-		// Verify total items amount matches record total
 		if utils.AbsFloat(totalItemsAmount-req.TotalSalesAmount) > 0.01 {
 			return errors.New("total items amount does not match record total sales amount")
-		}
-
-		// Create expense entries (NEW - Expense Table Feature)
-		for _, expenseReq := range req.Expenses {
-			expense := models.DailySalesExpense{
-				TenantModel:        models.TenantModel{TenantID: &tenantID},
-				DailySalesRecordID: recordID,
-				HeaderID:           expenseReq.HeaderID,
-				HeaderName:         expenseReq.HeaderName,
-				Amount:             expenseReq.Amount,
-			}
-
-			if err := tx.Create(&expense).Error; err != nil {
-				return fmt.Errorf("failed to create expense entry: %w", err)
-			}
-		}
-
-		// ✅ STEP 2: For approved records, DEDUCT stock for the new items
-		// This completes the stock adjustment cycle: return old -> deduct new
-		if isApprovedEdit {
-			log.Printf("📦 [DailySales] STEP 2: Deducting stock for %d new items", len(req.Items))
-			for _, itemReq := range req.Items {
-				var stock models.Stock
-				err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
-					record.ShopID, itemReq.ProductID, tenantID).First(&stock).Error
-				if err != nil {
-					if errors.Is(err, gorm.ErrRecordNotFound) {
-						var product models.Product
-						tx.Where("id = ?", itemReq.ProductID).First(&product)
-						return fmt.Errorf("stock not found for product %s in this shop", product.Name)
-					}
-					return fmt.Errorf("failed to get stock for deduction: %w", err)
-				}
-
-				// Check if sufficient stock available
-				if stock.Quantity < itemReq.Quantity {
-					var product models.Product
-					tx.Where("id = ?", itemReq.ProductID).First(&product)
-					return fmt.Errorf("insufficient stock for product %s: available %d, requested %d",
-						product.Name, stock.Quantity, itemReq.Quantity)
-				}
-
-				// Deduct stock
-				previousQty := stock.Quantity
-				newQty := stock.Quantity - itemReq.Quantity
-				newAvailable := newQty - stock.ReservedQuantity - stock.DamagedQuantity
-
-				if err := tx.Model(&stock).Updates(map[string]interface{}{
-					"quantity":           newQty,
-					"available_quantity": newAvailable,
-				}).Error; err != nil {
-					return fmt.Errorf("failed to deduct stock: %w", err)
-				}
-
-				// Create stock history for audit trail
-				stockHistory := models.StockHistory{
-					TenantModel:      models.TenantModel{TenantID: &tenantID},
-					StockID:          stock.ID,
-					MovementType:     "daily_sale_edit_deduct",
-					Quantity:         -itemReq.Quantity, // Negative = deducted
-					PreviousQuantity: previousQty,
-					NewQuantity:      newQty,
-					UnitCost:         itemReq.UnitPrice,
-					TotalCost:        itemReq.TotalAmount,
-					Reference:        fmt.Sprintf("Daily Sales Edit - Stock Deducted %s", record.ID),
-					ReferenceID:      &record.ID,
-					Notes:            "Stock deducted for approved sale edit",
-				}
-				tx.Create(&stockHistory)
-
-				log.Printf("📦 [DailySales] Stock deducted for product %s: %d -> %d (-%d)",
-					itemReq.ProductID.String(), previousQty, newQty, itemReq.Quantity)
-			}
-
-			// ✅ STEP 3: Adjust cash holding if cash amount changed
-			cashDifference := req.TotalCashAmount - originalCashAmount
-			if utils.AbsFloat(cashDifference) > 0.01 && record.CreatedByID != uuid.Nil {
-				log.Printf("💰 [DailySales] Cash holding adjustment: %.2f -> %.2f (diff: %.2f)",
-					originalCashAmount, req.TotalCashAmount, cashDifference)
-
-				if err := s.updateCashHolding(tx, tenantID, record.CreatedByID, cashDifference, recordID,
-					"sale_edit", fmt.Sprintf("Cash adjustment from sale edit #%s", recordID.String()[:8])); err != nil {
-					return fmt.Errorf("failed to adjust cash holding: %w", err)
-				}
-			}
 		}
 
 		return nil
@@ -857,6 +963,10 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 		return nil, err
 	}
 
+	// v1.0.161 — same MRP propagation as Create. Edits made on the update form
+	// must reach products + shop_product_rates too.
+	go s.propagateMRPFromDailySale(tenantID, record.ShopID, record.CreatedByID, req.Items)
+
 	// Clear cache
 	s.clearDailySalesCache(ctx, tenantID, record.ShopID)
 
@@ -864,28 +974,30 @@ func (s *DailySalesService) UpdateDailySalesRecord(ctx context.Context, recordID
 	return s.GetDailySalesRecordByID(ctx, recordID, tenantID)
 }
 
-// ApproveDailySalesRecord approves a daily sales record and credits cash to the creator
+// ApproveDailySalesRecord approves a daily sales record
 func (s *DailySalesService) ApproveDailySalesRecord(ctx context.Context, recordID, tenantID, approvedByID uuid.UUID) (*DailySalesRecordResponse, error) {
 	var record models.DailySalesRecord
 
-	// Use transaction to ensure atomicity of approval and cash update
-	err := s.db.DB.Transaction(func(tx *gorm.DB) error {
-		// Lock the record for update to prevent race conditions
-		err := tx.Set("gorm:query_option", "FOR UPDATE").
-			Where("id = ? AND tenant_id = ?", recordID, tenantID).
-			First(&record).Error
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errors.New("daily sales record not found")
-			}
-			return fmt.Errorf("failed to find daily sales record: %w", err)
+	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
+		Preload("Items", func(db *gorm.DB) *gorm.DB {
+			return db.Order("position ASC").Order("unit_price ASC")
+		}).
+		Preload("Items.Product").
+		First(&record).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("daily sales record not found")
 		}
+		return nil, fmt.Errorf("failed to find daily sales record: %w", err)
+	}
 
-		// Only pending records can be approved
-		if record.Status != models.StatusPending {
-			return errors.New("only pending records can be approved")
-		}
+	// Only pending records can be approved
+	if record.Status != models.StatusPending {
+		return nil, errors.New("only pending records can be approved")
+	}
 
+	// Start transaction to update status AND deduct stock
+	err = s.db.Transaction(func(tx *gorm.DB) error {
 		// Update record status
 		now := time.Now()
 		updates := map[string]interface{}{
@@ -898,83 +1010,311 @@ func (s *DailySalesService) ApproveDailySalesRecord(ctx context.Context, recordI
 			return fmt.Errorf("failed to approve daily sales record: %w", err)
 		}
 
-		// ✅ DEDUCT STOCK ON APPROVAL - Critical business logic
-		// Stock is only deducted when sale is approved, not when created
-		// This ensures rejected sales don't affect inventory
-		var items []models.DailySalesItem
-		if err := tx.Where("daily_sales_record_id = ?", recordID).Find(&items).Error; err != nil {
-			return fmt.Errorf("failed to load sale items: %w", err)
+		log.Printf("✅ [DailySales] Approving record %s with %d items", recordID, len(record.Items))
+
+		// v1.0.133-r4 — verify deduction via stock_histories, NOT via the
+		// item's opening/closing values. Pre-fix this gate trusted that
+		// (item.OpeningStock > 0 || item.ClosingStock != 0) meant "stock was
+		// already moved at create time" — but Smart Sale records opening/
+		// closing as AI-extracted INFORMATION, not as a marker of an actual
+		// stock movement. Result: every Smart-Sale-approved record skipped
+		// stock deduction and inventory drifted upward over time. The 5
+		// records reverted on 2026-05-01 (e2f650c5, 5799f9a6, 712fcdf5,
+		// e4f436c9, 96820225) all hit this bug.
+		//
+		// Correct check: scan stock_histories for any movement_type='daily_sale'
+		// with reference_id = this record. If present → already deducted at
+		// create-time path. If absent → deduct now on approve.
+		var existingMovements int64
+		if cErr := tx.Table("stock_histories").
+			Where("reference_id = ? AND movement_type = ?", record.ID, "daily_sale").
+			Count(&existingMovements).Error; cErr != nil {
+			log.Printf("⚠️ [DailySales] stock_histories check failed for record %s: %v — proceeding with deduction", recordID, cErr)
 		}
+		stockAlreadyDeducted := existingMovements > 0
 
-		for _, item := range items {
-			var stock models.Stock
-			err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
-				record.ShopID, item.ProductID, tenantID).First(&stock).Error
+		if stockAlreadyDeducted {
+			log.Printf("✅ [DailySales] Stock already deducted at creation for record %s (%d audit rows) — skipping deduction", recordID, existingMovements)
+		} else {
+			// Standard path: deduct stock now on approve. This is the right
+			// behaviour for both v1.0.120+ Smart Sale records (which DO carry
+			// opening/closing AI values but never wrote a daily_sale history
+			// row) and legacy records.
+			log.Printf("📉 [DailySales] Approving record %s — deducting stock now", recordID)
 
-			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					// Get product name for better error message
-					var product models.Product
-					tx.Where("id = ?", item.ProductID).First(&product)
-					return fmt.Errorf("stock not found for product %s in this shop", product.Name)
+			// v1.0.335 — over-sell pre-flight. Before mutating ANY stock row, walk
+			// every item and collect those whose sale qty exceeds the available
+			// balance (honoring the operator-vouched opening exactly as the
+			// deduction loop does). Previously the first such row threw a mid-loop
+			// "insufficient stock" error that rolled the WHOLE transaction back —
+			// so one bad row (e.g. Moonwalk sold 50 vs stock 11) silently sank the
+			// operator's other 26 products with a cryptic message. Now we fail
+			// fast and clean, listing EVERY offending row up front, before any
+			// write. Read-only; skips the zero-stock case so the in-loop self-heal
+			// rescue (which can restore an unintended clear) is left untouched.
+			{
+				var overSell []string
+				for _, item := range record.Items {
+					if item.Quantity <= 0 {
+						continue
+					}
+					var ps models.Stock
+					if err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+						record.ShopID, item.ProductID, tenantID).First(&ps).Error; err != nil {
+						continue // missing-stock handled by the deduction loop below
+					}
+					// v1.0.336 — mirror the sales-aware deduction basis exactly so the
+					// pre-flight ceiling can never under-block (which would let a row
+					// through here only to fail mid-loop and roll the whole tx back,
+					// the cryptic-rollback class v1.0.335 fixed).
+					avail := ps.Quantity
+					if item.OpeningStock > 0 && item.OpeningStock != ps.Quantity {
+						salesAware := driftReconcileSalesAware()
+						salesSince := 0
+						if salesAware {
+							var s int64
+							if qErr := tx.Table("stock_histories").
+								Where("shop_id = ? AND product_id = ? AND tenant_id = ? AND movement_type = ? AND created_at > ?",
+									record.ShopID, item.ProductID, tenantID, "daily_sale", record.CreatedAt).
+								Select("COALESCE(SUM(ABS(quantity)), 0)").
+								Scan(&s).Error; qErr != nil {
+								return fmt.Errorf("failed to verify drift for %s (approval not saved, please retry): %w", item.Product.Name, qErr)
+							}
+							salesSince = int(s)
+						}
+						_, avail = decideDriftReconcile(item.OpeningStock, ps.Quantity, salesSince, salesAware)
+					}
+					// Only flag a genuine over-sell against real stock. avail<=0 falls
+					// through to the rescue path; never pre-block it here.
+					if avail > 0 && item.Quantity > avail {
+						overSell = append(overSell, fmt.Sprintf("%s (sold %d, available %d, short %d)",
+							item.Product.Name, item.Quantity, avail, item.Quantity-avail))
+					}
 				}
-				return fmt.Errorf("failed to get stock: %w", err)
+				if len(overSell) > 0 {
+					log.Printf("⛔ [DailySales] approve blocked for record %s — %d over-sell row(s): %s",
+						recordID, len(overSell), strings.Join(overSell, "; "))
+					return fmt.Errorf("Cannot approve: %d row(s) sell more than the stock on hand. Fix the sold quantity (or opening) on each, then re-approve:\n• %s",
+						len(overSell), strings.Join(overSell, "\n• "))
+				}
 			}
 
-			// Check if sufficient stock available
-			if stock.Quantity < item.Quantity {
-				var product models.Product
-				tx.Where("id = ?", item.ProductID).First(&product)
-				return fmt.Errorf("insufficient stock for product %s: available %d, requested %d",
-					product.Name, stock.Quantity, item.Quantity)
-			}
+			for _, item := range record.Items {
+				var stock models.Stock
+				err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+					record.ShopID, item.ProductID, tenantID).First(&stock).Error
 
-			// Deduct stock quantity
-			previousQuantity := stock.Quantity
-			newQuantity := stock.Quantity - item.Quantity
-			newAvailable := newQuantity - stock.ReservedQuantity - stock.DamagedQuantity
-			if err := tx.Model(&stock).Updates(map[string]interface{}{
-				"quantity":           newQuantity,
-				"available_quantity": newAvailable,
-			}).Error; err != nil {
-				return fmt.Errorf("failed to update stock: %w", err)
-			}
+				if err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						return fmt.Errorf("stock not found for product %s in this shop", item.Product.Name)
+					}
+					return fmt.Errorf("failed to get stock for product %s: %w", item.Product.Name, err)
+				}
 
-			// Create stock history for audit trail
-			stockHistory := models.StockHistory{
-				TenantModel:      models.TenantModel{TenantID: &tenantID},
-				StockID:          stock.ID,
-				MovementType:     "daily_sale_approved",
-				Quantity:         -item.Quantity,
-				PreviousQuantity: previousQuantity,
-				NewQuantity:      newQuantity,
-				UnitCost:         item.UnitPrice,
-				TotalCost:        item.TotalAmount,
-				Reference:        fmt.Sprintf("Daily Sales Record %s (Approved)", record.ID),
-				ReferenceID:      &record.ID,
-				CreatedByID:      approvedByID,
-				Notes:            "Stock deducted on sale approval",
-			}
+				// v1.0.218 — self-heal rescue. If stock is zero, look for a recent
+				// opening_stock_setup_clear on this product (within 14 days) that
+				// has not been re-set by a subsequent legitimate setup. If found,
+				// reverse the clear and proceed. This recovers from the FM Tower
+				// Mahua Khera bug class where Stock Setup approve zeroed the
+				// Sale's product because the matcher picked a sibling row for
+				// the same brand. Strictly bounded: fires only when stock is
+				// exactly 0 AND we have direct evidence of an unintended clear
+				// AND no legitimate later setup has touched the product.
+				if stock.Quantity == 0 && item.Quantity > 0 {
+					type clearRow struct {
+						ID               uuid.UUID `gorm:"column:id"`
+						PreviousQuantity int       `gorm:"column:previous_quantity"`
+						CreatedAt        time.Time `gorm:"column:created_at"`
+						ReferenceID      *uuid.UUID `gorm:"column:reference_id"`
+					}
+					var clr clearRow
+					clrErr := tx.Table("stock_histories").
+						Select("id, previous_quantity, created_at, reference_id").
+						Where("shop_id = ? AND product_id = ? AND tenant_id = ? AND movement_type = ? AND created_at > ?",
+							record.ShopID, item.ProductID, tenantID, "opening_stock_setup_clear", time.Now().Add(-14*24*time.Hour)).
+						Order("created_at DESC").Limit(1).
+						Scan(&clr).Error
+					if clrErr == nil && clr.PreviousQuantity > 0 {
+						// Is there a LATER legitimate setup row for this product?
+						// (opening_stock_setup or another _clear) — if yes, do not reverse.
+						var laterCount int64
+						_ = tx.Table("stock_histories").
+							Where("shop_id = ? AND product_id = ? AND tenant_id = ? AND movement_type IN ? AND created_at > ?",
+								record.ShopID, item.ProductID, tenantID,
+								[]string{"opening_stock_setup", "opening_stock_setup_clear"},
+								clr.CreatedAt).
+							Count(&laterCount).Error
+						if laterCount == 0 {
+							restored := clr.PreviousQuantity
+							if err := tx.Model(&stock).Update("quantity", restored).Error; err != nil {
+								log.Printf("⚠️ [DailySales] rescue restore failed for product %s: %v", item.Product.Name, err)
+							} else {
+								stock.Quantity = restored
+								revShopRef, revProdRef := stock.ShopID, stock.ProductID
+								rev := models.StockHistory{
+									TenantModel:      models.TenantModel{TenantID: &tenantID},
+									StockID:          stock.ID,
+									ShopID:           &revShopRef,
+									ProductID:        &revProdRef,
+									MovementType:     "opening_stock_setup_clear_reverse",
+									Quantity:         restored,
+									PreviousQuantity: 0,
+									NewQuantity:      restored,
+									Reference:        fmt.Sprintf("Auto-restored before approving Daily Sales Record %s — clear was unintended (pending sale referenced product)", record.ID),
+									ReferenceID:      &record.ID,
+									Notes:            fmt.Sprintf("Reversed opening_stock_setup_clear from %s (clear=%s) so the pending sale could approve", clr.CreatedAt.Format(time.RFC3339), clr.ID),
+									CreatedByID:      approvedByID,
+								}
+								_ = tx.Create(&rev).Error
+								log.Printf("✅ [DailySales] Auto-restored stock for product %s (0 → %d, reversing clear %s) before approving record %s",
+									item.Product.Name, restored, clr.ID, record.ID)
+							}
+						} else {
+							log.Printf("[DailySales] rescue skipped for product %s — %d later setup row(s) found after clear %s",
+								item.Product.Name, laterCount, clr.ID)
+						}
+					}
+				}
 
-			if err := tx.Create(&stockHistory).Error; err != nil {
-				log.Printf("Warning: Failed to create stock history: %v", err)
-			}
+				// v1.0.162 — root-cause fix for chhotu's May 4 corruption (97
+				// items, 7 records). GORM's tx.Model(&stock).Update(...) mutates
+				// stock.Quantity in-place to newQuantity. The previous code read
+				// stock.Quantity AFTER that call to populate opening_stock and
+				// PreviousQuantity, recording the post-deduction value for both
+				// — so opening==closing on every row and the audit history was
+				// useless. Snapshot first, then deduct.
+				beforeQty := stock.Quantity
 
-			log.Printf("📦 [DailySales] Stock deducted for product %s: %d -> %d (sold: %d)",
-				item.ProductID.String(), previousQuantity, newQuantity, item.Quantity)
+				// Apple-to-apple opening-drift guard (Bug 3 defensive). The operator
+				// vouched for item.OpeningStock on the review screen at submit, and at
+				// that moment it WAS the live balance (both create paths stamp
+				// opening = stocks.quantity). If the live balance has since drifted out
+				// from under us — e.g. an un-laddered AI Stock Setup / cross-shop
+				// consolidation write, the root of FM Tower record 2bc7c3c0 where 94
+				// silently became 26 — reconcile the gap with its OWN explicit ledger
+				// row so the audit trail stays banking-grade.
+				//
+				// v1.0.336 — SALES-AWARE. The legacy guard snapped live fully UP to
+				// the vouched opening on ANY mismatch. That cancels prior legitimate
+				// sales when a backlog of records is batch-approved (every record
+				// carries the same submit-time opening, so each approval snaps back up
+				// and erases the previous record's daily_sale — Mahua Khera 2026-06-02,
+				// 60 products / 1035 bottles overstated). We now decompose the gap: the
+				// portion explained by daily_sale movements recorded AFTER this record
+				// was submitted is LEGITIMATE and left intact; only the residual
+				// non-sale drift is reconciled. See decideDriftReconcile.
+				deductBasis := beforeQty
+				if item.OpeningStock > 0 && item.OpeningStock != beforeQty {
+					salesAware := driftReconcileSalesAware()
+					salesSince := 0
+					if salesAware {
+						var s int64
+						if qErr := tx.Table("stock_histories").
+							Where("shop_id = ? AND product_id = ? AND tenant_id = ? AND movement_type = ? AND created_at > ?",
+								record.ShopID, item.ProductID, tenantID, "daily_sale", record.CreatedAt).
+							Select("COALESCE(SUM(ABS(quantity)), 0)").
+							Scan(&s).Error; qErr != nil {
+							// FAIL LOUD: if we can't prove how much of the drift is
+							// sale-attributable, do NOT silently reconcile (that is the
+							// cancellation bug) and do NOT silently trust live (that
+							// re-opens FM Tower). Roll the approval back.
+							log.Printf("ERROR: sales-aware drift query failed for %s record %s — rolling back approval: %v",
+								item.Product.Name, record.ID, qErr)
+							return fmt.Errorf("failed to verify drift for %s (approval not saved, please retry): %w", item.Product.Name, qErr)
+						}
+						salesSince = int(s)
+					}
+
+					illegitGap, basis := decideDriftReconcile(item.OpeningStock, beforeQty, salesSince, salesAware)
+					deductBasis = basis
+
+					if illegitGap != 0 {
+						log.Printf("⚠️ [DailySales] OPENING DRIFT for %s in record %s: live=%d vouched=%d salesSince=%d → reconciling non-sale residual %+d (deduct from %d)",
+							item.Product.Name, record.ID, beforeQty, item.OpeningStock, salesSince, illegitGap, deductBasis)
+						recShop, recProd := stock.ShopID, stock.ProductID
+						recon := models.StockHistory{
+							TenantModel:      models.TenantModel{TenantID: &tenantID},
+							StockID:          stock.ID,
+							ShopID:           &recShop,
+							ProductID:        &recProd,
+							MovementType:     "opening_drift_reconcile",
+							Quantity:         illegitGap,
+							PreviousQuantity: beforeQty,
+							NewQuantity:      beforeQty + illegitGap,
+							Reference:        fmt.Sprintf("Daily Sales Record %s (approved)", record.ID),
+							ReferenceID:      &record.ID,
+							CreatedByID:      approvedByID,
+							Notes:            fmt.Sprintf("Live stock %d drifted from operator-vouched opening %d for %s (gap %+d, %d already sold since submit); reconciled the %+d non-sale residual before applying the sale.", beforeQty, item.OpeningStock, item.Product.Name, item.OpeningStock-beforeQty, salesSince, illegitGap),
+						}
+						if err := tx.Create(&recon).Error; err != nil {
+							log.Printf("ERROR: drift reconcile history create failed — rolling back approval: %v", err)
+							return fmt.Errorf("failed to record drift reconciliation (approval not saved, please retry): %w", err)
+						}
+					} else {
+						log.Printf("✅ [DailySales] drift for %s record %s fully sale-attributable (live=%d vouched=%d salesSince=%d) — deducting from live, no reconcile",
+							item.Product.Name, record.ID, beforeQty, item.OpeningStock, salesSince)
+					}
+				}
+
+				if deductBasis < item.Quantity {
+					return fmt.Errorf("insufficient stock for product %s: available %d, requested %d (after rescue attempt)",
+						item.Product.Name, deductBasis, item.Quantity)
+				}
+
+				newQuantity := deductBasis - item.Quantity
+				if err := tx.Model(&stock).Update("quantity", newQuantity).Error; err != nil {
+					return fmt.Errorf("failed to update stock for product %s: %w", item.Product.Name, err)
+				}
+
+				// Apple-to-apple: the operator already vouched for opening/closing
+				// at submit, so those are authoritative — NEVER re-derive them from
+				// the live balance here. (Regression source: FM Tower record
+				// 2bc7c3c0 — a silently-drifted live stock of 26 overwrote the
+				// operator-submitted opening of 94, flipping closing 77→9.) Only
+				// backfill when the row never carried opening/closing at all
+				// (legacy/manual rows where opening_stock was left unset).
+				if item.OpeningStock == 0 && item.ClosingStock == 0 {
+					tx.Model(&item).Updates(map[string]interface{}{
+						"opening_stock": beforeQty,
+						"closing_stock": newQuantity,
+					})
+				}
+
+				shopRef, prodRef := stock.ShopID, stock.ProductID
+				stockHistory := models.StockHistory{
+					TenantModel:      models.TenantModel{TenantID: &tenantID},
+					StockID:          stock.ID,
+					ShopID:           &shopRef,
+					ProductID:        &prodRef,
+					MovementType:     "daily_sale",
+					Quantity:         -item.Quantity,
+					PreviousQuantity: deductBasis,
+					NewQuantity:      newQuantity,
+					UnitCost:         item.UnitPrice,
+					TotalCost:        item.TotalAmount,
+					Reference:        fmt.Sprintf("Daily Sales Record %s (approved)", record.ID),
+					ReferenceID:      &record.ID,
+					CreatedByID:      approvedByID,
+					Notes:            fmt.Sprintf("Daily sales entry for %s (legacy approval)", item.Product.Name),
+				}
+
+				// v1.0.256 — FAIL LOUD (atomic stock+audit) on approve.
+				if err := tx.Create(&stockHistory).Error; err != nil {
+					log.Printf("ERROR: stock history create failed — rolling back approval: %v", err)
+					return fmt.Errorf("failed to record stock history (approval not saved, please retry): %w", err)
+				}
+
+				log.Printf("✅ [DailySales] Legacy deduction for %s: %d → %d (-%d)", item.Product.Name, deductBasis, newQuantity, item.Quantity)
+			}
 		}
 
-		// Credit cash to the creator of the daily sales record (if there's cash amount)
-		if record.TotalCashAmount > 0 && record.CreatedByID != uuid.Nil {
-			log.Printf("💰 [DailySales] Crediting %.2f cash to user %s for daily sales record %s",
-				record.TotalCashAmount, record.CreatedByID.String(), recordID.String())
-
-			// Update cash holding for the creator
-			if err := s.updateCashHolding(tx, tenantID, record.CreatedByID, record.TotalCashAmount, recordID,
-				"sale", fmt.Sprintf("Cash from daily sales #%s", recordID.String()[:8])); err != nil {
-				return fmt.Errorf("failed to credit cash to creator: %w", err)
-			}
+		// v1.0.389 — re-chain the per-day register for the products this record
+		// touched (self-heals back-dated / multi-record-per-day ordering).
+		regProducts := make([]uuid.UUID, 0, len(record.Items))
+		for _, it := range record.Items {
+			regProducts = append(regProducts, it.ProductID)
 		}
+		s.rebuildRegisterChain(tx, tenantID, record.ShopID, regProducts)
 
 		return nil
 	})
@@ -983,94 +1323,79 @@ func (s *DailySalesService) ApproveDailySalesRecord(ctx context.Context, recordI
 		return nil, err
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// 💵 AUTO CASH TRACKING - Update cash holding after approval
+	// ═══════════════════════════════════════════════════════════════════════════
+	// For approved records with cash payments, automatically update cash holdings
+	if record.TotalCashAmount > 0 {
+		// Create cash service instance
+		cashService := &CashServiceAdapter{db: s.db}
+
+		// Determine who gets the cash (the salesman who created the record)
+		cashRecipientID := record.CreatedByID
+		if record.SalesmanID != nil && *record.SalesmanID != uuid.Nil {
+			cashRecipientID = *record.SalesmanID
+		}
+
+		err := cashService.UpdateCashBalance(
+			ctx,
+			cashRecipientID,            // User who created/made the sale has the cash
+			record.ShopID,              // Cash is at this shop
+			tenantID,                   // Tenant
+			record.TotalCashAmount,     // Cash amount to add
+			"sale",                     // Transaction type
+			fmt.Sprintf("Daily sales - Record ID: %s, Date: %s (approved)", record.ID, record.RecordDate.Format("2006-01-02")),
+			"daily_sales",              // Related entity type
+			&record.ID,                 // Related entity ID
+			approvedByID,               // Approved by (for audit)
+		)
+
+		if err != nil {
+			// ⚠️ Don't fail the approval - just log the error
+			// The approval succeeded, cash tracking is secondary
+			log.Printf("⚠️ [DailySales] Failed to update cash holding after approval (non-critical): %v", err)
+		} else {
+			log.Printf("✅ [DailySales] Cash holding updated after approval: +%.2f for user %s at shop %s",
+				record.TotalCashAmount, cashRecipientID, record.ShopID)
+		}
+	}
+
 	// Clear cache
 	s.clearDailySalesCache(ctx, tenantID, record.ShopID)
 
-	// Notify creator that their daily sales record was approved
-	if s.workflowNotification != nil {
-		go func() {
-			// Get approver info for notification
-			var approver models.User
-			if err := s.db.First(&approver, "id = ?", approvedByID).Error; err != nil {
-				log.Printf("[DAILY_SALES] Failed to get approver for notification: %v", err)
-				return
-			}
-			if err := s.workflowNotification.NotifyDailySalesApproved(context.Background(), &record, &approver); err != nil {
-				log.Printf("[DAILY_SALES] Failed to send approval notification: %v", err)
-			}
-		}()
+	// v1.0.187 — propagate any operator-edited unit_price up to products.mrp
+	// + shop_product_rates on approval too. Pre-fix the propagation only fired
+	// from CreateDailySalesRecord/UpdateDailySalesRecord, so a sale that was
+	// approved AFTER edit (or where the edit happened on a draft record before
+	// approval) silently dropped the MRP change. Concretely: chhotu's FM Tower
+	// 2026-05-05 Red Label sales went in at unit_price ₹1910, the goroutine
+	// here didn't run on the approval path, products.mrp stayed at ₹1810,
+	// inventory cards rendered the stale value. Healed manually 2026-05-07;
+	// this hook prevents recurrence.
+	itemRequests := make([]DailySalesItemRequest, 0, len(record.Items))
+	for _, it := range record.Items {
+		itemRequests = append(itemRequests, DailySalesItemRequest{
+			ProductID: it.ProductID,
+			UnitPrice: it.UnitPrice,
+			Quantity:  it.Quantity,
+		})
 	}
+	go s.propagateMRPFromDailySale(tenantID, record.ShopID, approvedByID, itemRequests)
 
 	// Return updated record
 	return s.GetDailySalesRecordByID(ctx, recordID, tenantID)
 }
 
-// updateCashHolding updates a user's cash balance and creates an audit trail transaction
-func (s *DailySalesService) updateCashHolding(tx *gorm.DB, tenantID, userID uuid.UUID, amount float64, refID uuid.UUID, transactionType, description string) error {
-	var holding models.CashHolding
-
-	err := tx.Where("user_id = ? AND tenant_id = ?", userID, tenantID).First(&holding).Error
-	if err == gorm.ErrRecordNotFound {
-		// Get user role for the new holding record
-		var user models.User
-		if err := tx.Where("id = ?", userID).First(&user).Error; err != nil {
-			return fmt.Errorf("failed to get user: %w", err)
-		}
-		// Create new holding record
-		holding = models.CashHolding{
-			TenantModel: models.TenantModel{
-				BaseModel: models.BaseModel{ID: uuid.New()},
-				TenantID:  &tenantID,
-			},
-			UserID:         userID,
-			Role:           user.Role,
-			CurrentBalance: 0,
-		}
-	} else if err != nil {
-		return fmt.Errorf("failed to get cash holding: %w", err)
-	}
-
-	previousBalance := holding.CurrentBalance
-	newBalance := previousBalance + amount
-	holding.CurrentBalance = newBalance
-	holding.LastUpdatedAt = time.Now()
-
-	if err := tx.Save(&holding).Error; err != nil {
-		return fmt.Errorf("failed to update cash holding: %w", err)
-	}
-
-	// Create audit transaction
-	transaction := models.CashTransaction{
-		TenantModel: models.TenantModel{
-			BaseModel: models.BaseModel{ID: uuid.New()},
-			TenantID:  &tenantID,
-		},
-		UserID:          userID,
-		TransactionType: transactionType,
-		Amount:          amount,
-		BalanceBefore:   previousBalance,
-		BalanceAfter:    newBalance,
-		RelatedType:     "daily_sales_record",
-		RelatedID:       &refID,
-		Notes:           description,
-		TransactionDate: time.Now(),
-	}
-
-	if err := tx.Create(&transaction).Error; err != nil {
-		return fmt.Errorf("failed to create cash transaction: %w", err)
-	}
-
-	log.Printf("✅ [DailySales] Cash updated for user %s: %.2f -> %.2f (change: +%.2f)",
-		userID.String(), previousBalance, newBalance, amount)
-
-	return nil
-}
-
-// RejectDailySalesRecord rejects a daily sales record
+// RejectDailySalesRecord rejects a daily sales record and restores stock
 func (s *DailySalesService) RejectDailySalesRecord(ctx context.Context, recordID, tenantID, rejectedByID uuid.UUID, reason string) error {
 	var record models.DailySalesRecord
 
-	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error
+	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
+		Preload("Items", func(db *gorm.DB) *gorm.DB {
+			return db.Order("position ASC").Order("unit_price ASC")
+		}).
+		Preload("Items.Product").
+		First(&record).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errors.New("daily sales record not found")
@@ -1083,64 +1408,203 @@ func (s *DailySalesService) RejectDailySalesRecord(ctx context.Context, recordID
 		return errors.New("only pending records can be rejected")
 	}
 
-	// Update record status
-	now := time.Now()
-	updates := map[string]interface{}{
-		"status":         models.StatusRejected,
-		"approved_at":    now,
-		"approved_by_id": rejectedByID,
-		"notes":          record.Notes + " | Rejection reason: " + reason,
-	}
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// Update record status
+		now := time.Now()
+		updates := map[string]interface{}{
+			"status":         models.StatusRejected,
+			"approved_at":    now,
+			"approved_by_id": rejectedByID,
+			"notes":          record.Notes + " | Rejection reason: " + reason,
+		}
 
-	if err := s.db.Model(&record).Updates(updates).Error; err != nil {
-		return fmt.Errorf("failed to reject daily sales record: %w", err)
+		if err := tx.Model(&record).Updates(updates).Error; err != nil {
+			return fmt.Errorf("failed to reject daily sales record: %w", err)
+		}
+
+		// v1.0.216 phase 3 — authoritative "did this record actually deduct
+		// stock?" check, gated on stock_histories audit rows for the record.
+		// FM Tower 90ML May 6 opening was inflated by exactly this class: a
+		// duplicate of May 5's sale (d714d53a) was created pre-v1.0.203 dedup,
+		// never approved (so never debited), then rejected on May 7. The reject
+		// path's old gate (item.OpeningStock > 0 || ClosingStock != 0) returned
+		// true on every record since OpeningStock is captured at create time,
+		// so it "restored" ~38 units that were never debited — the next day's
+		// Smart-Sale opening locked in the phantom inflation.
+		var deductRows int64
+		tx.Table("stock_histories").
+			Where("reference_id = ? AND movement_type IN ('daily_sale','smart_sale') AND deleted_at IS NULL",
+				recordID).
+			Count(&deductRows)
+		stockWasDeducted := deductRows > 0
+		if !stockWasDeducted {
+			log.Printf("🛑 [DailySales] Reject of %s — no daily_sale audit row exists; record never deducted, skipping restore (FM Tower May 6 class fix). Items=%d", recordID, len(record.Items))
+		}
+
+		if stockWasDeducted {
+			log.Printf("🔄 [DailySales] Rejecting record %s — restoring stock for %d items", recordID, len(record.Items))
+			for _, item := range record.Items {
+				var stock models.Stock
+				err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+					record.ShopID, item.ProductID, tenantID).First(&stock).Error
+
+				if err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						log.Printf("⚠️ [DailySales] Stock record not found for product %s — skipping restore", item.ProductID)
+						continue
+					}
+					return fmt.Errorf("failed to get stock for restore: %w", err)
+				}
+
+				// Baseline-reset guard: if opening stock has been re-set on this stock
+				// row AFTER this sale was created (via Smart Stock Setup approve), the
+				// new opening stock already represents the real count — adding the
+				// rejected qty back would double-count and inflate inventory. Real
+				// case: rejected daily-sale record 95647dc0 created 00:58 → three
+				// stock setups overwrote opening stock before reject at 20:02 →
+				// previous restore code pushed stock from 137 to 161.
+				var resetCount int64
+				if cErr := tx.Table("stock_histories").
+					Where("stock_id = ? AND movement_type = ? AND created_at > ?",
+						stock.ID, "opening_stock_setup", record.CreatedAt).
+					Count(&resetCount).Error; cErr != nil {
+					log.Printf("⚠️ [DailySales] baseline-reset check failed for stock %s: %v — proceeding with restore", stock.ID, cErr)
+				}
+
+				prevQty := stock.Quantity
+				productName := fmt.Sprintf("%s", item.ProductID)
+				if item.Product != nil {
+					productName = item.Product.Name
+				}
+
+				if resetCount > 0 {
+					// Opening stock was reset since the sale — skip the +qty
+					// restoration but still audit the rejection so the trail is
+					// complete. This prevents the silent double-count without
+					// hiding the operator's reject action.
+					shopRef, prodRef := stock.ShopID, stock.ProductID
+					stockHistory := models.StockHistory{
+						TenantModel:      models.TenantModel{TenantID: &tenantID},
+						StockID:          stock.ID,
+						ShopID:           &shopRef,
+						ProductID:        &prodRef,
+						MovementType:     "daily_sale_rejected_no_restore",
+						Quantity:         0,
+						PreviousQuantity: prevQty,
+						NewQuantity:      prevQty,
+						UnitCost:         item.UnitPrice,
+						TotalCost:        item.TotalAmount,
+						Reference:        fmt.Sprintf("Daily Sales Record %s (rejected, baseline reset)", record.ID),
+						ReferenceID:      &record.ID,
+						CreatedByID:      rejectedByID,
+						Notes:            fmt.Sprintf("Reject of %s skipped stock restore — opening stock was reset by Smart Stock Setup after this sale; restore would double-count. Reason: %s", productName, reason),
+					}
+					// v1.0.256 — FAIL LOUD: this row is the only record of WHY
+					// restore was skipped; losing it makes the reject look
+					// like a bug. Atomic with the reject txn.
+					if err := tx.Create(&stockHistory).Error; err != nil {
+						log.Printf("ERROR: no-restore audit row create failed — rolling back reject: %v", err)
+						return fmt.Errorf("failed to record no-restore audit (reject not saved, please retry): %w", err)
+					}
+					log.Printf("🛑 [DailySales] Skipping stock restore for %s (stock=%d) — opening stock was reset %d time(s) after sale was created", productName, prevQty, resetCount)
+					continue
+				}
+
+				// Normal restore path — opening stock has NOT been reset since.
+				newQuantity := prevQty + item.Quantity
+				if err := tx.Model(&stock).Update("quantity", newQuantity).Error; err != nil {
+					return fmt.Errorf("failed to restore stock for product %s: %w", item.ProductID, err)
+				}
+
+				shopRef2, prodRef2 := stock.ShopID, stock.ProductID
+				stockHistory := models.StockHistory{
+					TenantModel:      models.TenantModel{TenantID: &tenantID},
+					StockID:          stock.ID,
+					ShopID:           &shopRef2,
+					ProductID:        &prodRef2,
+					MovementType:     "daily_sale_rejected",
+					Quantity:         item.Quantity,
+					PreviousQuantity: prevQty,
+					NewQuantity:      newQuantity,
+					UnitCost:         item.UnitPrice,
+					TotalCost:        item.TotalAmount,
+					Reference:        fmt.Sprintf("Daily Sales Record %s (rejected)", record.ID),
+					ReferenceID:      &record.ID,
+					CreatedByID:      rejectedByID,
+					Notes:            fmt.Sprintf("Stock restored for %s — sale rejected: %s", productName, reason),
+				}
+
+				// v1.0.256 — FAIL LOUD (atomic stock-restore + audit) on reject.
+				if err := tx.Create(&stockHistory).Error; err != nil {
+					log.Printf("ERROR: stock history create failed — rolling back reject: %v", err)
+					return fmt.Errorf("failed to record stock history (reject not saved, please retry): %w", err)
+				}
+
+				log.Printf("🔄 [DailySales] Stock restored for %s: %d → %d (+%d)", productName, prevQty, newQuantity, item.Quantity)
+			}
+		} else {
+			log.Printf("⚠️ [DailySales] Legacy record %s — no stock to restore", recordID)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
 	}
 
 	// Clear cache
 	s.clearDailySalesCache(ctx, tenantID, record.ShopID)
-
-	// Notify creator that their daily sales record was rejected with reason
-	if s.workflowNotification != nil {
-		go func() {
-			// Get rejector info for notification
-			var rejector models.User
-			if err := s.db.First(&rejector, "id = ?", rejectedByID).Error; err != nil {
-				log.Printf("[DAILY_SALES] Failed to get rejector for notification: %v", err)
-				return
-			}
-			if err := s.workflowNotification.NotifyDailySalesRejected(context.Background(), &record, &rejector, reason); err != nil {
-				log.Printf("[DAILY_SALES] Failed to send rejection notification: %v", err)
-			}
-		}()
-	}
 
 	return nil
 }
 
 // Helper functions
 
-// deduplicateImageURLs removes duplicate URLs while preserving order
-func deduplicateImageURLs(urls []string) []string {
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(urls))
-	for _, url := range urls {
-		if url != "" && !seen[url] {
-			seen[url] = true
-			result = append(result, url)
-		}
-	}
-	return result
-}
-
 // DailySalesFilters represents filters for daily sales records
 type DailySalesFilters struct {
-	ShopID     uuid.UUID `form:"-"`
-	SalesmanID uuid.UUID `form:"-"`
-	Status     string    `form:"status"`
-	StartDate  time.Time `form:"start_date" time_format:"2006-01-02"`
-	EndDate    time.Time `form:"end_date" time_format:"2006-01-02"`
-	Page       int       `form:"page"`
-	PageSize   int       `form:"page_size"`
+	ShopID     string `form:"shop_id"`
+	SalesmanID string `form:"salesman_id"`
+	Status     string `form:"status"`
+	HasAlerts  *bool  `form:"has_alerts"`
+	// Size filter: bucket records by any contained item whose product.size or
+	// ocr_size starts with the requested numeric prefix (e.g. "180", "375",
+	// "750"). Empty = no size filter. "beer" matches Beer / non-numeric sizes.
+	Size      string    `form:"size"`
+	// Category filter (v1.0.391): keep records that contain at least one item
+	// whose product category name matches (case-insensitive). Mirrors Size.
+	Category  string    `form:"category"`
+	StartDate time.Time `form:"start_date" time_format:"2006-01-02"`
+	EndDate   time.Time `form:"end_date" time_format:"2006-01-02"`
+	Page      int       `form:"page"`
+	PageSize  int       `form:"page_size"`
+}
+
+// SalesBucket is one (size or category) breakdown row in the list summary.
+type SalesBucket struct {
+	Label  string  `json:"label" gorm:"column:label"`
+	Qty    int64   `json:"qty" gorm:"column:qty"`
+	Amount float64 `json:"amount" gorm:"column:amount"`
+}
+
+// DailySalesSummary aggregates the FULL filtered set (not just the current page)
+// so the web admin can show totals + per-category + per-size breakdowns. v1.0.391.
+type DailySalesSummary struct {
+	TotalRecords int64 `json:"total_records" gorm:"column:total_records"`
+	TotalAmount  float64 `json:"total_amount" gorm:"column:total_amount"`
+	Pending      int64 `json:"pending" gorm:"column:pending"`
+	Approved     int64 `json:"approved" gorm:"column:approved"`
+	// TotalQty = all bottles in the base (date/shop/status) set, ignoring the
+	// size/category selection. FilteredQty/Amount = the exact item-level total for
+	// the ACTIVE size+category, so the cards reconcile with the table + breakdowns.
+	TotalQty       int64         `json:"total_qty" gorm:"-"`
+	FilteredQty    int64         `json:"filtered_qty" gorm:"-"`
+	FilteredAmount float64       `json:"filtered_amount" gorm:"-"`
+	// Each breakdown IGNORES its own facet (by_category applies the size filter
+	// but groups all categories; by_size applies the category filter but groups
+	// all sizes) so the other options never disappear when one is selected.
+	ByCategory []SalesBucket `json:"by_category" gorm:"-"`
+	BySize     []SalesBucket `json:"by_size" gorm:"-"`
 }
 
 // DailySalesListResponse represents paginated daily sales response
@@ -1150,33 +1614,128 @@ type DailySalesListResponse struct {
 	Page       int                         `json:"page"`
 	PageSize   int                         `json:"page_size"`
 	TotalPages int                         `json:"total_pages"`
+	Summary    *DailySalesSummary          `json:"summary,omitempty"`
+}
+
+// enrichItemsWithStock populates opening/closing stock for each item in the response.
+// New system: opening/closing are stored in the DailySalesItem at creation time (locked values).
+// Legacy fallback: for old records without stored values, uses StockHistory or current stock.
+func (s *DailySalesService) enrichItemsWithStock(response *DailySalesRecordResponse, record *models.DailySalesRecord, tenantID uuid.UUID) {
+	if len(response.Items) == 0 {
+		return
+	}
+
+	// Check if items already have stored opening/closing from the new system
+	hasStoredStock := false
+	for _, item := range record.Items {
+		if item.OpeningStock > 0 || item.ClosingStock != 0 {
+			hasStoredStock = true
+			break
+		}
+	}
+
+	if hasStoredStock {
+		// New system: use the locked values stored in each item at creation time
+		log.Printf("[StockCalc] Record %s (%s, %s): using stored opening/closing from creation",
+			record.ID, record.Status, record.RecordDate.Format("2006-01-02"))
+
+		// Build a map from the model items (which have the stored values)
+		storedMap := make(map[uuid.UUID]*models.DailySalesItem)
+		for i := range record.Items {
+			storedMap[record.Items[i].ProductID] = &record.Items[i]
+		}
+
+		for i, item := range response.Items {
+			if stored, ok := storedMap[item.ProductID]; ok {
+				response.Items[i].OpeningStock = stored.OpeningStock
+				response.Items[i].ClosingStock = stored.ClosingStock
+				log.Printf("[StockCalc]   %s: opening=%d, closing=%d (locked)",
+					item.ProductName, stored.OpeningStock, stored.ClosingStock)
+			}
+		}
+		return
+	}
+
+	// Legacy fallback for old records without stored stock values
+	log.Printf("[StockCalc] Record %s (%s, %s): legacy mode — no stored stock, computing from DB",
+		record.ID, record.Status, record.RecordDate.Format("2006-01-02"))
+
+	if record.Status == "approved" {
+		// For approved legacy records, use StockHistory snapshots
+		var histories []models.StockHistory
+		s.db.Where("reference_id = ? AND movement_type = ?", record.ID, "daily_sale").
+			Preload("Stock").
+			Find(&histories)
+
+		historyMap := make(map[uuid.UUID]*models.StockHistory)
+		for i := range histories {
+			if histories[i].Stock != nil {
+				historyMap[histories[i].Stock.ProductID] = &histories[i]
+			}
+		}
+
+		for i, item := range response.Items {
+			if h, ok := historyMap[item.ProductID]; ok {
+				response.Items[i].OpeningStock = h.PreviousQuantity
+				response.Items[i].ClosingStock = h.NewQuantity
+			}
+		}
+	} else {
+		// For legacy pending/rejected, use current stock
+		productIDs := make([]uuid.UUID, len(response.Items))
+		for i, item := range response.Items {
+			productIDs[i] = item.ProductID
+		}
+
+		var stocks []models.Stock
+		s.db.Where("shop_id = ? AND product_id IN ? AND tenant_id = ?", record.ShopID, productIDs, tenantID).
+			Find(&stocks)
+
+		currentStockMap := make(map[uuid.UUID]int)
+		for _, st := range stocks {
+			currentStockMap[st.ProductID] = st.Quantity
+		}
+
+		for i, item := range response.Items {
+			currentStock := currentStockMap[item.ProductID]
+			response.Items[i].OpeningStock = currentStock
+			if record.Status == "pending" {
+				response.Items[i].ClosingStock = currentStock - item.Quantity
+			} else {
+				response.Items[i].ClosingStock = currentStock
+			}
+		}
+	}
 }
 
 // mapDailySalesRecordToResponse converts model to response format
 func (s *DailySalesService) mapDailySalesRecordToResponse(record *models.DailySalesRecord) *DailySalesRecordResponse {
 	response := &DailySalesRecordResponse{
-		ID:                 record.ID,
-		RecordDate:         record.RecordDate,
-		ShopID:             record.ShopID,
-		SalesmanID:         record.SalesmanID,
-		TotalSalesAmount:   record.TotalSalesAmount,
-		TotalCashAmount:    record.TotalCashAmount,
-		TotalCardAmount:    record.TotalCardAmount,
-		TotalUpiAmount:     record.TotalUpiAmount,
-		TotalCreditAmount:  record.TotalCreditAmount,
-		TotalExpenseAmount: record.TotalExpenseAmount, // NEW: Total expenses
-		Status:             record.Status,
-		ApprovedAt:         record.ApprovedAt,
-		Notes:              record.Notes,
-		CreatedAt:          record.CreatedAt,
-		UpdatedAt:          record.UpdatedAt,
-		TotalItems:         len(record.Items),
-		TotalExpenses:      len(record.Expenses), // NEW: Expense count
-		// Location tracking (optional)
-		Latitude:           record.Latitude,
-		Longitude:          record.Longitude,
-		LocationAccuracy:   record.LocationAccuracy,
-		LocationCapturedAt: record.LocationCapturedAt,
+		ID:                record.ID,
+		RecordDate:        record.RecordDate,
+		ShopID:            record.ShopID,
+		SalesmanID:        record.SalesmanID,
+		TotalSalesAmount:  record.TotalSalesAmount,
+		TotalCashAmount:   record.TotalCashAmount,
+		TotalCardAmount:   record.TotalCardAmount,
+		TotalUpiAmount:    record.TotalUpiAmount,
+		TotalCreditAmount: record.TotalCreditAmount,
+		Status:            record.Status,
+		ApprovedAt:        record.ApprovedAt,
+		Notes:             record.Notes,
+		ReceiptImages:     []string(record.ReceiptImages),
+		// v1.0.157 — Flutter parses `image_urls` (not `receipt_images`) from
+		// the response, so without this assignment the receipt-image viewer
+		// always sees an empty list and shows "Failed to load image".
+		// Backend supports BOTH on the request side for legacy reasons; we
+		// now ship both on the response too. Web admin still reads
+		// receipt_images.
+		ImageURLs:         []string(record.ReceiptImages),
+		HasAlerts:         record.HasAlerts,
+		AlertCount:        record.AlertCount,
+		CreatedAt:         record.CreatedAt,
+		UpdatedAt:         record.UpdatedAt,
+		TotalItems:        len(record.Items),
 	}
 
 	// Add shop info
@@ -1199,70 +1758,49 @@ func (s *DailySalesService) mapDailySalesRecordToResponse(record *models.DailySa
 		response.ApprovedByName = record.ApprovedBy.FirstName + " " + record.ApprovedBy.LastName
 	}
 
-	// Add revert info
-	if record.RevertedAt != nil {
-		response.RevertedAt = record.RevertedAt
-		response.RevertReason = record.RevertReason
-	}
-	if record.RevertedBy != nil {
-		response.RevertedByName = record.RevertedBy.FirstName + " " + record.RevertedBy.LastName
-	}
-
-	// Parse image URLs from JSON string
-	if record.ImageURLs != "" {
-		var imageURLs []string
-		if err := json.Unmarshal([]byte(record.ImageURLs), &imageURLs); err == nil {
-			response.ImageURLs = imageURLs
-		}
-	}
-
 	// Add items
 	if len(record.Items) > 0 {
-		// Batch-load SaaS category names for items missing local categories (eliminates N+1)
-		saasCategories := make(map[uuid.UUID]string)
-		var missingCatIDs []uuid.UUID
-		for _, item := range record.Items {
-			if item.Product != nil && item.Product.Category == nil && item.Product.CategoryID != uuid.Nil {
-				missingCatIDs = append(missingCatIDs, item.Product.CategoryID)
-			}
-		}
-		if len(missingCatIDs) > 0 {
-			var catResults []struct {
-				ID   uuid.UUID `gorm:"column:id"`
-				Name string    `gorm:"column:name"`
-			}
-			s.db.Table("brand_categories").Select("id, name").Where("id IN ?", missingCatIDs).Scan(&catResults)
-			for _, cr := range catResults {
-				saasCategories[cr.ID] = cr.Name
-			}
-		}
-
 		response.Items = make([]DailySalesItemResponse, len(record.Items))
+		targets := make([]utils.DisplayBoldTarget, len(record.Items))
 		for i, item := range record.Items {
 			response.Items[i] = DailySalesItemResponse{
-				ID:           item.ID,
-				ProductID:    item.ProductID,
-				Quantity:     item.Quantity,
-				UnitPrice:    item.UnitPrice,
-				TotalAmount:  item.TotalAmount,
-				CashAmount:   item.CashAmount,
-				CardAmount:   item.CardAmount,
-				UpiAmount:    item.UpiAmount,
-				CreditAmount: item.CreditAmount,
-				OpeningStock: item.OpeningStock,
-				ClosingStock: item.ClosingStock,
-				OCRBrandName: item.OCRBrandName,
-				OCRSize:      item.OCRSize,
-				OCRReceipt:   item.OCRReceipt,
-				OCRTotal:     item.OCRTotal,
-				DBStock:      item.DBStock,
-				OCRRate:      item.OCRRate,
+				ID:            item.ID,
+				ProductID:     item.ProductID,
+				Quantity:      item.Quantity,
+				UnitPrice:     item.UnitPrice,
+				TotalAmount:   item.TotalAmount,
+				CashAmount:    item.CashAmount,
+				CardAmount:    item.CardAmount,
+				UpiAmount:     item.UpiAmount,
+				CreditAmount:  item.CreditAmount,
+				StockAlert:    item.StockAlert,
+				StockAlertQty: item.StockAlertQty,
+				// v1.0.156 — opening + closing stock were previously
+				// dropped on the floor here (defaulted to 0) which left
+				// the daily sales detail screen with no opening info to
+				// render. Carry them through.
+				OpeningStock:  item.OpeningStock,
+				ClosingStock:  item.ClosingStock,
 			}
 
+			// Add product info
 			if item.Product != nil {
 				response.Items[i].ProductName = item.Product.Name
 				response.Items[i].Size = item.Product.Size
-				response.Items[i].ImageURL = item.Product.ImageURL
+				// Carry display_name through so daily-sales detail uses the
+				// same bold + small treatment as Brands / Products pages.
+				response.Items[i].DisplayName = item.Product.DisplayName
+				response.Items[i].DisplayNameBoldStart = item.Product.DisplayNameBoldStart
+				response.Items[i].DisplayNameBoldLength = item.Product.DisplayNameBoldLength
+				// v1.0.156 — current product MRP + last-change audit.
+				// Sales summary view renders both the applied unit_price
+				// and product_mrp so the operator can spot divergence at
+				// a glance (the chhotu M2 Cranberry case: ₹770 sold at
+				// vs ₹760 current MRP).
+				response.Items[i].ProductMRP = item.Product.MRP
+				response.Items[i].LastMRPChangeAt = item.Product.LastMRPChangeAt
+				response.Items[i].LastMRPChangeByName = item.Product.LastMRPChangeByName
+				response.Items[i].LastMRPChangePrevious = item.Product.LastMRPChangePrevious
 
 				if item.Product.Brand != nil {
 					response.Items[i].BrandName = item.Product.Brand.Name
@@ -1270,30 +1808,68 @@ func (s *DailySalesService) mapDailySalesRecordToResponse(record *models.DailySa
 
 				if item.Product.Category != nil {
 					response.Items[i].CategoryName = item.Product.Category.Name
-				} else if name, ok := saasCategories[item.Product.CategoryID]; ok {
-					response.Items[i].CategoryName = name
+				}
+				targets[i] = utils.DisplayBoldTarget{
+					SaasBrandID: item.Product.SaaSBrandID,
+					DisplayName: response.Items[i].DisplayName,
+					BoldStart:   response.Items[i].DisplayNameBoldStart,
+					BoldLength:  response.Items[i].DisplayNameBoldLength,
 				}
 			}
 		}
-	}
 
-	// Add expenses (NEW - Expense Table Feature)
-	if len(record.Expenses) > 0 {
-		response.Expenses = make([]DailySalesExpenseResponse, len(record.Expenses))
-		for i, expense := range record.Expenses {
-			response.Expenses[i] = DailySalesExpenseResponse{
-				ID:         expense.ID,
-				HeaderID:   expense.HeaderID,
-				HeaderName: expense.HeaderName,
-				Amount:     expense.Amount,
-			}
-		}
+		// Bold fallback: DSE items whose product row has NULL bold indices
+		// still inherit the master saas_brand's bold range. Matches the
+		// inventory /products and purchase item responses so the Flutter
+		// review/edit screens render the same bold+small treatment.
+		utils.ApplyDisplayBoldFallback(s.db.DB, targets, func(i int, dn string, bs, bl *int) {
+			response.Items[i].DisplayName = dn
+			response.Items[i].DisplayNameBoldStart = bs
+			response.Items[i].DisplayNameBoldLength = bl
+		})
 	}
 
 	return response
 }
 
-// clearDailySalesCache clears related cache entries
+// validateStockAvailability checks if sufficient stock is available for all items
+// This validation happens BEFORE creating the record to provide immediate feedback
+func (s *DailySalesService) validateStockAvailability(tenantID, shopID uuid.UUID, items []DailySalesItemRequest) error {
+	for _, itemReq := range items {
+		// Get product details first for better error messages
+		var product models.Product
+		if err := s.db.Where("id = ? AND tenant_id = ?", itemReq.ProductID, tenantID).First(&product).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("product not found: %s", itemReq.ProductID)
+			}
+			return fmt.Errorf("failed to verify product: %w", err)
+		}
+
+		// Check stock availability
+		var stock models.Stock
+		err := s.db.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+			shopID, itemReq.ProductID, tenantID).First(&stock).Error
+
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("no stock record found for '%s' in this shop - please add initial stock first", product.Name)
+			}
+			return fmt.Errorf("failed to check stock for '%s': %w", product.Name, err)
+		}
+
+		// Validate sufficient quantity available
+		if stock.Quantity < itemReq.Quantity {
+			return fmt.Errorf("insufficient stock for '%s': available %d, requested %d - please reduce quantity",
+				product.Name, stock.Quantity, itemReq.Quantity)
+		}
+
+		log.Printf("   ✓ Stock OK for %s: Available=%d, Requested=%d", product.Name, stock.Quantity, itemReq.Quantity)
+	}
+
+	return nil
+}
+
+// clearDailySalesCache clears related cache entries (non-critical — logs errors instead of failing)
 func (s *DailySalesService) clearDailySalesCache(ctx context.Context, tenantID, shopID uuid.UUID) {
 	// Clear various cache patterns
 	cacheKeys := []string{
@@ -1302,671 +1878,506 @@ func (s *DailySalesService) clearDailySalesCache(ctx context.Context, tenantID, 
 	}
 
 	for _, key := range cacheKeys {
-		s.cache.Delete(ctx, key)
-	}
-}
-
-// CopyDailySalesRecord creates a copy of an existing daily sales record for correction
-// This allows users to copy rejected records instead of re-entering all 50+ items manually
-func (s *DailySalesService) CopyDailySalesRecord(ctx context.Context, recordID, tenantID, createdByID uuid.UUID) (*DailySalesRecordResponse, error) {
-	// Fetch the original record with all items and expenses
-	var original models.DailySalesRecord
-	if err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
-		Preload("Items").
-		Preload("Expenses"). // NEW: Load expenses for copy
-		First(&original).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("daily sales record not found")
-		}
-		return nil, fmt.Errorf("failed to get original record: %w", err)
-	}
-
-	// Build the request from original record items
-	items := make([]DailySalesItemRequest, len(original.Items))
-	for i, item := range original.Items {
-		items[i] = DailySalesItemRequest{
-			ProductID:    item.ProductID,
-			Quantity:     item.Quantity,
-			UnitPrice:    item.UnitPrice,
-			TotalAmount:  item.TotalAmount,
-			CashAmount:   item.CashAmount,
-			CardAmount:   item.CardAmount,
-			UpiAmount:    item.UpiAmount,
-			CreditAmount: item.CreditAmount,
+		if err := s.cache.Delete(ctx, key); err != nil {
+			log.Printf("[DailySales] Cache clear failed for key %s (non-critical): %v", key, err)
 		}
 	}
-
-	// Build expenses from original record (NEW - Expense Table Feature)
-	expenses := make([]DailySalesExpenseRequest, len(original.Expenses))
-	for i, expense := range original.Expenses {
-		expenses[i] = DailySalesExpenseRequest{
-			HeaderID:   expense.HeaderID,
-			HeaderName: expense.HeaderName,
-			Amount:     expense.Amount,
-		}
-	}
-
-	// Create new request with today's date and copied items/expenses
-	newReq := DailySalesRecordRequest{
-		RecordDate:         time.Now(), // New record uses today's date
-		ShopID:             original.ShopID,
-		SalesmanID:         original.SalesmanID,
-		TotalSalesAmount:   original.TotalSalesAmount,
-		TotalCashAmount:    original.TotalCashAmount,
-		TotalCardAmount:    original.TotalCardAmount,
-		TotalUpiAmount:     original.TotalUpiAmount,
-		TotalCreditAmount:  original.TotalCreditAmount,
-		TotalExpenseAmount: original.TotalExpenseAmount, // NEW: Copy total expenses
-		Notes:              fmt.Sprintf("Copied from record %s (original date: %s)", recordID, original.RecordDate.Format("2006-01-02")),
-		Items:              items,
-		Expenses:           expenses, // NEW: Copy expenses
-	}
-
-	// Create the new record (will have pending status for review)
-	return s.CreateDailySalesRecord(ctx, newReq, tenantID, createdByID)
 }
 
-// ChangeDateRequest represents a request to change daily sales record date
-type ChangeDateRequest struct {
-	NewDate time.Time `json:"new_date" binding:"required"`
-	Reason  string    `json:"reason"` // Optional reason for the change
+// ═══════════════════════════════════════════════════════════════════════════
+// Cash Service Adapter - Lightweight adapter to access finance module
+// ═══════════════════════════════════════════════════════════════════════════
+
+// CashServiceAdapter provides access to cash management operations
+type CashServiceAdapter struct {
+	db *database.DB
 }
 
-// ChangeDateResponse represents the response after changing the date
-type ChangeDateResponse struct {
-	Success     bool      `json:"success"`
-	Message     string    `json:"message"`
-	RecordID    uuid.UUID `json:"record_id"`
-	OldDate     time.Time `json:"old_date"`
-	NewDate     time.Time `json:"new_date"`
-	ChangedBy   string    `json:"changed_by"`
-	RequestSent bool      `json:"request_sent"` // True if request was sent to admin instead of direct change
-}
-
-// ChangeDailySalesRecordDate changes only the date of a daily sales record
-// Rules:
-// - Pending status: Any authorized user can change
-// - Approved status: Admin/Manager can change directly, others must request
-// - Rejected status: Cannot change (must copy and create new record)
-func (s *DailySalesService) ChangeDailySalesRecordDate(ctx context.Context, recordID, tenantID, userID uuid.UUID, userRole string, req ChangeDateRequest) (*ChangeDateResponse, error) {
-	var record models.DailySalesRecord
-
-	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("daily sales record not found")
-		}
-		return nil, fmt.Errorf("failed to find daily sales record: %w", err)
-	}
-
-	oldDate := record.RecordDate
-	newDate := utils.StartOfDay(req.NewDate)
-
-	// Check if dates are actually different
-	if utils.StartOfDay(oldDate).Equal(newDate) {
-		return nil, errors.New("new date is the same as current date")
-	}
-
-	isAdmin := userRole == "admin" || userRole == "manager"
-
-	// Handle based on status
-	switch record.Status {
-	case models.StatusRejected:
-		return nil, errors.New("rejected records cannot be modified - please use the copy feature to create a new record")
-
-	case models.StatusApproved:
-		if !isAdmin {
-			// Non-admin trying to change approved record
-			// In a full implementation, we would create a change request here
-			// For now, return an error with instructions
-			return &ChangeDateResponse{
-				Success:     false,
-				Message:     "Only admin or manager can change the date of approved records. Please contact your admin to request this change.",
-				RecordID:    recordID,
-				OldDate:     oldDate,
-				NewDate:     newDate,
-				RequestSent: false,
-			}, errors.New("permission denied: only admin or manager can change dates of approved records")
-		}
-		// Admin/Manager can proceed
-		log.Printf("⚠️ [DailySales] Admin override: %s changing date of approved record %s from %s to %s",
-			userRole, recordID, oldDate.Format("2006-01-02"), newDate.Format("2006-01-02"))
-
-	case models.StatusPending:
-		// Any authorized user can change pending records
-		log.Printf("📅 [DailySales] User %s changing date of pending record %s from %s to %s",
-			userID, recordID, oldDate.Format("2006-01-02"), newDate.Format("2006-01-02"))
-
-	default:
-		return nil, fmt.Errorf("unknown record status: %s", record.Status)
-	}
-
-	// Update only the date
-	updates := map[string]interface{}{
-		"record_date": newDate,
-		"updated_at":  time.Now(),
-	}
-
-	// Optionally append reason to notes if provided
-	if req.Reason != "" {
-		newNotes := record.Notes
-		if newNotes != "" {
-			newNotes += " | "
-		}
-		newNotes += fmt.Sprintf("Date changed from %s to %s by %s: %s",
-			oldDate.Format("2006-01-02"), newDate.Format("2006-01-02"), userRole, req.Reason)
-		updates["notes"] = newNotes
-	}
-
-	if err := s.db.Model(&record).Updates(updates).Error; err != nil {
-		return nil, fmt.Errorf("failed to update record date: %w", err)
-	}
-
-	// Clear cache
-	s.clearDailySalesCache(ctx, tenantID, record.ShopID)
-
-	log.Printf("✅ [DailySales] Date changed successfully for record %s: %s -> %s",
-		recordID, oldDate.Format("2006-01-02"), newDate.Format("2006-01-02"))
-
-	return &ChangeDateResponse{
-		Success:     true,
-		Message:     fmt.Sprintf("Date changed successfully from %s to %s", oldDate.Format("2006-01-02"), newDate.Format("2006-01-02")),
-		RecordID:    recordID,
-		OldDate:     oldDate,
-		NewDate:     newDate,
-		ChangedBy:   userRole,
-		RequestSent: false,
-	}, nil
-}
-
-// getSaaSCategoryName looks up category name from SaaS brand_categories table
-// This is a fallback when the product uses a SaaS-level category_id that doesn't exist in tenant categories
-func (s *DailySalesService) getSaaSCategoryName(categoryID uuid.UUID) string {
-	var category struct {
-		Name string
-	}
-	if err := s.db.Table("brand_categories").
-		Select("name").
-		Where("id = ?", categoryID).
-		First(&category).Error; err == nil {
-		return category.Name
-	}
-	return ""
-}
-
-// ========================================
-// Daily Sales Revert Functionality
-// ========================================
-
-// DailySalesRevertOTPResponse represents the response when OTPs are sent for revert
-type DailySalesRevertOTPResponse struct {
-	Message   string    `json:"message"`
-	RecordID  uuid.UUID `json:"record_id"`
-	EmailSent bool      `json:"email_sent"`
-	PhoneSent bool      `json:"phone_sent"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// DailySalesRevertWithOTPRequest represents the request to revert with OTP verification
-type DailySalesRevertWithOTPRequest struct {
-	EmailOTP string `json:"email_otp" binding:"required"`
-	PhoneOTP string `json:"phone_otp" binding:"required"`
-	Reason   string `json:"reason" binding:"required"`
-}
-
-// generateSecureOTP generates a cryptographically secure 6-digit OTP
-func (s *DailySalesService) generateSecureOTP() string {
-	max := big.NewInt(999999)
-	n, err := rand.Int(rand.Reader, max)
-	if err != nil {
-		// Fallback to time-based if crypto/rand fails
-		return fmt.Sprintf("%06d", time.Now().Unix()%1000000)
-	}
-	return fmt.Sprintf("%06d", n.Int64())
-}
-
-// hashOTP creates a SHA-256 hash of the OTP for secure storage
-func (s *DailySalesService) hashOTP(otp string) string {
-	hash := sha256.Sum256([]byte(otp))
-	return hex.EncodeToString(hash[:])
-}
-
-// verifyOTPHash compares provided OTP with stored hash
-func (s *DailySalesService) verifyOTPHash(providedOTP, storedHash string) bool {
-	// Master OTP for development/testing
-	if providedOTP == "011001" {
-		return true
-	}
-	providedHash := s.hashOTP(providedOTP)
-	return providedHash == storedHash
-}
-
-// maskEmail masks email for privacy (show first 2 chars and domain)
-func (s *DailySalesService) maskEmail(email string) string {
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 {
-		return email
-	}
-	localPart := parts[0]
-	domain := parts[1]
-	if len(localPart) <= 2 {
-		return localPart + "***@" + domain
-	}
-	return localPart[:2] + "***@" + domain
-}
-
-// maskPhone masks phone for privacy (show last 4 digits)
-func (s *DailySalesService) maskPhone(phone string) string {
-	if len(phone) <= 4 {
-		return phone
-	}
-	return "***" + phone[len(phone)-4:]
-}
-
-// sendEmailOTP sends OTP to email using SMTP
-func (s *DailySalesService) sendEmailOTP(ctx context.Context, email, otp, userName string, recordDate time.Time) error {
-	// Get SMTP configuration from environment
-	smtpHost := os.Getenv("SMTP_HOST")
-	smtpPort := os.Getenv("SMTP_PORT")
-	smtpUser := os.Getenv("SMTP_USERNAME")
-	smtpPass := os.Getenv("SMTP_PASSWORD")
-	fromEmail := os.Getenv("SMTP_FROM_EMAIL")
-	fromName := os.Getenv("SMTP_FROM_NAME")
-
-	if smtpHost == "" || smtpUser == "" || smtpPass == "" {
-		log.Printf("SMTP not configured (host=%s, user=%s), skipping email OTP", smtpHost, smtpUser)
-		return fmt.Errorf("email provider not configured")
-	}
-
-	if smtpPort == "" {
-		smtpPort = "587"
-	}
-	if fromEmail == "" {
-		fromEmail = smtpUser
-	}
-	if fromName == "" {
-		fromName = "LiquorPro"
-	}
-
-	recordDateStr := recordDate.Format("02-Jan-2006")
-
-	// Build email HTML
-	emailHTML := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="utf-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-	<div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px;">
-		<h2 style="color: #dc3545; margin-bottom: 15px;">Daily Sales Revert Verification</h2>
-		<p style="color: #555;">You are attempting to revert the following daily sales record:</p>
-		<div style="background-color: #fff; padding: 15px; border-radius: 5px; margin: 15px 0;">
-			<p><strong>Record Date:</strong> %s</p>
-		</div>
-		<p style="color: #555;">Your Email OTP is:</p>
-		<div style="background-color: #dc3545; color: white; font-size: 32px; font-weight: bold; padding: 20px; text-align: center; border-radius: 5px; letter-spacing: 8px;">
-			%s
-		</div>
-		<p style="color: #888; font-size: 12px; margin-top: 15px;">This OTP will expire in 10 minutes. Do not share this code with anyone.</p>
-	</div>
-	<div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; font-size: 12px; color: #999;">
-		<p>If you did not request this, please contact your administrator immediately.</p>
-	</div>
-</body>
-</html>`, recordDateStr, otp)
-
-	// Build email message with MIME headers
-	subject := fmt.Sprintf("Daily Sales Revert OTP - %s", recordDateStr)
-	message := fmt.Sprintf("From: %s <%s>\r\n"+
-		"To: %s\r\n"+
-		"Subject: %s\r\n"+
-		"MIME-Version: 1.0\r\n"+
-		"Content-Type: text/html; charset=utf-8\r\n"+
-		"\r\n"+
-		"%s", fromName, fromEmail, email, subject, emailHTML)
-
-	// Connect to SMTP server with TLS
-	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
-	addr := fmt.Sprintf("%s:%s", smtpHost, smtpPort)
-
-	log.Printf("📧 Sending email OTP to %s via SMTP %s", s.maskEmail(email), smtpHost)
-
-	err := smtp.SendMail(addr, auth, fromEmail, []string{email}, []byte(message))
-	if err != nil {
-		log.Printf("❌ Failed to send email OTP: %v", err)
-		return fmt.Errorf("failed to send email: %w", err)
-	}
-
-	log.Printf("✅ Email OTP sent to %s for daily sales record %s", s.maskEmail(email), recordDateStr)
-	return nil
-}
-
-// sendSMSOTP sends OTP via SMS using confirmsms.in API
-// Uses the same DLT-registered template as auth service for consistency
-func (s *DailySalesService) sendSMSOTP(mobile, otp string, recordDate time.Time) error {
-	// SMS API credentials (same as auth service)
-	apiKey := "6555d5f6c02a1"
-	sender := "DRDANG"
-
-	// Remove '+' from mobile number for API
-	phoneNumber := strings.TrimPrefix(mobile, "+")
-	recordDateStr := recordDate.Format("02-Jan-2006")
-
-	// Use DLT-registered template format (same as auth service)
-	// This template is pre-approved and must be used exactly
-	messageText := fmt.Sprintf("Dear User,%%0A%s is your one time password (OTP). Please enter the OTP to proceed.%%0AThank you.%%0ADr. Dangs Lab", otp)
-
-	// Build API URL (HTTPS with verified working endpoint)
-	apiURL := fmt.Sprintf("https://fast.confirmsms.in/api/push.json?apikey=%s&sender=%s&mobileno=%s&text=%s",
-		apiKey, sender, phoneNumber, messageText)
-
-	// Log for debugging (mask OTP)
-	maskedURL := strings.Replace(apiURL, otp, "******", 1)
-	log.Printf("📤 SMS API Request for revert (record: %s): %s", recordDateStr, maskedURL)
-
-	// Create HTTP client with SSL verification disabled
-	// (certificate mismatch: cert is for mysmsapp.in but domain is fast.confirmsms.in)
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{Transport: tr, Timeout: 10 * time.Second}
-
-	resp, err := client.Get(apiURL)
-	if err != nil {
-		return fmt.Errorf("failed to send SMS: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read SMS response: %w", err)
-	}
-
-	// Log response for debugging
-	log.Printf("📥 SMS API Response for %s: %s", s.maskPhone(mobile), string(body))
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("failed to parse SMS response: %w", err)
-	}
-
-	// Check for success status in response
-	if status, ok := result["status"].(string); ok && status == "success" {
-		// Extract batch ID if available
-		if desc, ok := result["description"].(map[string]interface{}); ok {
-			if batchID, ok := desc["batchid"].(string); ok {
-				log.Printf("✅ SMS OTP sent to %s for revert! Batch ID: %s", s.maskPhone(mobile), batchID)
-			}
-		}
-		return nil
-	}
-
-	// Legacy check for request_id (backward compatibility)
-	if requestID, ok := result["request_id"]; ok {
-		log.Printf("✅ SMS OTP sent to %s for revert! Request ID: %v", s.maskPhone(mobile), requestID)
-		return nil
-	}
-
-	return fmt.Errorf("SMS API did not return success: %s", string(body))
-}
-
-// RequestDailySalesRevertOTP sends dual OTPs (email and phone) for daily sales revert verification
-func (s *DailySalesService) RequestDailySalesRevertOTP(ctx context.Context, recordID, tenantID, userID uuid.UUID) (*DailySalesRevertOTPResponse, error) {
-	// Verify record exists and is approved
-	var record models.DailySalesRecord
-	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).First(&record).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("daily sales record not found")
-		}
-		return nil, fmt.Errorf("failed to find daily sales record: %w", err)
-	}
-
-	if record.Status != models.StatusApproved {
-		return nil, fmt.Errorf("only approved records can be reverted, current status: %s", record.Status)
-	}
-
-	// Get admin user details for sending OTPs
-	var user models.User
-	err = s.db.Where("id = ?", userID).First(&user).Error
-	if err != nil {
-		return nil, fmt.Errorf("failed to find user: %w", err)
-	}
-
-	if user.Email == "" && user.Phone == "" {
-		return nil, errors.New("user has no email or phone configured for OTP verification")
-	}
-
-	// Generate TWO DIFFERENT OTPs for security
-	emailOTP := s.generateSecureOTP()
-	phoneOTP := s.generateSecureOTP()
-
-	// Ensure they are different
-	for phoneOTP == emailOTP {
-		phoneOTP = s.generateSecureOTP()
-	}
-
-	// Hash OTPs before storing
-	hashedEmailOTP := s.hashOTP(emailOTP)
-	hashedPhoneOTP := s.hashOTP(phoneOTP)
-
-	// Store OTPs in Redis with record_id as key (10 minute expiry)
-	otpData := map[string]interface{}{
-		"record_id":         recordID.String(),
-		"tenant_id":         tenantID.String(),
-		"user_id":           userID.String(),
-		"hashed_email_otp":  hashedEmailOTP,
-		"hashed_phone_otp":  hashedPhoneOTP,
-		"email":             user.Email,
-		"phone":             user.Phone,
-		"record_date":       record.RecordDate.Format(time.RFC3339),
-		"created_at":        time.Now().Unix(),
-		"attempts":          0,
-		"max_attempts":      3,
-	}
-
-	expiryDuration := 10 * time.Minute
-	otpKey := fmt.Sprintf("daily_sales_revert_otp:%s:%s", tenantID.String(), recordID.String())
-
-	if err := s.cache.Set(ctx, otpKey, otpData, expiryDuration); err != nil {
-		return nil, fmt.Errorf("failed to store OTP: %w", err)
-	}
-
-	// Send OTPs asynchronously
-	emailSent := false
-	phoneSent := false
-
-	if user.Email != "" {
-		go func() {
-			if err := s.sendEmailOTP(context.Background(), user.Email, emailOTP, user.FirstName, record.RecordDate); err != nil {
-				log.Printf("Failed to send email OTP: %v", err)
-			}
-		}()
-		emailSent = true
-	}
-
-	if user.Phone != "" {
-		go func() {
-			if err := s.sendSMSOTP(user.Phone, phoneOTP, record.RecordDate); err != nil {
-				log.Printf("Failed to send SMS OTP: %v", err)
-			}
-		}()
-		phoneSent = true
-	}
-
-	return &DailySalesRevertOTPResponse{
-		Message:   fmt.Sprintf("OTPs sent to %s and %s", s.maskEmail(user.Email), s.maskPhone(user.Phone)),
-		RecordID:  recordID,
-		EmailSent: emailSent,
-		PhoneSent: phoneSent,
-		ExpiresAt: time.Now().Add(expiryDuration),
-	}, nil
-}
-
-// RevertDailySalesRecordWithOTP reverts an approved daily sales record after verifying dual OTPs
-func (s *DailySalesService) RevertDailySalesRecordWithOTP(ctx context.Context, recordID, tenantID, revertedByID uuid.UUID, req DailySalesRevertWithOTPRequest) (*DailySalesRecordResponse, error) {
-	// Retrieve OTP data from Redis
-	otpKey := fmt.Sprintf("daily_sales_revert_otp:%s:%s", tenantID.String(), recordID.String())
-	var otpData map[string]interface{}
-	err := s.cache.Get(ctx, otpKey, &otpData)
-	if err != nil {
-		return nil, errors.New("OTP expired or not requested. Please request new OTPs first")
-	}
-
-	// Verify user is the one who requested OTP
-	if storedUserID, ok := otpData["user_id"].(string); ok {
-		if storedUserID != revertedByID.String() {
-			return nil, errors.New("OTP was requested by a different user")
-		}
-	}
-
-	// Check attempt limit
-	attempts, _ := otpData["attempts"].(float64)
-	maxAttempts, _ := otpData["max_attempts"].(float64)
-	if attempts >= maxAttempts {
-		s.cache.Delete(ctx, otpKey)
-		return nil, errors.New("maximum OTP verification attempts exceeded. Please request new OTPs")
-	}
-
-	// Verify BOTH OTPs
-	hashedEmailOTP, _ := otpData["hashed_email_otp"].(string)
-	hashedPhoneOTP, _ := otpData["hashed_phone_otp"].(string)
-
-	emailValid := s.verifyOTPHash(req.EmailOTP, hashedEmailOTP)
-	phoneValid := s.verifyOTPHash(req.PhoneOTP, hashedPhoneOTP)
-
-	if !emailValid || !phoneValid {
-		// Increment attempts
-		otpData["attempts"] = attempts + 1
-		s.cache.Set(ctx, otpKey, otpData, 10*time.Minute)
-
-		if !emailValid && !phoneValid {
-			return nil, errors.New("both email and phone OTPs are invalid")
-		} else if !emailValid {
-			return nil, errors.New("email OTP is invalid")
-		} else {
-			return nil, errors.New("phone OTP is invalid")
-		}
-	}
-
-	// Both OTPs verified - delete OTP data
-	s.cache.Delete(ctx, otpKey)
-
-	// Proceed with daily sales record revert
-	return s.RevertDailySalesRecord(ctx, recordID, tenantID, revertedByID, req.Reason)
-}
-
-// RevertDailySalesRecord reverts an approved daily sales record and restores stock to inventory
-// This is an admin-only operation that can only be performed on approved records
-func (s *DailySalesService) RevertDailySalesRecord(ctx context.Context, recordID, tenantID, revertedByID uuid.UUID, reason string) (*DailySalesRecordResponse, error) {
-	var record models.DailySalesRecord
-
-	err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
-		Preload("Items").
-		First(&record).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("daily sales record not found")
-		}
-		return nil, fmt.Errorf("failed to find daily sales record: %w", err)
-	}
-
-	// Only approved records can be reverted
-	if record.Status != models.StatusApproved {
-		return nil, errors.New("only approved records can be reverted")
-	}
-
-	// Start transaction for atomic operation
-	err = s.db.DB.Transaction(func(tx *gorm.DB) error {
-		// Update record status to reverted
-		now := time.Now()
-		updates := map[string]interface{}{
-			"status":          models.StatusReverted,
-			"reverted_at":     now,
-			"reverted_by_id":  revertedByID,
-			"revert_reason":   reason,
-		}
-
-		if err := tx.Model(&record).Updates(updates).Error; err != nil {
-			return fmt.Errorf("failed to update record status: %w", err)
-		}
-
-		// Restore stock for each item
-		for _, item := range record.Items {
-			// Find stock record for this product in this shop
-			var stock models.Stock
-			err := tx.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
-				record.ShopID, item.ProductID, tenantID).First(&stock).Error
-
-			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					// Create new stock record with restored quantity
-					stock = models.Stock{
-						TenantModel:       models.TenantModel{TenantID: &tenantID},
-						ShopID:            record.ShopID,
-						ProductID:         item.ProductID,
-						Quantity:          item.Quantity,
-						AvailableQuantity: item.Quantity,
-					}
-					if err := tx.Create(&stock).Error; err != nil {
-						return fmt.Errorf("failed to create stock record: %w", err)
-					}
-				} else {
-					return fmt.Errorf("failed to find stock: %w", err)
+// UpdateCashBalance updates cash holding and creates audit trail
+func (a *CashServiceAdapter) UpdateCashBalance(
+	ctx context.Context,
+	userID, shopID, tenantID uuid.UUID,
+	amount float64,
+	transactionType, description string,
+	relatedEntityType string,
+	relatedEntityID *uuid.UUID,
+	createdByID uuid.UUID,
+) error {
+	return a.db.Transaction(func(tx *gorm.DB) error {
+		// Get or create cash holding with proper conflict handling
+		var holding models.CashHolding
+		err := tx.WithContext(ctx).
+			Where("user_id = ? AND shop_id = ? AND tenant_id = ?", userID, shopID, tenantID).
+			First(&holding).Error
+
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// Look up user's role for the cash holding
+				var user models.User
+				userRole := "salesman"
+				if lookupErr := tx.WithContext(ctx).Select("role").Where("id = ?", userID).First(&user).Error; lookupErr == nil {
+					userRole = user.Role
+				}
+
+				// Create new cash holding
+				holding = models.CashHolding{
+					TenantModel: models.TenantModel{
+						TenantID: &tenantID,
+					},
+					UserID:         userID,
+					ShopID:         &shopID,
+					Role:           userRole,
+					CurrentBalance: 0,
+					LastUpdatedAt:  time.Now(),
+				}
+
+				if err = tx.WithContext(ctx).Create(&holding).Error; err != nil {
+					return fmt.Errorf("failed to create cash holding: %w", err)
 				}
 			} else {
-				// Update existing stock - add back the quantity
-				previousQuantity := stock.Quantity
-				newQuantity := stock.Quantity + item.Quantity
-				newAvailable := newQuantity - stock.ReservedQuantity - stock.DamagedQuantity
-
-				stockUpdates := map[string]interface{}{
-					"quantity":           newQuantity,
-					"available_quantity": newAvailable,
-				}
-				if err := tx.Model(&stock).Updates(stockUpdates).Error; err != nil {
-					return fmt.Errorf("failed to restore stock: %w", err)
-				}
-
-				// Create stock history for audit trail
-				stockHistory := models.StockHistory{
-					TenantModel:      models.TenantModel{TenantID: &tenantID},
-					StockID:          stock.ID,
-					MovementType:     "daily_sale_reverted",
-					Quantity:         item.Quantity,
-					PreviousQuantity: previousQuantity,
-					NewQuantity:      newQuantity,
-					UnitCost:         item.UnitPrice,
-					TotalCost:        item.TotalAmount,
-					Reference:        fmt.Sprintf("Daily Sales Record %s (Reverted)", record.ID),
-					ReferenceID:      &record.ID,
-					CreatedByID:      revertedByID,
-					Notes:            fmt.Sprintf("Stock restored from reverted daily sales by user %s. Reason: %s", revertedByID.String(), reason),
-				}
-
-				if err := tx.Create(&stockHistory).Error; err != nil {
-					log.Printf("Warning: Failed to create stock history: %v", err)
-				}
+				return fmt.Errorf("failed to get cash holding: %w", err)
 			}
-
-			log.Printf("📦 [DailySales] Stock restored for product %s: +%d (reverted)",
-				item.ProductID, item.Quantity)
 		}
 
-		log.Printf("✅ [DailySales] Daily Sales Record %s reverted by admin %s. Reason: %s. Stock restored for %d items.",
-			record.ID, revertedByID, reason, len(record.Items))
+		previousBalance := holding.CurrentBalance
+		newBalance := previousBalance + amount
+
+		if newBalance < 0 {
+			return errors.New("insufficient cash balance")
+		}
+
+		// Update balance
+		holding.CurrentBalance = newBalance
+		holding.LastUpdatedAt = time.Now()
+		if err := tx.Save(&holding).Error; err != nil {
+			return fmt.Errorf("failed to update cash balance: %w", err)
+		}
+
+		// Create audit trail
+		transaction := &models.CashTransaction{
+			TenantModel: models.TenantModel{
+				TenantID: &tenantID,
+			},
+			UserID:            userID,
+			ShopID:            &shopID,
+			TransactionType:   transactionType,
+			Amount:            amount,
+			PreviousBalance:   previousBalance,
+			NewBalance:        newBalance,
+			RelatedEntityType: relatedEntityType,
+			RelatedEntityID:   relatedEntityID,
+			Description:       description,
+			TransactionDate:   time.Now(),
+			CreatedByID:       createdByID,
+		}
+
+		if err := tx.Create(transaction).Error; err != nil {
+			return fmt.Errorf("failed to create cash transaction: %w", err)
+		}
 
 		return nil
 	})
+}
 
+// HealthCheck validates database connectivity for health endpoint
+func (s *DailySalesService) HealthCheck(ctx context.Context) error {
+	if s.db == nil {
+		return errors.New("database not initialized")
+	}
+
+	// Use GORM's built-in SQL ping with context
+	sqlDB, err := s.db.DB.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get database connection: %w", err)
+	}
+
+	// Ping with timeout from context
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("database ping failed: %w", err)
+	}
+
+	return nil
+}
+
+// ReapplyDailySalesRecord re-applies an approved daily-sale record's stock
+// effects within 7 days of approval. SETS each product's stock to the
+// item's recorded closing_stock (the value stock SHOULD have right after
+// this sale was applied), so any drift since approval — manual edit, an
+// older sale being rejected after a fresh stock setup, etc — is undone.
+//
+// Idempotent: if stock already equals closing_stock, the row is a no-op.
+// Audited as movement_type='daily_sale_reapply'. Returns 410-style error
+// past the 7-day window so the user runs a fresh sale entry instead.
+func (s *DailySalesService) ReapplyDailySalesRecord(ctx context.Context, recordID, tenantID, reappliedByID uuid.UUID) (*DailySalesRecordResponse, error) {
+	var record models.DailySalesRecord
+	if err := s.db.Where("id = ? AND tenant_id = ?", recordID, tenantID).
+		Preload("Items", func(db *gorm.DB) *gorm.DB {
+			return db.Order("position ASC").Order("unit_price ASC")
+		}).
+		Preload("Items.Product").First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("daily sales record not found")
+		}
+		return nil, fmt.Errorf("failed to find daily sales record: %w", err)
+	}
+	if record.Status != models.StatusApproved {
+		return nil, fmt.Errorf("only approved records can be reapplied (record is %s)", record.Status)
+	}
+	if record.ApprovedAt == nil {
+		return nil, errors.New("record has no approval timestamp")
+	}
+	if time.Since(*record.ApprovedAt) > 7*24*time.Hour {
+		return nil, errors.New("reapply window expired — this sale was approved more than 7 days ago. Create a fresh adjustment instead")
+	}
+
+	applied := 0
+	skipped := 0
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		for _, item := range record.Items {
+			// closing_stock captured at apply/approve time IS the canonical
+			// "what stock should be after this sale" value. SET stock to it
+			// so any drift since is undone.
+			target := item.ClosingStock
+			if target < 0 {
+				skipped++
+				continue
+			}
+
+			var stock models.Stock
+			stockErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("shop_id = ? AND product_id = ? AND tenant_id = ?", record.ShopID, item.ProductID, tenantID).
+				First(&stock).Error
+			if stockErr != nil {
+				if errors.Is(stockErr, gorm.ErrRecordNotFound) {
+					log.Printf("⚠️ [DailySales] reapply: stock missing for product %s — skipping", item.ProductID)
+					skipped++
+					continue
+				}
+				return fmt.Errorf("failed to get stock for reapply: %w", stockErr)
+			}
+
+			if stock.Quantity == target {
+				continue // already at target, no-op
+			}
+			if target < stock.ReservedQuantity {
+				log.Printf("⚠️ [DailySales] reapply: product %s target %d < reserved %d, skipping", item.ProductID, target, stock.ReservedQuantity)
+				skipped++
+				continue
+			}
+
+			previousQty := stock.Quantity
+			if err := tx.Model(&stock).Update("quantity", target).Error; err != nil {
+				return fmt.Errorf("failed to reapply stock for product %s: %w", item.ProductID, err)
+			}
+
+			productName := fmt.Sprintf("%s", item.ProductID)
+			if item.Product != nil {
+				productName = item.Product.Name
+			}
+			shopRef, prodRef := stock.ShopID, stock.ProductID
+			audit := models.StockHistory{
+				TenantModel:      models.TenantModel{TenantID: &tenantID},
+				StockID:          stock.ID,
+				ShopID:           &shopRef,
+				ProductID:        &prodRef,
+				MovementType:     "daily_sale_reapply",
+				Quantity:         target - previousQty,
+				PreviousQuantity: previousQty,
+				NewQuantity:      target,
+				UnitCost:         item.UnitPrice,
+				TotalCost:        item.TotalAmount,
+				Reference:        fmt.Sprintf("Daily Sales Record %s reapplied", record.ID),
+				ReferenceID:      &record.ID,
+				CreatedByID:      reappliedByID,
+				Notes:            fmt.Sprintf("Reapplied to closing_stock=%d for %s (within 7-day window of approval %s)", target, productName, record.ApprovedAt.Format(time.RFC3339)),
+			}
+			if hErr := tx.Create(&audit).Error; hErr != nil {
+				log.Printf("Warning: failed to create stock_history for reapply: %v", hErr)
+			}
+			applied++
+			log.Printf("🔁 [DailySales] reapply: product %s stock %d → %d (record=%s)", productName, previousQty, target, record.ID)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Clear cache
 	s.clearDailySalesCache(ctx, tenantID, record.ShopID)
+	log.Printf("🔁 [DailySales] reapply complete — record=%s applied=%d skipped=%d total=%d", record.ID, applied, skipped, len(record.Items))
 
-	// Return updated record
 	return s.GetDailySalesRecordByID(ctx, recordID, tenantID)
+}
+
+// CacheHealthCheck validates Redis cache connectivity for health endpoint
+func (s *DailySalesService) CacheHealthCheck(ctx context.Context) error {
+	if s.cache == nil {
+		return errors.New("cache not initialized")
+	}
+
+	// Try a simple ping operation
+	if err := s.cache.Ping(ctx); err != nil {
+		return fmt.Errorf("cache ping failed: %w", err)
+	}
+
+	return nil
+}
+
+// ItemPosition is a single (item, new-position) pair in a bulk reorder.
+type ItemPosition struct {
+	ID       uuid.UUID
+	Position int
+}
+
+// ReorderItems bulk-updates daily_sales_items.position for a single record.
+// All updates run inside one transaction so the order change is atomic and
+// list endpoints never read a partial reorder. Tenant-scoped: rejects items
+// that belong to other tenants or to a different record.
+//
+// v1.0.149.
+func (s *DailySalesService) ReorderItems(ctx context.Context, recordID, tenantID uuid.UUID, pairs []ItemPosition) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Verify the record belongs to this tenant before any write.
+		var owned int64
+		if err := tx.Model(&models.DailySalesRecord{}).
+			Where("id = ? AND tenant_id = ?", recordID, tenantID).
+			Count(&owned).Error; err != nil {
+			return fmt.Errorf("verify record: %w", err)
+		}
+		if owned == 0 {
+			return fmt.Errorf("record not found")
+		}
+		for _, p := range pairs {
+			res := tx.Model(&models.DailySalesItem{}).
+				Where("id = ? AND daily_sales_record_id = ? AND tenant_id = ?", p.ID, recordID, tenantID).
+				Update("position", p.Position)
+			if res.Error != nil {
+				return fmt.Errorf("update item %s: %w", p.ID, res.Error)
+			}
+		}
+		return nil
+	})
+}
+
+// HealApproveCorruptionResult is the structured return for the
+// /admin/heal-approve-corruption endpoint.
+//
+// v1.0.162.
+type HealApproveCorruptionResult struct {
+	DryRun         bool                       `json:"dry_run"`
+	RecordsScanned int                        `json:"records_scanned"`
+	ItemsScanned   int                        `json:"items_scanned"`
+	ItemsHealed    int                        `json:"items_healed"`
+	HistoriesFixed int                        `json:"histories_fixed"`
+	PerRecord      []HealApproveRecordSummary `json:"per_record"`
+}
+
+type HealApproveRecordSummary struct {
+	RecordID     uuid.UUID `json:"record_id"`
+	RecordDate   string    `json:"record_date"`
+	ItemsScanned int       `json:"items_scanned"`
+	ItemsHealed  int       `json:"items_healed"`
+}
+
+type healPlan struct {
+	itemID       uuid.UUID
+	productID    uuid.UUID
+	stockID      uuid.UUID
+	beforeOpen   int
+	beforeClose  int
+	qtySold      int
+	openExpected int
+	closeExpected int
+}
+
+// HealApproveCorruption walks the stock_histories chain for each shop+product
+// pair on the given records and reconstructs the true pre-sale stock to fix
+// daily_sales_items.opening_stock / closing_stock and stock_histories
+// previous_quantity / new_quantity that were corrupted by the v1.0.133-r4
+// approval-time GORM-mutation bug. Cosmetic-only — stocks.quantity is already
+// correct. v1.0.162.
+func (s *DailySalesService) HealApproveCorruption(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	recordIDs []uuid.UUID,
+	dryRun bool,
+) (*HealApproveCorruptionResult, error) {
+	if len(recordIDs) == 0 {
+		return nil, errors.New("record_ids required")
+	}
+	if len(recordIDs) > 200 {
+		return nil, errors.New("too many records (max 200 per call)")
+	}
+	out := &HealApproveCorruptionResult{DryRun: dryRun, PerRecord: []HealApproveRecordSummary{}}
+
+	for _, recordID := range recordIDs {
+		var record models.DailySalesRecord
+		if err := s.db.Preload("Items").
+			Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", recordID, tenantID).
+			First(&record).Error; err != nil {
+			log.Printf("⚠️ [HealApproveCorruption] record %s skipped: %v", recordID, err)
+			continue
+		}
+		out.RecordsScanned++
+
+		summary := HealApproveRecordSummary{
+			RecordID:   record.ID,
+			RecordDate: record.RecordDate.Format("2006-01-02"),
+		}
+		var plans []healPlan
+
+		for _, it := range record.Items {
+			out.ItemsScanned++
+			summary.ItemsScanned++
+			// Only heal rows where opening==closing AND something was sold.
+			// Otherwise it's a legitimate zero-qty row.
+			if it.OpeningStock != it.ClosingStock || it.Quantity == 0 {
+				continue
+			}
+			// Reconstruct true opening from stock_histories deltas. Walk every
+			// history row for this (shop, product) ordered by created_at, sum
+			// the `quantity` deltas BEFORE this record's deduction event, and
+			// add back current stocks.quantity. The `quantity` column is
+			// reliable (the column-mutation bug only affected prev/new).
+			var stock models.Stock
+			if err := s.db.Where("shop_id = ? AND product_id = ? AND tenant_id = ?",
+				record.ShopID, it.ProductID, tenantID).First(&stock).Error; err != nil {
+				log.Printf("⚠️ [HealApproveCorruption] stock not found for product %s: %v", it.ProductID, err)
+				continue
+			}
+			// Sum deltas of all histories CREATED AFTER this record's deduction
+			// (so that "rewinding" them lands us at the open value).
+			var deltasAfter int64
+			s.db.Table("stock_histories").
+				Where("stock_id = ? AND tenant_id = ? AND deleted_at IS NULL", stock.ID, tenantID).
+				Where("reference_id = ? OR created_at > (SELECT MAX(created_at) FROM stock_histories WHERE reference_id = ? AND stock_id = ?)",
+					record.ID, record.ID, stock.ID).
+				Select("COALESCE(SUM(quantity), 0)").
+				Row().Scan(&deltasAfter)
+			// Open = current stock - deltasAfter (deltasAfter is negative for
+			// sales, positive for purchases). Equivalent to "what was the stock
+			// just before this record's deduction landed".
+			beforeOpen := stock.Quantity - int(deltasAfter)
+			closeExpected := beforeOpen - it.Quantity
+			if closeExpected < 0 {
+				closeExpected = 0
+			}
+			// If reconstructed open equals current closing (i.e. nothing to
+			// fix), skip.
+			if beforeOpen == it.OpeningStock && closeExpected == it.ClosingStock {
+				continue
+			}
+			plans = append(plans, healPlan{
+				itemID:        it.ID,
+				productID:     it.ProductID,
+				stockID:       stock.ID,
+				beforeOpen:    it.OpeningStock,
+				beforeClose:   it.ClosingStock,
+				qtySold:       it.Quantity,
+				openExpected:  beforeOpen,
+				closeExpected: closeExpected,
+			})
+		}
+
+		if dryRun {
+			summary.ItemsHealed = len(plans)
+			out.ItemsHealed += len(plans)
+			out.PerRecord = append(out.PerRecord, summary)
+			continue
+		}
+
+		// Live: one transaction per record so a partial failure leaves the
+		// record untouched.
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			for _, p := range plans {
+				if err := tx.Model(&models.DailySalesItem{}).
+					Where("id = ? AND tenant_id = ?", p.itemID, tenantID).
+					Updates(map[string]interface{}{
+						"opening_stock": p.openExpected,
+						"closing_stock": p.closeExpected,
+					}).Error; err != nil {
+					return fmt.Errorf("heal item %s: %w", p.itemID, err)
+				}
+				summary.ItemsHealed++
+				out.ItemsHealed++
+
+				// Patch the matching stock_history row(s) for this record+stock.
+				if err := tx.Model(&models.StockHistory{}).
+					Where("reference_id = ? AND stock_id = ? AND tenant_id = ? AND quantity = ?",
+						record.ID, p.stockID, tenantID, -p.qtySold).
+					Updates(map[string]interface{}{
+						"previous_quantity": p.openExpected,
+						"new_quantity":      p.closeExpected,
+					}).Error; err != nil {
+					log.Printf("⚠️ [HealApproveCorruption] history patch failed for record %s product %s: %v", record.ID, p.productID, err)
+				} else {
+					out.HistoriesFixed++
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("⚠️ [HealApproveCorruption] record %s heal aborted: %v", record.ID, err)
+		}
+
+		out.PerRecord = append(out.PerRecord, summary)
+	}
+
+	log.Printf("🩺 [HealApproveCorruption] tenant=%s records=%d items_scanned=%d items_healed=%d histories_fixed=%d dry_run=%v",
+		tenantID, out.RecordsScanned, out.ItemsScanned, out.ItemsHealed, out.HistoriesFixed, dryRun)
+	return out, nil
+}
+
+// driftReconcileSalesAware gates the v1.0.336 sales-aware opening-drift
+// reconcile (see decideDriftReconcile). Default ON. Set
+// SMART_SALE_DRIFT_RECONCILE_SALES_AWARE=0 to revert to the legacy behavior
+// that snapped live stock fully UP to the operator-vouched opening before
+// deducting (the source of the Mahua Khera batch-approval cancellation bug).
+func driftReconcileSalesAware() bool {
+	return os.Getenv("SMART_SALE_DRIFT_RECONCILE_SALES_AWARE") != "0"
+}
+
+// decideDriftReconcile decides, at approve time, how to handle the gap between
+// the operator-vouched opening (vouchedOpening) and the current live balance
+// (liveBefore) for one product, given salesSince = the total units already sold
+// for this product (Σ|daily_sale|) AFTER this record was submitted.
+//
+// It returns:
+//   - illegitGap: the signed quantity to record as an opening_drift_reconcile
+//     ledger row (0 means write no reconcile row), and
+//   - deductBasis: the balance the sale should be deducted FROM.
+//
+// Rationale — the legacy reconcile (v1.0.329, FM Tower record 2bc7c3c0) assumed
+// ANY drift below the vouched opening was an illegitimate non-sale clobber and
+// snapped live UP to the vouched opening. That is WRONG when a backlog of
+// records is batch-approved: every record carries the SAME submit-time opening,
+// so snapping up to it cancels the PRIOR record's legitimate daily_sale (Mahua
+// Khera 2026-06-02: 60 products, 1035 bottles overstated). The fix decomposes
+// the gap — the portion explained by sales recorded after this record was
+// submitted is LEGITIMATE (the lower balance is correct) and is left intact;
+// only the residual non-sale drift is reconciled.
+//
+// salesAware=false reproduces the legacy full-snap behavior exactly, so the
+// SMART_SALE_DRIFT_RECONCILE_SALES_AWARE kill-switch is a true revert.
+func decideDriftReconcile(vouchedOpening, liveBefore, salesSince int, salesAware bool) (illegitGap, deductBasis int) {
+	// Guard not met (no vouched opening, or no drift) → deduct from live, no row.
+	if vouchedOpening <= 0 || vouchedOpening == liveBefore {
+		return 0, liveBefore
+	}
+	gap := vouchedOpening - liveBefore
+	if !salesAware {
+		// Legacy: snap fully to the vouched opening.
+		return gap, vouchedOpening
+	}
+	// Sales-aware: only the non-sale-attributable residual is illegitimate.
+	raw := gap - salesSince
+	if raw > 0 {
+		return raw, liveBefore + raw
+	}
+	// Gap fully explained by intervening sales (or live is higher, e.g. an
+	// intervening purchase) → live is authoritative; deduct from it, no row.
+	return 0, liveBefore
 }

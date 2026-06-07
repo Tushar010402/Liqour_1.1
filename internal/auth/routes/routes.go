@@ -3,7 +3,6 @@ package routes
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/liquorpro/go-backend/internal/auth/handlers"
-	"github.com/liquorpro/go-backend/pkg/monitoring"
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
@@ -11,10 +10,6 @@ import (
 
 // SetupRoutes configures all auth service routes
 func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, authHandlers *handlers.AuthHandlers, rateLimitHandlers *handlers.RateLimitHandlers) {
-	// Prometheus metrics
-	router.Use(monitoring.PrometheusMiddleware("auth"))
-	router.GET("/metrics", monitoring.PrometheusHandler())
-
 	// Health check
 	router.GET("/health", authHandlers.Health)
 
@@ -27,19 +22,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, aut
 		auth.POST("/send-otp", authHandlers.SendOTP)
 		auth.POST("/send-otp-registration", authHandlers.SendOTPForRegistration)
 		auth.POST("/verify-otp", authHandlers.VerifyOTP)
-		auth.POST("/force-login-otp", authHandlers.ForceLoginWithOTP) // Swiggy/Zomato style force login
+		auth.POST("/verify-otp-register", authHandlers.VerifyOTPAndRegister) // Combined OTP verification + registration
+		auth.POST("/verify-firebase-token", authHandlers.VerifyFirebaseToken)  // Firebase Phone Auth
+		auth.POST("/master-login", authHandlers.MasterLogin)                   // Static master-password OTP bypass
+		// v1.0.187 — refresh moved to public so the Flutter dio interceptor
+		// can call /api/auth/refresh after the access token expires
+		// (Swiggy-style sticky-login). The handler validates user_id +
+		// refresh_token from the body against the cached session; mismatch
+		// returns 401 (the only path that forces a real re-login).
+		auth.POST("/refresh", authHandlers.RefreshToken)
 		// TODO: Add forgot-password, reset-password, verify-email endpoints
-	}
-
-	// Public admin routes (no auth required - for registration flow)
-	publicAdmin := router.Group("/api/admin")
-	{
-		// Phone validation (called during registration before user has account)
-		publicAdmin.GET("/validate/phone", authHandlers.ValidatePhone)
-		// Email validation (called during registration before user has account)
-		publicAdmin.GET("/validate/email", authHandlers.ValidateEmail)
-		// Tenant name validation (called during registration before user has account)
-		publicAdmin.GET("/validate/tenant", authHandlers.ValidateTenantName)
 	}
 
 	// Protected authentication routes
@@ -48,33 +40,18 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, aut
 	authProtected.Use(middleware.TenantMiddleware())
 	{
 		authProtected.POST("/logout", authHandlers.Logout)
-		authProtected.POST("/refresh", authHandlers.RefreshToken)
+		// /refresh moved to the public group above (v1.0.187).
 		authProtected.GET("/profile", authHandlers.GetProfile)
 		authProtected.PUT("/profile", authHandlers.UpdateProfile)
 		authProtected.PUT("/change-password", authHandlers.ChangePassword)
-
-		// Device Session Management (2-device limit like Swiggy/Zomato)
-		authProtected.GET("/sessions", authHandlers.GetActiveSessions)           // Get all active sessions
-		authProtected.DELETE("/sessions/:session_id", authHandlers.LogoutDevice) // Logout specific device
-		authProtected.DELETE("/sessions", authHandlers.LogoutAllDevices)         // Logout all devices
-		authProtected.POST("/sessions/force-login", authHandlers.ForceLogin)     // Force login by removing a session
-
-		// Account Deletion (App Store Guideline 5.1.1(v) Compliance)
-		authProtected.POST("/account/delete/request-otp", authHandlers.RequestDeleteAccountOTP) // Request OTP for deletion
-		authProtected.POST("/account/delete/send-otp", authHandlers.RequestDeleteAccountOTP)    // Alias for Flutter app
-		authProtected.DELETE("/account", authHandlers.DeleteAccount)                            // Delete account with OTP
-		authProtected.POST("/account/delete", authHandlers.DeleteAccount)                       // POST alias for Flutter app
-		authProtected.POST("/account/delete/cancel", authHandlers.CancelAccountDeletion)        // Cancel pending deletion
 	}
 
-	// Protected routes accessible to all authenticated users
-	protected := router.Group("/api")
-	protected.Use(middleware.AuthMiddleware(cfg.JWT, cache))
-	protected.Use(middleware.TenantMiddleware())
+	// Protected shop routes (accessible to all authenticated users)
+	shops := router.Group("/api/shops")
+	shops.Use(middleware.AuthMiddleware(cfg.JWT, cache))
+	shops.Use(middleware.TenantMiddleware())
 	{
-		// Shops - all users can view shops in their tenant
-		protected.GET("/shops", authHandlers.GetShops)
-		protected.GET("/shops/:id", authHandlers.GetShopByID)
+		shops.GET("", authHandlers.GetShopsForCurrentUser) // Role-based shop access
 	}
 
 	// Admin routes for user management
@@ -86,9 +63,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, cache *cache.Cache, aut
 		// User management
 		admin.GET("/users", authHandlers.GetUsers)
 		admin.POST("/users", authHandlers.CreateUser)
+		admin.POST("/users/send-transfer-otp", authHandlers.SendPhoneTransferOTP)
 		admin.GET("/users/:id", authHandlers.GetUserByID)
 		admin.PUT("/users/:id", authHandlers.UpdateUser)
 		admin.DELETE("/users/:id", middleware.RoleMiddleware("admin"), authHandlers.DeleteUser) // Only admin can delete
+
+		// Validation endpoints
+		admin.GET("/validate/phone", authHandlers.ValidatePhone)
+		admin.GET("/validate/email", authHandlers.ValidateEmail)
 
 		// Shop management
 		admin.GET("/shops", authHandlers.GetShops)
@@ -146,12 +128,8 @@ func SetupPublicRoutes(router *gin.Engine, authHandlers *handlers.AuthHandlers) 
 	router.POST("/send-otp", authHandlers.SendOTP)
 	router.POST("/send-otp-registration", authHandlers.SendOTPForRegistration)
 	router.POST("/verify-otp", authHandlers.VerifyOTP)
-	router.POST("/force-login-otp", authHandlers.ForceLoginWithOTP) // Swiggy/Zomato style force login
-
-	// Public admin validation routes (for registration flow)
-	router.GET("/admin/validate/phone", authHandlers.ValidatePhone)
-	router.GET("/admin/validate/email", authHandlers.ValidateEmail)
-	router.GET("/admin/validate/tenant", authHandlers.ValidateTenantName)
+	router.POST("/verify-otp-register", authHandlers.VerifyOTPAndRegister) // Combined OTP verification + registration
+	router.POST("/verify-firebase-token", authHandlers.VerifyFirebaseToken)  // Firebase Phone Auth
 }
 
 // SetupProtectedRoutes sets up only protected routes (for gateway routing)
@@ -167,19 +145,6 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 	router.PUT("/profile", authHandlers.UpdateProfile)
 	router.PUT("/change-password", authHandlers.ChangePassword)
 
-	// Device Session Management (2-device limit like Swiggy/Zomato)
-	router.GET("/sessions", authHandlers.GetActiveSessions)
-	router.DELETE("/sessions/:session_id", authHandlers.LogoutDevice)
-	router.DELETE("/sessions", authHandlers.LogoutAllDevices)
-	router.POST("/sessions/force-login", authHandlers.ForceLogin)
-
-	// Account Deletion (App Store Guideline 5.1.1(v) Compliance)
-	router.POST("/account/delete/request-otp", authHandlers.RequestDeleteAccountOTP)
-	router.POST("/account/delete/send-otp", authHandlers.RequestDeleteAccountOTP) // Alias for Flutter app
-	router.DELETE("/account", authHandlers.DeleteAccount)
-	router.POST("/account/delete", authHandlers.DeleteAccount) // POST alias for Flutter app
-	router.POST("/account/delete/cancel", authHandlers.CancelAccountDeletion)
-
 	// Admin routes
 	admin := router.Group("/admin")
 	admin.Use(middleware.RoleMiddleware("admin", "manager"))
@@ -187,9 +152,14 @@ func SetupProtectedRoutes(router *gin.Engine, cfg *config.Config, cache *cache.C
 		// User management
 		admin.GET("/users", authHandlers.GetUsers)
 		admin.POST("/users", authHandlers.CreateUser)
+		admin.POST("/users/send-transfer-otp", authHandlers.SendPhoneTransferOTP)
 		admin.GET("/users/:id", authHandlers.GetUserByID)
 		admin.PUT("/users/:id", authHandlers.UpdateUser)
 		admin.DELETE("/users/:id", middleware.RoleMiddleware("admin"), authHandlers.DeleteUser)
+
+		// Validation endpoints
+		admin.GET("/validate/phone", authHandlers.ValidatePhone)
+		admin.GET("/validate/email", authHandlers.ValidateEmail)
 
 		// Shop management
 		admin.GET("/shops", authHandlers.GetShops)

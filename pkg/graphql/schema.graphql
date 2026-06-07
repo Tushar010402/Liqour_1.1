@@ -1,0 +1,513 @@
+# GraphQL Schema for Liquor Management System
+
+scalar Time
+scalar UUID
+scalar JSON
+
+# ==================== Directives ====================
+
+directive @auth(requires: Role = USER) on FIELD_DEFINITION
+directive @tenant on FIELD_DEFINITION
+directive @cache(ttl: Int = 60) on FIELD_DEFINITION
+directive @rateLimit(limit: Int = 100, window: Int = 60) on FIELD_DEFINITION
+
+# ==================== Enums ====================
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  MANAGER
+  SALESMAN
+  USER
+}
+
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentType {
+  CASH
+  CREDIT_CARD
+  DEBIT_CARD
+  UPI
+  WALLET
+}
+
+enum StockAdjustmentReason {
+  PURCHASE
+  SALE
+  RETURN
+  DAMAGE
+  THEFT
+  AUDIT
+  TRANSFER
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  OUT_OF_STOCK
+  DISCONTINUED
+}
+
+# ==================== Input Types ====================
+
+input ProductFilter {
+  categoryID: UUID
+  brandID: UUID
+  shopID: UUID
+  status: ProductStatus
+  minPrice: Float
+  maxPrice: Float
+  search: String
+}
+
+input PaginationInput {
+  limit: Int = 10
+  offset: Int = 0
+  sortBy: String
+  sortOrder: String = "ASC"
+}
+
+input CreateProductInput {
+  name: String!
+  sku: String!
+  brandID: UUID!
+  categoryID: UUID!
+  subcategoryID: UUID
+  price: Float!
+  mrp: Float
+  dutyAmount: Float
+  size: String
+  unit: String
+  alcoholContent: Float
+  description: String
+  metadata: JSON
+}
+
+input UpdateProductInput {
+  id: UUID!
+  name: String
+  price: Float
+  mrp: Float
+  dutyAmount: Float
+  description: String
+  status: ProductStatus
+  metadata: JSON
+}
+
+input CreateSaleInput {
+  shopID: UUID!
+  items: [SaleItemInput!]!
+  customerID: UUID
+  paymentType: PaymentType!
+  discount: Float
+  metadata: JSON
+}
+
+input SaleItemInput {
+  productID: UUID!
+  quantity: Int!
+  price: Float!
+  discount: Float
+}
+
+input StockAdjustmentInput {
+  productID: UUID!
+  shopID: UUID!
+  adjustment: Int!
+  reason: StockAdjustmentReason!
+  reference: String
+  notes: String
+}
+
+input DateRangeInput {
+  startDate: Time!
+  endDate: Time!
+}
+
+# ==================== Object Types ====================
+
+type User {
+  id: UUID!
+  tenantID: UUID!
+  username: String!
+  fullName: String!
+  email: String
+  phone: String!
+  role: Role!
+  shops: [Shop!]! @auth(requires: MANAGER)
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type Shop {
+  id: UUID!
+  tenantID: UUID!
+  name: String!
+  address: String!
+  phone: String
+  email: String
+  licenseNumber: String
+  manager: User
+  staff: [User!]!
+  inventory: [ProductStock!]!
+  sales(filter: DateRangeInput): SalesAnalytics! @cache(ttl: 300)
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type Product {
+  id: UUID!
+  tenantID: UUID!
+  name: String!
+  sku: String!
+  brand: Brand!
+  category: Category!
+  subcategory: Subcategory
+  price: Float!
+  mrp: Float
+  dutyAmount: Float
+  size: String
+  unit: String
+  alcoholContent: Float
+  description: String
+  status: ProductStatus!
+  stock(shopID: UUID): [ProductStock!]!
+  salesHistory(filter: DateRangeInput): [Sale!]!
+  metadata: JSON
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type Brand {
+  id: UUID!
+  name: String!
+  description: String
+  logoURL: String
+  products: [Product!]!
+  totalProducts: Int!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type Category {
+  id: UUID!
+  name: String!
+  description: String
+  subcategories: [Subcategory!]!
+  products: [Product!]!
+  totalProducts: Int!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type Subcategory {
+  id: UUID!
+  categoryID: UUID!
+  name: String!
+  description: String
+  products: [Product!]!
+  totalProducts: Int!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type ProductStock {
+  product: Product!
+  shop: Shop!
+  quantity: Int!
+  reserved: Int!
+  available: Int!
+  minimumLevel: Int!
+  reorderPoint: Int!
+  lastMovement: Time
+  lastAdjustment: Time
+  movements(limit: Int = 10): [StockMovement!]!
+}
+
+type StockMovement {
+  id: UUID!
+  productID: UUID!
+  shopID: UUID!
+  type: String!
+  quantity: Int!
+  balanceBefore: Int!
+  balanceAfter: Int!
+  reason: StockAdjustmentReason!
+  reference: String
+  notes: String
+  performedBy: User!
+  createdAt: Time!
+}
+
+type Sale {
+  id: UUID!
+  tenantID: UUID!
+  shop: Shop!
+  items: [SaleItem!]!
+  customer: Customer
+  subtotal: Float!
+  discount: Float!
+  tax: Float!
+  total: Float!
+  paymentType: PaymentType!
+  status: OrderStatus!
+  invoice: Invoice
+  salesman: User!
+  metadata: JSON
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type SaleItem {
+  product: Product!
+  quantity: Int!
+  price: Float!
+  discount: Float!
+  total: Float!
+}
+
+type Customer {
+  id: UUID!
+  name: String!
+  phone: String
+  email: String
+  address: String
+  purchases: [Sale!]!
+  totalPurchases: Float!
+  loyaltyPoints: Int!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type Invoice {
+  id: UUID!
+  saleID: UUID!
+  invoiceNumber: String!
+  pdfURL: String
+  items: [InvoiceItem!]!
+  subtotal: Float!
+  tax: Float!
+  total: Float!
+  createdAt: Time!
+}
+
+type InvoiceItem {
+  description: String!
+  quantity: Int!
+  unitPrice: Float!
+  total: Float!
+}
+
+# ==================== Analytics Types ====================
+
+type SalesAnalytics {
+  period: DateRangeInput!
+  totalSales: Float!
+  totalQuantity: Int!
+  totalOrders: Int!
+  averageOrderValue: Float!
+  topProducts: [ProductAnalytics!]!
+  salesByDay: [DailySales!]!
+  salesByCategory: [CategorySales!]!
+  salesByPaymentType: [PaymentTypeSales!]!
+}
+
+type ProductAnalytics {
+  product: Product!
+  quantity: Int!
+  revenue: Float!
+  percentage: Float!
+}
+
+type DailySales {
+  date: Time!
+  sales: Float!
+  quantity: Int!
+  orders: Int!
+}
+
+type CategorySales {
+  category: Category!
+  sales: Float!
+  quantity: Int!
+  percentage: Float!
+}
+
+type PaymentTypeSales {
+  paymentType: PaymentType!
+  sales: Float!
+  count: Int!
+  percentage: Float!
+}
+
+type InventoryAnalytics {
+  totalProducts: Int!
+  totalValue: Float!
+  lowStockProducts: [Product!]!
+  outOfStockProducts: [Product!]!
+  topMovingProducts: [ProductAnalytics!]!
+  stockValueByCategory: [CategoryStockValue!]!
+}
+
+type CategoryStockValue {
+  category: Category!
+  totalValue: Float!
+  totalQuantity: Int!
+  productCount: Int!
+}
+
+# ==================== Mutations Response Types ====================
+
+type ProductResponse {
+  success: Boolean!
+  product: Product
+  message: String
+  errors: [String!]
+}
+
+type SaleResponse {
+  success: Boolean!
+  sale: Sale
+  invoice: Invoice
+  message: String
+  errors: [String!]
+}
+
+type StockResponse {
+  success: Boolean!
+  stock: ProductStock
+  message: String
+  errors: [String!]
+}
+
+type BatchResponse {
+  success: Boolean!
+  processed: Int!
+  failed: Int!
+  errors: [String!]
+}
+
+# ==================== Subscriptions Types ====================
+
+type StockUpdate {
+  productID: UUID!
+  shopID: UUID!
+  oldQuantity: Int!
+  newQuantity: Int!
+  adjustment: Int!
+  reason: StockAdjustmentReason!
+  timestamp: Time!
+}
+
+type SaleUpdate {
+  sale: Sale!
+  action: String! # "created", "updated", "cancelled"
+}
+
+type PriceUpdate {
+  product: Product!
+  oldPrice: Float!
+  newPrice: Float!
+  timestamp: Time!
+}
+
+# ==================== Root Types ====================
+
+type Query {
+  # User queries
+  me: User! @auth
+  user(id: UUID!): User @auth(requires: ADMIN)
+  users(filter: JSON, pagination: PaginationInput): [User!]! @auth(requires: ADMIN)
+
+  # Shop queries
+  shop(id: UUID!): Shop @auth @cache(ttl: 300)
+  shops(pagination: PaginationInput): [Shop!]! @auth @cache(ttl: 300)
+  myShops: [Shop!]! @auth @tenant
+
+  # Product queries
+  product(id: UUID!): Product @cache(ttl: 60)
+  products(filter: ProductFilter, pagination: PaginationInput): [Product!]! @cache(ttl: 60)
+  searchProducts(query: String!, limit: Int = 10): [Product!]! @rateLimit(limit: 50)
+
+  # Brand queries
+  brand(id: UUID!): Brand @cache(ttl: 300)
+  brands(pagination: PaginationInput): [Brand!]! @cache(ttl: 300)
+
+  # Category queries
+  category(id: UUID!): Category @cache(ttl: 3600)
+  categories: [Category!]! @cache(ttl: 3600)
+  subcategory(id: UUID!): Subcategory @cache(ttl: 3600)
+
+  # Stock queries
+  stock(productID: UUID!, shopID: UUID!): ProductStock @auth @tenant
+  shopInventory(shopID: UUID!, filter: ProductFilter): [ProductStock!]! @auth @tenant
+  lowStockProducts(shopID: UUID, threshold: Int = 10): [ProductStock!]! @auth @tenant
+
+  # Sales queries
+  sale(id: UUID!): Sale @auth @tenant
+  sales(shopID: UUID, filter: DateRangeInput, pagination: PaginationInput): [Sale!]! @auth @tenant
+  mySales(filter: DateRangeInput, pagination: PaginationInput): [Sale!]! @auth
+
+  # Customer queries
+  customer(id: UUID!): Customer @auth
+  customers(search: String, pagination: PaginationInput): [Customer!]! @auth(requires: MANAGER)
+
+  # Analytics queries
+  salesAnalytics(shopID: UUID, filter: DateRangeInput!): SalesAnalytics! @auth(requires: MANAGER) @cache(ttl: 300)
+  inventoryAnalytics(shopID: UUID): InventoryAnalytics! @auth(requires: MANAGER) @cache(ttl: 300)
+  dashboardStats: JSON! @auth @cache(ttl: 60)
+}
+
+type Mutation {
+  # Product mutations
+  createProduct(input: CreateProductInput!): ProductResponse! @auth(requires: ADMIN)
+  updateProduct(input: UpdateProductInput!): ProductResponse! @auth(requires: MANAGER)
+  deleteProduct(id: UUID!): BatchResponse! @auth(requires: ADMIN)
+  bulkCreateProducts(inputs: [CreateProductInput!]!): BatchResponse! @auth(requires: ADMIN)
+
+  # Stock mutations
+  adjustStock(input: StockAdjustmentInput!): StockResponse! @auth(requires: MANAGER)
+  bulkAdjustStock(inputs: [StockAdjustmentInput!]!): BatchResponse! @auth(requires: MANAGER)
+  transferStock(fromShopID: UUID!, toShopID: UUID!, productID: UUID!, quantity: Int!): StockResponse! @auth(requires: ADMIN)
+
+  # Sales mutations
+  createSale(input: CreateSaleInput!): SaleResponse! @auth
+  updateSale(id: UUID!, input: JSON!): SaleResponse! @auth(requires: MANAGER)
+  cancelSale(id: UUID!, reason: String!): SaleResponse! @auth(requires: MANAGER)
+  procesReturn(saleID: UUID!, items: [UUID!]!, reason: String!): SaleResponse! @auth
+
+  # User mutations
+  updateProfile(input: JSON!): User! @auth
+  changePassword(oldPassword: String!, newPassword: String!): Boolean! @auth
+
+  # Admin mutations
+  createUser(input: JSON!): User! @auth(requires: ADMIN)
+  updateUser(id: UUID!, input: JSON!): User! @auth(requires: ADMIN)
+  deleteUser(id: UUID!): Boolean! @auth(requires: ADMIN)
+
+  # Cache management
+  clearCache(pattern: String): Boolean! @auth(requires: ADMIN)
+}
+
+type Subscription {
+  # Stock subscriptions
+  stockUpdated(productID: UUID, shopID: UUID): StockUpdate! @auth @tenant
+  lowStockAlert(shopID: UUID!, threshold: Int = 10): ProductStock! @auth @tenant
+
+  # Sales subscriptions
+  saleCreated(shopID: UUID): SaleUpdate! @auth @tenant
+  saleUpdated(shopID: UUID): SaleUpdate! @auth @tenant
+
+  # Price subscriptions
+  priceChanged(productID: UUID): PriceUpdate! @auth @tenant
+
+  # Real-time analytics
+  salesMetrics(shopID: UUID): JSON! @auth(requires: MANAGER) @tenant
+  inventoryMetrics(shopID: UUID): JSON! @auth(requires: MANAGER) @tenant
+}

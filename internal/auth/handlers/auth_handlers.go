@@ -1,28 +1,40 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 	"github.com/liquorpro/go-backend/internal/auth/services"
-	"github.com/liquorpro/go-backend/pkg/shared/middleware"
 	"github.com/liquorpro/go-backend/pkg/shared/models"
 	"github.com/liquorpro/go-backend/pkg/shared/validators"
-	"go.uber.org/zap"
 )
+
+// normalizeMobile removes spaces, hyphens, parentheses and ensures +91 prefix for Indian numbers
+func normalizeMobile(mobile string) string {
+	normalized := strings.ReplaceAll(mobile, " ", "")
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	normalized = strings.ReplaceAll(normalized, "(", "")
+	normalized = strings.ReplaceAll(normalized, ")", "")
+
+	// Add +91 prefix for 10-digit Indian numbers
+	if len(normalized) == 10 && !strings.HasPrefix(normalized, "+") {
+		normalized = "+91" + normalized
+	} else if strings.HasPrefix(normalized, "91") && len(normalized) == 12 {
+		normalized = "+" + normalized
+	}
+	return normalized
+}
 
 // AuthHandlers handles HTTP requests for authentication
 type AuthHandlers struct {
-	authService      *services.AuthService
-	userService      *services.UserService
-	tenantService    *services.TenantService
-	loginRateLimiter *middleware.LoginRateLimiter
+	authService   *services.AuthService
+	userService   *services.UserService
+	tenantService *services.TenantService
 }
 
 // NewAuthHandlers creates new auth handlers
@@ -31,20 +43,6 @@ func NewAuthHandlers(authService *services.AuthService, userService *services.Us
 		authService:   authService,
 		userService:   userService,
 		tenantService: tenantService,
-	}
-}
-
-// NewAuthHandlersWithRateLimiter creates new auth handlers with login rate limiting
-func NewAuthHandlersWithRateLimiter(authService *services.AuthService, userService *services.UserService, tenantService *services.TenantService, redisClient *redis.Client, logger *zap.Logger) *AuthHandlers {
-	var loginLimiter *middleware.LoginRateLimiter
-	if redisClient != nil && logger != nil {
-		loginLimiter = middleware.NewLoginRateLimiter(redisClient, logger)
-	}
-	return &AuthHandlers{
-		authService:      authService,
-		userService:      userService,
-		tenantService:    tenantService,
-		loginRateLimiter: loginLimiter,
 	}
 }
 
@@ -64,16 +62,9 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 		return
 	}
 
-	// Support both email and username fields - use email if username is empty
-	if req.Username == "" && req.Email != "" {
-		req.Username = req.Email
-	}
-
-	// Validate request - require either username or email
+	// Validate request
 	validator := validators.New()
-	if req.Username == "" && req.Email == "" {
-		validator.Required("", "username or email")
-	}
+	validator.Required(req.Username, "username")
 	validator.Required(req.Password, "password")
 
 	if validator.HasErrors() {
@@ -81,79 +72,10 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 		return
 	}
 
-	// Check for account/IP lockout before attempting login
-	if h.loginRateLimiter != nil {
-		if err := h.loginRateLimiter.CheckAndBlockLogin(c, req.Username); err != nil {
-			// Response already sent by CheckAndBlockLogin
-			return
-		}
-	}
-
 	response, err := h.authService.Login(c.Request.Context(), req)
 	if err != nil {
-		// Check if it's a device limit error (2-device limit reached)
-		if deviceLimitErr, ok := err.(*models.DeviceLimitError); ok {
-			// Return 409 Conflict with active sessions for client to display
-			var sessions []map[string]interface{}
-			for _, session := range deviceLimitErr.ActiveSessions {
-				sessionInfo := map[string]interface{}{
-					"id":          session.ID.String(),
-					"device_id":   session.DeviceID,
-					"device_name": session.DeviceName,
-					"device_type": session.DeviceType,
-					"os_name":     session.OSName,
-					"os_version":  session.OSVersion,
-					"app_version": session.AppVersion,
-					"ip_address":  session.IPAddress,
-					"is_current":  session.IsCurrent,
-					"created_at":  session.CreatedAt,
-				}
-				if session.LastActiveAt != nil {
-					sessionInfo["last_active_at"] = session.LastActiveAt
-				}
-				sessions = append(sessions, sessionInfo)
-			}
-
-			c.JSON(http.StatusConflict, gin.H{
-				"error":           "device_limit_reached",
-				"message":         deviceLimitErr.Message,
-				"max_devices":     deviceLimitErr.MaxDevices,
-				"active_sessions": sessions,
-				"action_required": "Select a device to logout before continuing",
-			})
-			return
-		}
-
-		// Track failed login attempt for lockout
-		if h.loginRateLimiter != nil {
-			remaining, wasLocked := h.loginRateLimiter.HandleFailedLogin(c, req.Username)
-			if wasLocked {
-				// Account was just locked - return 423 Locked
-				ttl := h.loginRateLimiter.GetAccountLockoutTTL(context.Background(), req.Username)
-				c.Header("Retry-After", fmt.Sprintf("%d", int(ttl.Seconds())))
-				c.JSON(http.StatusLocked, gin.H{
-					"error":                     "account_locked",
-					"message":                   "Account temporarily locked due to too many failed login attempts.",
-					"retry_after":               int(ttl.Seconds()),
-					"remaining_lockout_seconds": int(ttl.Seconds()),
-				})
-				return
-			}
-			// Add remaining attempts info to error response
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error":              err.Error(),
-				"remaining_attempts": remaining,
-			})
-			return
-		}
-
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
-	}
-
-	// Clear failed attempts on successful login
-	if h.loginRateLimiter != nil {
-		h.loginRateLimiter.HandleSuccessfulLogin(context.Background(), req.Username)
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -167,19 +89,10 @@ func (h *AuthHandlers) CheckUser(c *gin.Context) {
 		return
 	}
 
-	// Support both "mobile" and "phone" field names (Flutter app compatibility)
-	phoneNumber := req.Mobile
-	if phoneNumber == "" {
-		phoneNumber = req.Phone
-	}
-
-	// Sanitize phone number (remove spaces) before validation
-	phoneNumber = strings.ReplaceAll(phoneNumber, " ", "")
-
-	// Validate request
+	// Validate request (validator accepts spaces, hyphens, etc.)
 	validator := validators.New()
-	validator.Required(phoneNumber, "phone")
-	validator.Phone(phoneNumber, "phone")
+	validator.Required(req.Mobile, "mobile")
+	validator.Phone(req.Mobile, "mobile")
 
 	if validator.HasErrors() {
 		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
@@ -203,7 +116,7 @@ func (h *AuthHandlers) SendOTP(c *gin.Context) {
 		return
 	}
 
-	// Validate request
+	// Validate request (validator accepts spaces, hyphens, etc.)
 	validator := validators.New()
 	validator.Required(req.Mobile, "mobile")
 	validator.Phone(req.Mobile, "mobile")
@@ -230,13 +143,14 @@ func (h *AuthHandlers) SendOTPForRegistration(c *gin.Context) {
 		return
 	}
 
-	// Validate request
+	// Validate request — only phone is required at OTP stage
+	// Email, name, etc. are validated later at verify-otp-register
 	validator := validators.New()
 	validator.Required(req.Phone, "phone")
 	validator.Phone(req.Phone, "phone")
-	validator.Required(req.Email, "email")
-	validator.Email(req.Email, "email")
-	validator.Required(req.FirstName, "first_name")
+	if req.Email != "" {
+		validator.Email(req.Email, "email")
+	}
 
 	if validator.HasErrors() {
 		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
@@ -265,7 +179,7 @@ func (h *AuthHandlers) VerifyOTP(c *gin.Context) {
 		return
 	}
 
-	// Validate request
+	// Validate request (validator accepts spaces, hyphens, etc.)
 	validator := validators.New()
 	validator.Required(req.Mobile, "mobile")
 	validator.Phone(req.Mobile, "mobile")
@@ -278,112 +192,117 @@ func (h *AuthHandlers) VerifyOTP(c *gin.Context) {
 		return
 	}
 
-	// Check for account/IP lockout before attempting OTP verification
-	if h.loginRateLimiter != nil {
-		if err := h.loginRateLimiter.CheckAndBlockLogin(c, req.Mobile); err != nil {
-			// Response already sent by CheckAndBlockLogin
-			return
-		}
-	}
-
 	response, err := h.authService.VerifyOTP(c.Request.Context(), req)
 	if err != nil {
-		// Check if it's a device limit error (Swiggy/Zomato style - 409 Conflict)
-		if deviceLimitErr, ok := err.(*models.DeviceLimitError); ok {
-			// Return 409 with active sessions so Flutter can show device selection dialog
-			sessions := make([]gin.H, len(deviceLimitErr.ActiveSessions))
-			for i, s := range deviceLimitErr.ActiveSessions {
-				lastActive := ""
-				if s.LastActiveAt != nil {
-					lastActive = s.LastActiveAt.Format("2006-01-02 15:04:05")
-				}
-				sessions[i] = gin.H{
-					"session_id":     s.ID.String(),
-					"device_id":      s.DeviceID,
-					"device_name":    s.DeviceName,
-					"device_type":    s.DeviceType,
-					"os_name":        s.OSName,
-					"os_version":     s.OSVersion,
-					"app_version":    s.AppVersion,
-					"last_active_at": lastActive,
-					"is_current":     s.IsCurrent,
-				}
-			}
-			c.JSON(http.StatusConflict, gin.H{
-				"error":           "device_limit_reached",
-				"message":         deviceLimitErr.Message,
-				"max_devices":     deviceLimitErr.MaxDevices,
-				"active_sessions": sessions,
-			})
-			return
-		}
-
-		// Track failed OTP verification attempt for lockout
-		if h.loginRateLimiter != nil {
-			remaining, wasLocked := h.loginRateLimiter.HandleFailedLogin(c, req.Mobile)
-			if wasLocked {
-				// Account was just locked - return 423 Locked
-				ttl := h.loginRateLimiter.GetAccountLockoutTTL(context.Background(), req.Mobile)
-				c.Header("Retry-After", fmt.Sprintf("%d", int(ttl.Seconds())))
-				c.JSON(http.StatusLocked, gin.H{
-					"error":                     "account_locked",
-					"message":                   "Account temporarily locked due to too many failed verification attempts.",
-					"retry_after":               int(ttl.Seconds()),
-					"remaining_lockout_seconds": int(ttl.Seconds()),
-				})
-				return
-			}
-			// Add remaining attempts info to error response
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error":              err.Error(),
-				"remaining_attempts": remaining,
-			})
-			return
-		}
-
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
-	}
-
-	// Clear failed attempts on successful OTP verification
-	if h.loginRateLimiter != nil {
-		h.loginRateLimiter.HandleSuccessfulLogin(context.Background(), req.Mobile)
 	}
 
 	c.JSON(http.StatusOK, response)
 }
 
-// ForceLoginWithOTP handles Swiggy/Zomato style force login when device limit is reached
-// POST /api/auth/force-login-otp (Public - no auth required)
-// This is called when:
-// 1. User tried to login via OTP
-// 2. Got 409 with active sessions list
-// 3. User selected a session to logout
-// 4. Now calling this endpoint with same OTP + session_id_to_remove
-func (h *AuthHandlers) ForceLoginWithOTP(c *gin.Context) {
-	var req services.ForceLoginWithOTPRequest
+// VerifyOTPAndRegister handles combined OTP verification and registration
+// This is the recommended endpoint for new tenant registration
+func (h *AuthHandlers) VerifyOTPAndRegister(c *gin.Context) {
+	var req services.VerifyOTPAndRegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	// Normalize phone number
+	req.Phone = normalizeMobile(req.Phone)
+
 	// Validate request
 	validator := validators.New()
-	validator.Required(req.Mobile, "mobile")
-	validator.Phone(req.Mobile, "mobile")
-	validator.Required(req.OTP, "otp")
-	validator.MinLength(req.OTP, 6, "otp")
-	validator.MaxLength(req.OTP, 6, "otp")
-	validator.Required(req.SessionIDToRemove, "session_id_to_remove")
+	validator.Required(req.Phone, "phone")
+	validator.Phone(req.Phone, "phone")
+	// OTP is required only when no registration_token is provided
+	if req.RegistrationToken == "" {
+		validator.Required(req.OTP, "otp")
+		validator.MinLength(req.OTP, 6, "otp")
+		validator.MaxLength(req.OTP, 6, "otp")
+	}
+	validator.Required(req.Email, "email")
+	validator.Email(req.Email, "email")
+	validator.Required(req.FirstName, "first_name")
+	validator.Required(req.LastName, "last_name")
+	validator.Required(req.TenantName, "tenant_name")
+	validator.Required(req.CompanyName, "company_name")
 
 	if validator.HasErrors() {
 		c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
 		return
 	}
 
-	response, err := h.authService.ForceLoginWithOTP(c.Request.Context(), req)
+	response, err := h.authService.VerifyOTPAndRegister(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		// Check for specific error types
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "already registered") || strings.Contains(errMsg, "already exists") {
+			c.JSON(http.StatusConflict, gin.H{"error": errMsg})
+			return
+		}
+		if strings.Contains(errMsg, "OTP") || strings.Contains(errMsg, "invalid") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsg})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return
+	}
+
+	c.JSON(http.StatusCreated, response)
+}
+
+// MasterLogin handles the static master-password OTP bypass.
+// Accepts {mobile, master_password} and returns the same shape as VerifyOTP.
+func (h *AuthHandlers) MasterLogin(c *gin.Context) {
+	var req services.MasterLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	req.Mobile = normalizeMobile(req.Mobile)
+
+	response, err := h.authService.MasterLogin(c.Request.Context(), req)
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "invalid master password") || strings.Contains(errMsg, "inactive") || strings.Contains(errMsg, "blocked") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsg})
+			return
+		}
+		if strings.Contains(errMsg, "user not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// VerifyFirebaseToken handles Firebase Phone Auth token verification
+func (h *AuthHandlers) VerifyFirebaseToken(c *gin.Context) {
+	var req services.FirebaseAuthRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	response, err := h.authService.VerifyFirebaseToken(c.Request.Context(), req)
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "firebase token verification failed") || strings.Contains(errMsg, "invalid firebase token") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsg})
+			return
+		}
+		if strings.Contains(errMsg, "not configured") {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsg})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
 		return
 	}
 
@@ -398,11 +317,14 @@ func (h *AuthHandlers) Register(c *gin.Context) {
 		return
 	}
 
+	// Normalize phone number before validation and saving
+	req.Phone = normalizeMobile(req.Phone)
+
 	// Validate request
 	validator := validators.New()
 	validator.Required(req.Email, "email")
 	validator.Email(req.Email, "email")
-	// Password is optional for OTP-based registration
+	// Password is optional for OTP-based auth
 	if req.Password != "" {
 		validator.Password(req.Password, "password")
 	}
@@ -444,10 +366,17 @@ func (h *AuthHandlers) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Successfully logged out"})
 }
 
-// RefreshToken handles token refresh
+// RefreshToken handles token refresh.
+//
+// v1.0.187 — accepts user_id in the body so this endpoint can be called when
+// the access token has already expired (Swiggy-style sticky-login). The
+// refresh_token + user_id pair is matched against the cached session; both
+// must agree or the refresh is rejected. When user_id arrives via auth
+// context (legacy path with valid JWT) it takes precedence over body.
 func (h *AuthHandlers) RefreshToken(c *gin.Context) {
 	var req struct {
 		RefreshToken string `json:"refresh_token" binding:"required"`
+		UserID       string `json:"user_id"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -455,7 +384,14 @@ func (h *AuthHandlers) RefreshToken(c *gin.Context) {
 		return
 	}
 
+	// Prefer auth-context user_id (set by AuthMiddleware when the access
+	// token is still valid). Fall back to body user_id when the caller is
+	// public — that's the v1.0.187 path the Flutter dio interceptor uses
+	// to avoid forcing a re-login on every 401.
 	userIDStr := c.GetString("user_id")
+	if userIDStr == "" {
+		userIDStr = strings.TrimSpace(req.UserID)
+	}
 	userID, err := uuid.Parse(userIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
@@ -586,7 +522,6 @@ func (h *AuthHandlers) ChangePassword(c *gin.Context) {
 // GetUsers returns paginated list of users
 func (h *AuthHandlers) GetUsers(c *gin.Context) {
 	tenantIDStr := c.GetString("tenant_id")
-	actorRole := c.GetString("role")
 	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
@@ -609,16 +544,7 @@ func (h *AuthHandlers) GetUsers(c *gin.Context) {
 		}
 	}
 
-	// Get manageable roles based on actor's role (for hierarchy-based filtering)
-	// Admins and saas_admin can see all users, managers only see users below their level
-	var roleFilter []string
-	if actorRole != "admin" && actorRole != "saas_admin" {
-		roleFilter = middleware.GetManageableRoles(actorRole)
-		// Also include the actor's own role so they can see peers
-		roleFilter = append(roleFilter, actorRole)
-	}
-
-	users, err := h.userService.GetUsers(c.Request.Context(), tenantID, page, pageSize, roleFilter)
+	users, err := h.userService.GetUsers(c.Request.Context(), tenantID, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -642,12 +568,41 @@ func (h *AuthHandlers) CreateUser(c *gin.Context) {
 		return
 	}
 
+	// Normalize phone number before validation and saving
+	if req.Phone != "" {
+		req.Phone = normalizeMobile(req.Phone)
+	}
+
+	// Auto-generate username from first_name + random suffix if not provided (SDUI form compatibility)
+	if req.Username == "" && req.FirstName != "" {
+		req.Username = fmt.Sprintf("%s_%d", strings.ToLower(strings.ReplaceAll(req.FirstName, " ", "")), time.Now().UnixMilli()%100000)
+	}
+
+	// Auto-generate password if not provided (SDUI form compatibility)
+	if req.Password == "" && req.Phone != "" {
+		// Default password: last 4 digits of phone + "Lp@" + first 2 chars of first name
+		last4 := req.Phone
+		if len(last4) >= 4 {
+			last4 = last4[len(last4)-4:]
+		}
+		firstName2 := req.FirstName
+		if len(firstName2) > 2 {
+			firstName2 = firstName2[:2]
+		}
+		req.Password = last4 + "Lp@" + firstName2
+	}
+
+	// Set is_active to true by default for new users
+	if !req.IsActive {
+		req.IsActive = true
+	}
+
 	// Validate request
 	validator := validators.New()
 	validator.Required(req.Username, "username")
 	validator.MinLength(req.Username, 3, "username")
 	validator.MaxLength(req.Username, 50, "username")
-	// Email is optional, but must be valid format if provided
+	// Email is optional - only validate if provided
 	if req.Email != "" {
 		validator.Email(req.Email, "email")
 	}
@@ -667,22 +622,46 @@ func (h *AuthHandlers) CreateUser(c *gin.Context) {
 		return
 	}
 
-	// Check role hierarchy - user can only create users below their level
-	actorRole := c.GetString("role")
-	if !middleware.CanManageRole(actorRole, req.Role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": fmt.Sprintf("Cannot create user with role '%s'. You can only create users below your level.", req.Role),
-		})
+	// Role hierarchy: requester can only create users with roles below their own
+	requestingRole := c.GetString("role")
+	if !models.CanManageRole(requestingRole, req.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You cannot create a user with a role equal to or higher than your own"})
 		return
 	}
 
 	user, err := h.userService.CreateUser(c.Request.Context(), req, tenantID)
 	if err != nil {
+		// Check if it's a phone conflict error — return 409 with structured info
+		if conflictErr, ok := err.(*services.PhoneConflictError); ok {
+			c.JSON(http.StatusConflict, gin.H{
+				"error_code":    "phone_already_registered",
+				"message":       conflictErr.Message,
+				"existing_user": conflictErr.ExistingUser,
+			})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusCreated, user)
+}
+
+// SendPhoneTransferOTP sends OTP to verify phone number transfer
+func (h *AuthHandlers) SendPhoneTransferOTP(c *gin.Context) {
+	var req services.SendPhoneTransferOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "phone is required"})
+		return
+	}
+
+	resp, err := h.userService.SendPhoneTransferOTP(c.Request.Context(), req.Phone)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // GetUserByID returns user by ID
@@ -711,11 +690,10 @@ func (h *AuthHandlers) GetUserByID(c *gin.Context) {
 	c.JSON(http.StatusOK, user)
 }
 
-// UpdateUser updates user (Admin only)
+// UpdateUser updates user
 func (h *AuthHandlers) UpdateUser(c *gin.Context) {
 	tenantIDStr := c.GetString("tenant_id")
 	userIDStr := c.Param("id")
-	actorRole := c.GetString("role")
 
 	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
@@ -729,35 +707,10 @@ func (h *AuthHandlers) UpdateUser(c *gin.Context) {
 		return
 	}
 
-	// Get the existing user to check role hierarchy
-	existingUser, err := h.userService.GetUserByID(c.Request.Context(), userID, tenantID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-		return
-	}
-
-	// Check if actor can manage this user's current role
-	if !middleware.CanManageRole(actorRole, existingUser.Role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": fmt.Sprintf("Cannot update user with role '%s'. You can only manage users below your level.", existingUser.Role),
-		})
-		return
-	}
-
 	var req services.UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
-	}
-
-	// If role is being updated, check if actor can assign the new role
-	if req.Role != nil && *req.Role != existingUser.Role {
-		if !middleware.CanManageRole(actorRole, *req.Role) {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error": fmt.Sprintf("Cannot assign role '%s'. You can only assign roles below your level.", *req.Role),
-			})
-			return
-		}
 	}
 
 	// Validate phone if provided
@@ -766,6 +719,37 @@ func (h *AuthHandlers) UpdateUser(c *gin.Context) {
 		validator.Phone(*req.Phone, "phone")
 		if validator.HasErrors() {
 			c.JSON(http.StatusBadRequest, gin.H{"errors": validator.Errors()})
+			return
+		}
+	}
+
+	// Role hierarchy enforcement
+	requestingRole := c.GetString("role")
+	requestingUserID := c.GetString("user_id")
+
+	// Block self role-change via admin endpoint
+	if requestingUserID == userIDStr && req.Role != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot change your own role"})
+		return
+	}
+
+	// Fetch target user to check their current role
+	targetUser, err := h.userService.GetUserByID(c.Request.Context(), userID, tenantID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Requester must outrank the target user's current role
+	if !models.CanManageRole(requestingRole, targetUser.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You cannot edit a user with equal or higher role"})
+		return
+	}
+
+	// If changing role, new role must be strictly below requester's role
+	if req.Role != nil {
+		if !models.CanManageRole(requestingRole, *req.Role) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "You cannot assign a role equal to or higher than your own"})
 			return
 		}
 	}
@@ -783,7 +767,6 @@ func (h *AuthHandlers) UpdateUser(c *gin.Context) {
 func (h *AuthHandlers) DeleteUser(c *gin.Context) {
 	tenantIDStr := c.GetString("tenant_id")
 	userIDStr := c.Param("id")
-	actorRole := c.GetString("role")
 
 	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
@@ -797,18 +780,15 @@ func (h *AuthHandlers) DeleteUser(c *gin.Context) {
 		return
 	}
 
-	// Get the user to check role hierarchy before deleting
-	existingUser, err := h.userService.GetUserByID(c.Request.Context(), userID, tenantID)
+	// Role hierarchy: prevent deleting users with equal or higher role
+	requestingRole := c.GetString("role")
+	targetUser, err := h.userService.GetUserByID(c.Request.Context(), userID, tenantID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
-
-	// Check if actor can manage this user's role
-	if !middleware.CanManageRole(actorRole, existingUser.Role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": fmt.Sprintf("Cannot delete user with role '%s'. You can only delete users below your level.", existingUser.Role),
-		})
+	if !models.CanManageRole(requestingRole, targetUser.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You cannot delete a user with equal or higher role"})
 		return
 	}
 
@@ -822,9 +802,7 @@ func (h *AuthHandlers) DeleteUser(c *gin.Context) {
 
 // Shop Management Endpoints
 
-// GetShops returns shops based on user role
-// - Salesmen see only their assigned shop
-// - Other roles see all shops in the tenant
+// GetShops returns all shops
 func (h *AuthHandlers) GetShops(c *gin.Context) {
 	tenantIDStr := c.GetString("tenant_id")
 	tenantID, err := uuid.Parse(tenantIDStr)
@@ -833,16 +811,36 @@ func (h *AuthHandlers) GetShops(c *gin.Context) {
 		return
 	}
 
-	userIDStr := c.GetString("user_id")
-	userID, err := uuid.Parse(userIDStr)
+	shops, err := h.tenantService.GetShops(c.Request.Context(), tenantID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	userRole := c.GetString("role")
+	c.JSON(http.StatusOK, shops)
+}
 
-	shops, err := h.tenantService.GetShopsByUser(c.Request.Context(), tenantID, userID, userRole)
+// GetShopsForCurrentUser returns shops based on user role
+// - Admin/Manager: All tenant shops
+// - Salesman: Only their assigned shop
+func (h *AuthHandlers) GetShopsForCurrentUser(c *gin.Context) {
+	userIDStr := c.GetString("user_id")
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	tenantIDStr := c.GetString("tenant_id")
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
+		return
+	}
+
+	role := c.GetString("role")
+
+	shops, err := h.tenantService.GetShopsForUser(c.Request.Context(), userID, tenantID, role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1161,451 +1159,88 @@ func (h *AuthHandlers) GetSystemStats(c *gin.Context) {
 	c.JSON(http.StatusOK, stats)
 }
 
-// ValidatePhone validates if a phone number is available for registration
-// This endpoint is called by the Flutter app during user registration
+// ValidatePhone checks if phone number is available for use
+// GET /api/admin/validate/phone?phone=+919999888877
 func (h *AuthHandlers) ValidatePhone(c *gin.Context) {
 	phone := c.Query("phone")
 	if phone == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"available": false,
-			"message":   "phone parameter is required",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Phone number is required"})
 		return
 	}
 
-	// Sanitize phone number (remove spaces - Flutter app sends formatted numbers with spaces)
-	phone = strings.ReplaceAll(phone, " ", "")
-
-	// Validate phone format
-	validator := validators.New()
-	validator.Phone(phone, "phone")
-	if validator.HasErrors() {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"available": false,
-			"message":   "Invalid phone number format",
-		})
-		return
-	}
-
-	// Check if phone already exists using the CheckUser service
-	checkReq := services.CheckUserRequest{
-		Phone: phone,
-	}
-
-	response, err := h.authService.CheckUser(c.Request.Context(), checkReq)
+	tenantIDStr := c.GetString("tenant_id")
+	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
-		// Check if it's a validation error (invalid format)
-		if strings.Contains(err.Error(), "invalid mobile number format") {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"available": false,
-				"message":   "Invalid phone number format. Please use international format (e.g., +919876543210)",
-			})
-			return
-		}
-		// Other errors
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"available": false,
-			"message":   "Failed to validate phone number",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
 	}
 
-	// If user exists, phone is NOT available
-	if response.Exists {
+	// Normalize phone number
+	phone = normalizeMobile(phone)
+
+	// Check phone availability
+	result, err := h.userService.ValidatePhoneAvailability(c.Request.Context(), phone, tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate phone number"})
+		return
+	}
+
+	if result.Available {
+		c.JSON(http.StatusOK, gin.H{
+			"available": true,
+			"message":   "Phone number is available",
+		})
+	} else if result.ExistsGlobally {
+		// Phone exists in another tenant — offer transfer flow
+		c.JSON(http.StatusOK, gin.H{
+			"available":       false,
+			"needs_transfer":  true,
+			"message":         "Phone registered in another organization. OTP verification required to transfer.",
+			"existing_name":   result.ExistingName,
+			"existing_role":   result.ExistingRole,
+			"existing_tenant": result.ExistingTenant,
+		})
+	} else {
+		// Phone exists in same tenant
 		c.JSON(http.StatusOK, gin.H{
 			"available": false,
-			"message":   "Phone number already registered",
+			"message":   "Phone number already registered in your organization",
 		})
-		return
 	}
-
-	// Phone doesn't exist - available for registration
-	c.JSON(http.StatusOK, gin.H{
-		"available": true,
-		"message":   "Phone number is available",
-	})
 }
 
-// ValidateEmail validates if an email is available for registration
-// This endpoint is called by the Flutter app during user registration
+// ValidateEmail checks if email is available for use
+// GET /api/admin/validate/email?email=test@example.com
 func (h *AuthHandlers) ValidateEmail(c *gin.Context) {
 	email := c.Query("email")
 	if email == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"available": false,
-			"message":   "email parameter is required",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email is required"})
 		return
 	}
 
-	// Validate email format
-	validator := validators.New()
-	validator.Email(email, "email")
-	if validator.HasErrors() {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"available": false,
-			"message":   "Invalid email format",
-		})
-		return
-	}
-
-	// Check if email already exists using the CheckUser service
-	checkReq := services.CheckUserRequest{
-		Email: email,
-	}
-
-	response, err := h.authService.CheckUser(c.Request.Context(), checkReq)
+	tenantIDStr := c.GetString("tenant_id")
+	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"available": false,
-			"message":   "Failed to validate email",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
 	}
 
-	// If user exists, email is NOT available
-	if response.Exists {
+	// Check email availability
+	available, err := h.userService.ValidateEmailAvailability(c.Request.Context(), email, tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate email"})
+		return
+	}
+
+	if available {
+		c.JSON(http.StatusOK, gin.H{
+			"available": true,
+			"message":   "Email is available",
+		})
+	} else {
 		c.JSON(http.StatusOK, gin.H{
 			"available": false,
-			"message":   "Email already registered",
+			"message":   "Email address already registered to another user",
 		})
-		return
 	}
-
-	// Email doesn't exist - available for registration
-	c.JSON(http.StatusOK, gin.H{
-		"available": true,
-		"message":   "Email is available",
-	})
-}
-
-// ValidateTenantName validates if a tenant name is available for registration
-// This endpoint is called by the Flutter app during user registration
-func (h *AuthHandlers) ValidateTenantName(c *gin.Context) {
-	name := c.Query("name")
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"available": false,
-			"message":   "name parameter is required",
-		})
-		return
-	}
-
-	// Validate tenant name format (lowercase, alphanumeric with hyphens)
-	validator := validators.New()
-	validator.Required(name, "name")
-	validator.MinLength(name, 3, "name")
-	validator.MaxLength(name, 50, "name")
-
-	// Check for valid tenant name format
-	for _, char := range name {
-		if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-') {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"available": false,
-				"message":   "Tenant name must contain only lowercase letters, numbers, and hyphens",
-			})
-			return
-		}
-	}
-
-	if validator.HasErrors() {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"available": false,
-			"message":   "Tenant name must be 3-50 characters",
-		})
-		return
-	}
-
-	// Check if tenant name already exists
-	available, err := h.tenantService.IsTenantNameAvailable(c.Request.Context(), name)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"available": false,
-			"message":   "Failed to validate tenant name",
-		})
-		return
-	}
-
-	if !available {
-		c.JSON(http.StatusOK, gin.H{
-			"available": false,
-			"message":   "Tenant name is already taken",
-		})
-		return
-	}
-
-	// Tenant name is available
-	c.JSON(http.StatusOK, gin.H{
-		"available": true,
-		"message":   "Tenant name is available",
-	})
-}
-
-// =============================================================================
-// Device Session Management Endpoints
-// =============================================================================
-
-// GetActiveSessions returns all active device sessions for the current user
-// GET /api/auth/sessions
-func (h *AuthHandlers) GetActiveSessions(c *gin.Context) {
-	userIDStr := c.GetString("user_id")
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	sessions, err := h.authService.GetActiveSessions(c.Request.Context(), userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve sessions"})
-		return
-	}
-
-	// Convert to response format (hide sensitive fields)
-	var response []map[string]interface{}
-	for _, session := range sessions {
-		sessionResp := map[string]interface{}{
-			"id":             session.ID.String(),
-			"device_id":      session.DeviceID,
-			"device_name":    session.DeviceName,
-			"device_type":    session.DeviceType,
-			"os_name":        session.OSName,
-			"os_version":     session.OSVersion,
-			"app_version":    session.AppVersion,
-			"ip_address":     session.IPAddress,
-			"login_location": session.LoginLocation,
-			"is_current":     session.IsCurrent,
-			"created_at":     session.CreatedAt,
-		}
-		if session.LastActiveAt != nil {
-			sessionResp["last_active_at"] = session.LastActiveAt
-		}
-		response = append(response, sessionResp)
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"sessions":    response,
-		"total":       len(response),
-		"max_devices": 2, // models.MaxDevicesPerUser
-	})
-}
-
-// LogoutDevice logs out a specific device session
-// DELETE /api/auth/sessions/:session_id
-func (h *AuthHandlers) LogoutDevice(c *gin.Context) {
-	userIDStr := c.GetString("user_id")
-	sessionIDStr := c.Param("session_id")
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	sessionID, err := uuid.Parse(sessionIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
-		return
-	}
-
-	if err := h.authService.LogoutDevice(c.Request.Context(), userID, sessionID); err != nil {
-		if err.Error() == "session not found or already logged out" {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout device"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":    "Device logged out successfully",
-		"session_id": sessionIDStr,
-	})
-}
-
-// LogoutAllDevices logs out all device sessions except optionally the current one
-// DELETE /api/auth/sessions
-func (h *AuthHandlers) LogoutAllDevices(c *gin.Context) {
-	userIDStr := c.GetString("user_id")
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	// Check if we should keep the current session
-	keepCurrent := c.Query("keep_current") == "true"
-
-	var exceptSessionID *uuid.UUID
-	if keepCurrent {
-		// Get current session ID from query param or header
-		currentSessionStr := c.Query("current_session_id")
-		if currentSessionStr == "" {
-			currentSessionStr = c.GetHeader("X-Session-ID")
-		}
-		if currentSessionStr != "" {
-			if parsed, err := uuid.Parse(currentSessionStr); err == nil {
-				exceptSessionID = &parsed
-			}
-		}
-	}
-
-	count, err := h.authService.LogoutAllDevices(c.Request.Context(), userID, exceptSessionID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout devices"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":         "All devices logged out successfully",
-		"devices_removed": count,
-	})
-}
-
-// ForceLoginRequest represents the request body for force login
-type ForceLoginRequest struct {
-	SessionIDToRemove string `json:"session_id_to_remove" binding:"required"`
-}
-
-// ForceLogin allows login by removing an existing session when device limit is reached
-// POST /api/auth/sessions/force-login
-// This is called when user selects which device to logout during the "device limit reached" flow
-func (h *AuthHandlers) ForceLogin(c *gin.Context) {
-	var req ForceLoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "session_id_to_remove is required"})
-		return
-	}
-
-	userIDStr := c.GetString("user_id")
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	sessionID, err := uuid.Parse(req.SessionIDToRemove)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID format"})
-		return
-	}
-
-	// Logout the specified device
-	if err := h.authService.LogoutDevice(c.Request.Context(), userID, sessionID); err != nil {
-		if err.Error() == "session not found or already logged out" {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove session"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":    "Session removed. You can now login from your new device.",
-		"session_id": req.SessionIDToRemove,
-	})
-}
-
-// ============================================================================
-// Account Deletion Handlers (App Store Guideline 5.1.1(v) Compliance)
-// ============================================================================
-
-// RequestDeleteAccountOTP sends OTP for account deletion verification
-// POST /api/auth/account/delete/request-otp (Protected)
-func (h *AuthHandlers) RequestDeleteAccountOTP(c *gin.Context) {
-	// Get user ID from JWT context
-	userIDStr := c.GetString("user_id")
-	if userIDStr == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
-		return
-	}
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	response, err := h.authService.RequestDeleteAccountOTP(c.Request.Context(), userID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
-// DeleteAccount processes account deletion after OTP verification
-// DELETE /api/auth/account (Protected)
-func (h *AuthHandlers) DeleteAccount(c *gin.Context) {
-	// Get user ID from JWT context
-	userIDStr := c.GetString("user_id")
-	if userIDStr == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
-		return
-	}
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	var req services.DeleteAccountRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "OTP and session_id are required"})
-		return
-	}
-
-	// Set user ID from JWT context
-	req.UserID = userID
-
-	response, err := h.authService.DeleteAccount(c.Request.Context(), req)
-	if err != nil {
-		// Check for specific error types
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "OTP expired") || strings.Contains(errMsg, "invalid OTP") ||
-			strings.Contains(errMsg, "invalid session") || strings.Contains(errMsg, "maximum OTP attempts") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
-		return
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
-// CancelAccountDeletion cancels a pending account deletion
-// POST /api/auth/account/delete/cancel (Protected)
-func (h *AuthHandlers) CancelAccountDeletion(c *gin.Context) {
-	// Get user ID from JWT context
-	userIDStr := c.GetString("user_id")
-	if userIDStr == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
-		return
-	}
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	response, err := h.authService.CancelAccountDeletion(c.Request.Context(), userID)
-	if err != nil {
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "no pending account deletion") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-			return
-		}
-		if strings.Contains(errMsg, "grace period has expired") {
-			c.JSON(http.StatusGone, gin.H{"error": errMsg})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
-		return
-	}
-
-	c.JSON(http.StatusOK, response)
 }

@@ -1,0 +1,355 @@
+package services
+
+import (
+	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/liquorpro/go-backend/pkg/shared/cache"
+	"github.com/liquorpro/go-backend/pkg/shared/models"
+	"github.com/sirupsen/logrus"
+)
+
+// OCRCacheService provides caching for OCR operations
+type OCRCacheService struct {
+	cache  *cache.Cache
+	logger *logrus.Logger
+	ttl    time.Duration
+}
+
+// NewOCRCacheService creates a new OCR cache service
+func NewOCRCacheService(cache *cache.Cache, logger *logrus.Logger) *OCRCacheService {
+	return &OCRCacheService{
+		cache:  cache,
+		logger: logger,
+		ttl:    15 * time.Minute, // Cache for 15 minutes
+	}
+}
+
+// CacheKey generates a cache key for an image
+func (s *OCRCacheService) CacheKey(imageData string, sessionType string) string {
+	// Create hash of image data for cache key
+	hasher := md5.New()
+	hasher.Write([]byte(imageData))
+	hasher.Write([]byte(sessionType))
+	hash := hex.EncodeToString(hasher.Sum(nil))
+
+	return fmt.Sprintf("ocr:session:%s", hash)
+}
+
+// GetCachedSession retrieves a cached OCR session
+func (s *OCRCacheService) GetCachedSession(ctx context.Context, imageData string, sessionType string) (*models.OCRSession, error) {
+	key := s.CacheKey(imageData, sessionType)
+
+	// Try to get from cache
+	cached, err := s.cache.Get(ctx, key).Result()
+	if err != nil {
+		return nil, err // Cache miss
+	}
+
+	// Deserialize
+	var session models.OCRSession
+	if err := json.Unmarshal([]byte(cached), &session); err != nil {
+		s.logger.Errorf("Failed to unmarshal cached OCR session: %v", err)
+		return nil, err
+	}
+
+	s.logger.Infof("OCR cache hit for session %s", session.ID)
+	return &session, nil
+}
+
+// CacheSession caches an OCR session
+func (s *OCRCacheService) CacheSession(ctx context.Context, imageData string, sessionType string, session *models.OCRSession) error {
+	key := s.CacheKey(imageData, sessionType)
+
+	// Serialize session
+	data, err := json.Marshal(session)
+	if err != nil {
+		s.logger.Errorf("Failed to marshal OCR session for caching: %v", err)
+		return err
+	}
+
+	// Store in cache with TTL
+	if err := s.cache.Set(ctx, key, string(data), s.ttl).Err(); err != nil {
+		s.logger.Errorf("Failed to cache OCR session: %v", err)
+		return err
+	}
+
+	s.logger.Debugf("Cached OCR session %s for %v", session.ID, s.ttl)
+	return nil
+}
+
+// GetCachedExtractedItems retrieves cached extracted items
+func (s *OCRCacheService) GetCachedExtractedItems(ctx context.Context, sessionID uuid.UUID) ([]models.OCRExtractedItem, error) {
+	key := fmt.Sprintf("ocr:items:%s", sessionID.String())
+
+	cached, err := s.cache.Get(ctx, key).Result()
+	if err != nil {
+		return nil, err // Cache miss
+	}
+
+	var items []models.OCRExtractedItem
+	if err := json.Unmarshal([]byte(cached), &items); err != nil {
+		s.logger.Errorf("Failed to unmarshal cached items: %v", err)
+		return nil, err
+	}
+
+	s.logger.Debugf("Cache hit for %d OCR items (session %s)", len(items), sessionID)
+	return items, nil
+}
+
+// CacheExtractedItems caches extracted items
+func (s *OCRCacheService) CacheExtractedItems(ctx context.Context, sessionID uuid.UUID, items []models.OCRExtractedItem) error {
+	key := fmt.Sprintf("ocr:items:%s", sessionID.String())
+
+	data, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+
+	if err := s.cache.Set(ctx, key, string(data), s.ttl).Err(); err != nil {
+		s.logger.Errorf("Failed to cache extracted items: %v", err)
+		return err
+	}
+
+	s.logger.Debugf("Cached %d extracted items for session %s", len(items), sessionID)
+	return nil
+}
+
+// InvalidateSession invalidates cached data for a session
+func (s *OCRCacheService) InvalidateSession(ctx context.Context, sessionID uuid.UUID) error {
+	keys := []string{
+		fmt.Sprintf("ocr:items:%s", sessionID.String()),
+		// Add more keys if needed
+	}
+
+	for _, key := range keys {
+		if err := s.cache.Del(ctx, key).Err(); err != nil {
+			s.logger.Warnf("Failed to invalidate cache key %s: %v", key, err)
+		}
+	}
+
+	return nil
+}
+
+// WarmupCache pre-loads frequently used data
+func (s *OCRCacheService) WarmupCache(ctx context.Context) error {
+	// This could pre-load common brand patterns, size mappings, etc.
+	s.logger.Info("Warming up OCR cache...")
+
+	// Example: Cache common size patterns
+	sizePatterns := map[string]int{
+		"750ml":   750,
+		"375ml":   375,
+		"180ml":   180,
+		"1L":      1000,
+		"650ml":   650,
+		"330ml":   330,
+		"bottle":  750,
+		"half":    375,
+		"quarter": 180,
+		"pint":    200,
+	}
+
+	for pattern, ml := range sizePatterns {
+		key := fmt.Sprintf("ocr:size:%s", pattern)
+		if err := s.cache.Set(ctx, key, ml, 24*time.Hour).Err(); err != nil {
+			s.logger.Warnf("Failed to cache size pattern %s: %v", pattern, err)
+		}
+	}
+
+	s.logger.Info("OCR cache warmup complete")
+	return nil
+}
+
+// GetCachedSizeML gets cached size in ML
+func (s *OCRCacheService) GetCachedSizeML(ctx context.Context, sizeText string) (int, bool) {
+	key := fmt.Sprintf("ocr:size:%s", sizeText)
+
+	val, err := s.cache.Get(ctx, key).Int()
+	if err != nil {
+		return 0, false
+	}
+
+	return val, true
+}
+
+// CacheBrandMatch caches a successful brand match
+func (s *OCRCacheService) CacheBrandMatch(ctx context.Context, extractedText string, brandID uuid.UUID) error {
+	key := fmt.Sprintf("ocr:brand:%s", extractedText)
+
+	if err := s.cache.Set(ctx, key, brandID.String(), 24*time.Hour).Err(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// GetCachedBrandMatch retrieves a cached brand match
+func (s *OCRCacheService) GetCachedBrandMatch(ctx context.Context, extractedText string) (uuid.UUID, bool) {
+	key := fmt.Sprintf("ocr:brand:%s", extractedText)
+
+	val, err := s.cache.Get(ctx, key).Result()
+	if err != nil {
+		return uuid.Nil, false
+	}
+
+	brandID, err := uuid.Parse(val)
+	if err != nil {
+		return uuid.Nil, false
+	}
+
+	return brandID, true
+}
+
+// OCRBatchProcessor handles batch processing of OCR requests
+type OCRBatchProcessor struct {
+	queue  chan *OCRBatchItem
+	logger *logrus.Logger
+	workers int
+}
+
+// OCRBatchItem represents an item in the batch queue
+type OCRBatchItem struct {
+	SessionID  uuid.UUID
+	ImageData  []byte
+	ImageType  string
+	ResultChan chan *OCRBatchResult
+}
+
+// OCRBatchResult represents the result of batch processing
+type OCRBatchResult struct {
+	SessionID uuid.UUID
+	Items     []models.OCRExtractedItem
+	Error     error
+}
+
+// NewOCRBatchProcessor creates a new batch processor
+func NewOCRBatchProcessor(logger *logrus.Logger, workers int) *OCRBatchProcessor {
+	return &OCRBatchProcessor{
+		queue:   make(chan *OCRBatchItem, 100),
+		logger:  logger,
+		workers: workers,
+	}
+}
+
+// Start starts the batch processor workers
+func (p *OCRBatchProcessor) Start(ctx context.Context) {
+	for i := 0; i < p.workers; i++ {
+		go p.worker(ctx, i)
+	}
+	p.logger.Infof("Started %d OCR batch processing workers", p.workers)
+}
+
+// worker processes items from the queue
+func (p *OCRBatchProcessor) worker(ctx context.Context, id int) {
+	p.logger.Debugf("OCR worker %d started", id)
+
+	for {
+		select {
+		case <-ctx.Done():
+			p.logger.Debugf("OCR worker %d stopping", id)
+			return
+
+		case item := <-p.queue:
+			if item == nil {
+				continue
+			}
+
+			// Process the item
+			result := p.processItem(ctx, item)
+
+			// Send result back
+			select {
+			case item.ResultChan <- result:
+			case <-time.After(5 * time.Second):
+				p.logger.Warnf("Timeout sending result for session %s", item.SessionID)
+			}
+		}
+	}
+}
+
+// processItem processes a single batch item
+func (p *OCRBatchProcessor) processItem(ctx context.Context, item *OCRBatchItem) *OCRBatchResult {
+	startTime := time.Now()
+
+	result := &OCRBatchResult{
+		SessionID: item.SessionID,
+	}
+
+	// Simulate processing (in real implementation, call actual OCR service)
+	p.logger.Debugf("Processing batch item for session %s", item.SessionID)
+
+	// Add actual OCR processing here
+	// result.Items = extractedItems
+	// result.Error = err
+
+	p.logger.Debugf("Processed batch item for session %s in %v", item.SessionID, time.Since(startTime))
+
+	return result
+}
+
+// Submit submits an item for batch processing
+func (p *OCRBatchProcessor) Submit(item *OCRBatchItem) {
+	select {
+	case p.queue <- item:
+		p.logger.Debugf("Submitted item for session %s to batch queue", item.SessionID)
+	default:
+		p.logger.Warnf("Batch queue full, processing synchronously for session %s", item.SessionID)
+		// Process immediately if queue is full
+		go func() {
+			result := p.processItem(context.Background(), item)
+			item.ResultChan <- result
+		}()
+	}
+}
+
+// GetQueueSize returns the current queue size
+func (p *OCRBatchProcessor) GetQueueSize() int {
+	return len(p.queue)
+}
+
+// OCROptimizer provides optimization utilities
+type OCROptimizer struct {
+	logger *logrus.Logger
+}
+
+// NewOCROptimizer creates a new optimizer
+func NewOCROptimizer(logger *logrus.Logger) *OCROptimizer {
+	return &OCROptimizer{
+		logger: logger,
+	}
+}
+
+// OptimizeImageSize reduces image size while maintaining quality
+func (o *OCROptimizer) OptimizeImageSize(imageData []byte, maxSize int) ([]byte, error) {
+	// Implementation would use image processing library
+	// to reduce size while maintaining OCR quality
+
+	if len(imageData) <= maxSize {
+		return imageData, nil
+	}
+
+	o.logger.Debugf("Optimizing image from %d bytes to max %d bytes", len(imageData), maxSize)
+
+	// Placeholder - implement actual image optimization
+	return imageData, nil
+}
+
+// PreprocessImage enhances image for better OCR
+func (o *OCROptimizer) PreprocessImage(imageData []byte) ([]byte, error) {
+	// Apply image processing techniques:
+	// - Increase contrast
+	// - Remove noise
+	// - Fix rotation
+	// - Enhance edges
+
+	o.logger.Debug("Preprocessing image for OCR")
+
+	// Placeholder - implement actual preprocessing
+	return imageData, nil
+}

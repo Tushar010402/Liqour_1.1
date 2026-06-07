@@ -2,13 +2,12 @@ package handlers
 
 import (
 	"net/http"
-	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/liquorpro/go-backend/internal/saas/models"
 	"github.com/liquorpro/go-backend/internal/saas/services"
 )
 
@@ -34,7 +33,6 @@ func (h *AdminHandler) IsSaaSAdmin(c *gin.Context) {
 		return
 	}
 
-	// Check if mobile number is registered as SaaS admin
 	isAdmin, err := h.adminService.IsSaaSAdmin(c.Request.Context(), req.Mobile)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -69,18 +67,7 @@ func (h *AdminHandler) SendOTP(c *gin.Context) {
 		return
 	}
 
-	// For demo purposes, handle demo mobile
-	if req.Mobile == "+918630668488" {
-		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "OTP sent successfully",
-			"mobile":  req.Mobile,
-			"demo":    true,
-		})
-		return
-	}
-
-	// Send OTP for real mobile numbers
+	// Send OTP
 	err = h.adminService.SendOTP(c.Request.Context(), req.Mobile)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -117,32 +104,7 @@ func (h *AdminHandler) VerifyOTP(c *gin.Context) {
 		return
 	}
 
-	// For specific SaaS admin mobile and OTP
-	if req.Mobile == "+918630668488" && req.OTP == "111111" {
-		// Generate JWT token
-		token, err := h.adminService.GenerateAdminToken(c.Request.Context(), req.Mobile)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
-			return
-		}
-
-		// Get admin user details
-		adminUser, err := h.adminService.GetAdminByMobile(c.Request.Context(), req.Mobile)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get admin details"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "Login successful",
-			"token":   token,
-			"user":    adminUser,
-		})
-		return
-	}
-
-	// Verify OTP for real mobile numbers
+	// Verify OTP
 	isValid, err := h.adminService.VerifyOTP(c.Request.Context(), req.Mobile, req.OTP)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -444,45 +406,7 @@ func (h *AdminHandler) GetTenantStats(c *gin.Context) {
 }
 
 func (h *AdminHandler) GetAllTenants(c *gin.Context) {
-	// Parse and validate query parameters for pagination
-	page := 1
-	limit := 10
-	search := sanitizeSearchInput(c.Query("search"))
-	status := sanitizeStatusInput(c.Query("status"))
-	sortBy := sanitizeSortInput(c.DefaultQuery("sort_by", "created_at"))
-	order := sanitizeOrderInput(c.DefaultQuery("order", "desc"))
-
-	// Validate and parse page parameter
-	if pageStr := c.Query("page"); pageStr != "" {
-		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 && p <= 10000 {
-			page = p
-		} else if err != nil || p <= 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid page number"})
-			return
-		}
-	}
-
-	// Validate and parse limit parameter
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
-			limit = l
-		} else if err != nil || l <= 0 || l > 100 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid limit value. Must be between 1 and 100"})
-			return
-		}
-	}
-
-	// Create filter params
-	params := map[string]interface{}{
-		"page":   page,
-		"limit":  limit,
-		"search": search,
-		"status": status,
-		"sort_by": sortBy,
-		"order":  order,
-	}
-
-	tenants, total, err := h.adminService.GetAllTenantsWithPagination(c.Request.Context(), params)
+	tenants, err := h.adminService.GetAllTenants(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -490,9 +414,7 @@ func (h *AdminHandler) GetAllTenants(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"tenants": tenants,
-		"total":   total,
-		"page":    page,
-		"limit":   limit,
+		"total":   len(tenants),
 	})
 }
 
@@ -516,27 +438,81 @@ func (h *AdminHandler) GetDatabaseStats(c *gin.Context) {
 // Admin user management endpoints
 
 func (h *AdminHandler) CreateAdminUser(c *gin.Context) {
-	var req struct {
-		Email string `json:"email" binding:"required,email"`
-		Name  string `json:"name" binding:"required"`
-		Role  string `json:"role" binding:"required,oneof=admin super_admin"`
-	}
-
+	var req models.CreateAdminUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// TODO: Implement admin user creation
+	invitedByStr := c.GetString("user_id")
+	invitedBy, err := uuid.Parse(invitedByStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	admin, err := h.adminService.CreateAdminUser(c.Request.Context(), req, invitedBy)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
-		"message": "admin user creation endpoint - implement based on requirements",
-		"user":    req,
+		"success": true,
+		"message": "admin user created successfully",
+		"user":    models.AdminUserToResponse(admin),
 	})
 }
 
 func (h *AdminHandler) GetAdminUsers(c *gin.Context) {
-	// TODO: Implement admin user listing
-	c.JSON(http.StatusOK, gin.H{"message": "admin users listing endpoint - implement based on requirements"})
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	search := c.DefaultQuery("search", "")
+	role := c.DefaultQuery("role", "all")
+	department := c.DefaultQuery("department", "all")
+
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 10
+	}
+
+	admins, total, err := h.adminService.GetAdminUsers(c.Request.Context(), page, limit, search, role, department)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	responses := make([]*models.AdminUserResponse, len(admins))
+	for i := range admins {
+		responses[i] = models.AdminUserToResponse(&admins[i])
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"users": responses,
+		"total": total,
+		"page":  page,
+		"limit": limit,
+	})
+}
+
+func (h *AdminHandler) GetAdminUser(c *gin.Context) {
+	adminUserID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID"})
+		return
+	}
+
+	admin, err := h.adminService.GetAdminUserByID(c.Request.Context(), adminUserID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": models.AdminUserToResponse(admin),
+	})
 }
 
 func (h *AdminHandler) UpdateAdminUser(c *gin.Context) {
@@ -546,22 +522,29 @@ func (h *AdminHandler) UpdateAdminUser(c *gin.Context) {
 		return
 	}
 
-	var req struct {
-		Name   string `json:"name"`
-		Role   string `json:"role,omitempty" binding:"omitempty,oneof=admin super_admin"`
-		Active *bool  `json:"active"`
-	}
-
+	var req models.UpdateAdminUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// TODO: Implement admin user update
+	updatedByStr := c.GetString("user_id")
+	updatedBy, err := uuid.Parse(updatedByStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	admin, err := h.adminService.UpdateAdminUser(c.Request.Context(), adminUserID, req, updatedBy)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":     "admin user update endpoint - implement based on requirements",
-		"user_id":     adminUserID,
-		"update_data": req,
+		"success": true,
+		"message": "admin user updated successfully",
+		"user":    models.AdminUserToResponse(admin),
 	})
 }
 
@@ -572,69 +555,305 @@ func (h *AdminHandler) DeleteAdminUser(c *gin.Context) {
 		return
 	}
 
-	// TODO: Implement admin user deletion
+	deletedByStr := c.GetString("user_id")
+	deletedBy, err := uuid.Parse(deletedByStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	if err := h.adminService.DeleteAdminUser(c.Request.Context(), adminUserID, deletedBy); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "admin user deletion endpoint - implement based on requirements",
-		"user_id": adminUserID,
+		"success": true,
+		"message": "admin user deleted successfully",
 	})
 }
 
-// Sanitization helper functions
-func sanitizeSearchInput(input string) string {
-	// Remove any potentially dangerous characters
-	// Allow alphanumeric, spaces, @, ., +, -, _
-	re := regexp.MustCompile(`[^a-zA-Z0-9\s@.\+\-_]`)
-	sanitized := re.ReplaceAllString(input, "")
+// Invitation endpoints
 
-	// Trim whitespace and limit length
-	sanitized = strings.TrimSpace(sanitized)
-	if len(sanitized) > 100 {
-		sanitized = sanitized[:100]
+func (h *AdminHandler) InviteAdminUser(c *gin.Context) {
+	var req models.InviteAdminRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	return sanitized
+	invitedByStr := c.GetString("user_id")
+	invitedBy, err := uuid.Parse(invitedByStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	invitation, err := h.adminService.InviteAdminUser(c.Request.Context(), req, invitedBy)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"success":    true,
+		"message":    "invitation sent successfully",
+		"invitation": invitation,
+	})
 }
 
-func sanitizeStatusInput(input string) string {
-	// Only allow valid status values
-	validStatuses := []string{
-		"active", "trial", "no_subscription",
-		"suspended", "cancelled", "expired", "all", "",
+func (h *AdminHandler) AcceptInvitation(c *gin.Context) {
+	var req models.AcceptInvitationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	input = strings.ToLower(strings.TrimSpace(input))
-	for _, valid := range validStatuses {
-		if input == valid {
-			return input
-		}
+	admin, token, err := h.adminService.AcceptInvitation(c.Request.Context(), req.Token, req.Mobile)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	return ""
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "invitation accepted successfully",
+		"user":    models.AdminUserToResponse(admin),
+		"token":   token,
+	})
 }
 
-func sanitizeSortInput(input string) string {
-	// Only allow valid sort fields
-	validSortFields := []string{
-		"name", "created_at", "status",
-		"email", "phone", "updated_at",
+func (h *AdminHandler) RevokeInvitation(c *gin.Context) {
+	invitationID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid invitation ID"})
+		return
 	}
 
-	input = strings.ToLower(strings.TrimSpace(input))
-	for _, valid := range validSortFields {
-		if input == valid {
-			return input
-		}
+	revokedByStr := c.GetString("user_id")
+	revokedBy, err := uuid.Parse(revokedByStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
 	}
 
-	return "created_at"
+	if err := h.adminService.RevokeInvitation(c.Request.Context(), invitationID, revokedBy); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "invitation revoked successfully",
+	})
 }
 
-func sanitizeOrderInput(input string) string {
-	// Only allow asc or desc
-	input = strings.ToLower(strings.TrimSpace(input))
-	if input == "asc" || input == "desc" {
-		return input
+func (h *AdminHandler) GetPendingInvitations(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 10
 	}
 
-	return "desc"
+	invitations, total, err := h.adminService.GetPendingInvitations(c.Request.Context(), page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"invitations": invitations,
+		"total":       total,
+		"page":        page,
+		"limit":       limit,
+	})
+}
+
+// Activity endpoints
+
+func (h *AdminHandler) GetAdminActivity(c *gin.Context) {
+	adminUserID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID"})
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+
+	activities, total, err := h.adminService.GetAdminActivity(c.Request.Context(), adminUserID, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"activities": activities,
+		"total":      total,
+		"page":       page,
+		"limit":      limit,
+	})
+}
+
+// Profile endpoints
+
+func (h *AdminHandler) GetMyProfile(c *gin.Context) {
+	adminIDStr := c.GetString("user_id")
+	adminID, err := uuid.Parse(adminIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	admin, err := h.adminService.GetMyProfile(c.Request.Context(), adminID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": models.AdminUserToResponse(admin),
+	})
+}
+
+func (h *AdminHandler) UpdateMyProfile(c *gin.Context) {
+	adminIDStr := c.GetString("user_id")
+	adminID, err := uuid.Parse(adminIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	var req models.UpdateProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	admin, err := h.adminService.UpdateMyProfile(c.Request.Context(), adminID, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "profile updated successfully",
+		"user":    models.AdminUserToResponse(admin),
+	})
+}
+
+// Tenant detail endpoints
+
+func (h *AdminHandler) GetTenantDetail(c *gin.Context) {
+	tenantID, err := uuid.Parse(c.Param("tenant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant ID"})
+		return
+	}
+
+	detail, err := h.adminService.GetTenantDetail(c.Request.Context(), tenantID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, detail)
+}
+
+func (h *AdminHandler) GetTenantTimeline(c *gin.Context) {
+	tenantID, err := uuid.Parse(c.Param("tenant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant ID"})
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+
+	events, total, err := h.adminService.GetTenantTimeline(c.Request.Context(), tenantID, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"events": events,
+		"total":  total,
+		"page":   page,
+		"limit":  limit,
+	})
+}
+
+func (h *AdminHandler) DeactivateTenant(c *gin.Context) {
+	tenantID, err := uuid.Parse(c.Param("tenant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant ID"})
+		return
+	}
+
+	adminIDStr := c.GetString("user_id")
+	adminID, err := uuid.Parse(adminIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	c.ShouldBindJSON(&req)
+
+	if err := h.adminService.DeactivateTenant(c.Request.Context(), tenantID, adminID, req.Reason); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "tenant deactivated successfully",
+	})
+}
+
+func (h *AdminHandler) ReactivateTenant(c *gin.Context) {
+	tenantID, err := uuid.Parse(c.Param("tenant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant ID"})
+		return
+	}
+
+	adminIDStr := c.GetString("user_id")
+	adminID, err := uuid.Parse(adminIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid admin user ID in context"})
+		return
+	}
+
+	if err := h.adminService.ReactivateTenant(c.Request.Context(), tenantID, adminID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "tenant reactivated successfully",
+	})
 }

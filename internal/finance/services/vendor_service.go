@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +22,23 @@ func NewVendorService(db *database.DB, cache *cache.Cache) *VendorService {
 		db:    db,
 		cache: cache,
 	}
+}
+
+// clearVendorCache clears all possible vendor cache keys for a tenant
+// This ensures cache consistency across all vendor operations
+func (s *VendorService) clearVendorCache(ctx context.Context, tenantID uuid.UUID) {
+	// Clear cache for active vendors only (most common query)
+	s.cache.Delete(ctx, fmt.Sprintf("vendors:tenant:%s:inactive:false", tenantID.String()))
+
+	// Clear cache for all vendors (including inactive)
+	s.cache.Delete(ctx, fmt.Sprintf("vendors:tenant:%s:inactive:true", tenantID.String()))
+
+	// Clear cache for saas_admin "all tenants" queries
+	s.cache.Delete(ctx, fmt.Sprintf("vendors:tenant:all:inactive:false"))
+	s.cache.Delete(ctx, fmt.Sprintf("vendors:tenant:all:inactive:true"))
+
+	// Clear legacy cache key format for backward compatibility
+	s.cache.Delete(ctx, fmt.Sprintf("vendors:tenant:%s", tenantID.String()))
 }
 
 type VendorRequest struct {
@@ -145,9 +161,8 @@ func (s *VendorService) CreateVendor(ctx context.Context, req VendorRequest, ten
 		return nil, fmt.Errorf("failed to create vendor: %w", err)
 	}
 
-	// Clear cache
-	cacheKey := fmt.Sprintf("vendors:tenant:%s", tenantID.String())
-	s.cache.Delete(ctx, cacheKey)
+	// Clear all vendor caches
+	s.clearVendorCache(ctx, tenantID)
 
 	return s.buildVendorResponse(vendor, 0, 0, []models.VendorBankAccount{}), nil
 }
@@ -181,40 +196,24 @@ func (s *VendorService) GetVendors(ctx context.Context, tenantID uuid.UUID, incl
 		return nil, fmt.Errorf("failed to get vendors: %w", err)
 	}
 
-	// Batch-fetch totals for all vendors (eliminates N+1 queries)
-	type purchaseTotal struct {
-		VendorID       uuid.UUID `gorm:"column:vendor_id"`
-		TotalPurchases float64   `gorm:"column:total_purchases"`
-	}
-	var purchaseTotals []purchaseTotal
-	s.db.DB.Model(&models.StockPurchase{}).
-		Select("vendor_id, COALESCE(SUM(total_amount), 0) as total_purchases").
-		Where("tenant_id = ?", tenantID).
-		Group("vendor_id").
-		Scan(&purchaseTotals)
-	purchaseMap := make(map[uuid.UUID]float64, len(purchaseTotals))
-	for _, pt := range purchaseTotals {
-		purchaseMap[pt.VendorID] = pt.TotalPurchases
-	}
-
-	type balanceResult struct {
-		VendorID           uuid.UUID `gorm:"column:vendor_id"`
-		OutstandingBalance float64   `gorm:"column:outstanding_balance"`
-	}
-	var balanceResults []balanceResult
-	s.db.DB.Model(&models.VendorTransaction{}).
-		Select("vendor_id, COALESCE(SUM(CASE WHEN transaction_type = 'purchase' THEN amount WHEN transaction_type = 'payment' THEN -amount ELSE 0 END), 0) as outstanding_balance").
-		Where("tenant_id = ?", tenantID).
-		Group("vendor_id").
-		Scan(&balanceResults)
-	balanceMap := make(map[uuid.UUID]float64, len(balanceResults))
-	for _, br := range balanceResults {
-		balanceMap[br.VendorID] = br.OutstandingBalance
-	}
-
+	// Calculate totals for each vendor
 	var responses []VendorResponse
 	for _, vendor := range vendors {
-		response := s.buildVendorResponse(vendor, purchaseMap[vendor.ID], balanceMap[vendor.ID], vendor.BankAccounts)
+		// Get total purchases
+		var totalPurchases float64
+		s.db.DB.Model(&models.StockPurchase{}).
+			Where("vendor_id = ? AND tenant_id = ?", vendor.ID, tenantID).
+			Select("COALESCE(SUM(total_amount), 0)").
+			Scan(&totalPurchases)
+
+		// Get outstanding balance
+		var outstandingBalance float64
+		s.db.DB.Model(&models.VendorTransaction{}).
+			Where("vendor_id = ? AND tenant_id = ?", vendor.ID, tenantID).
+			Select("COALESCE(SUM(CASE WHEN transaction_type = 'purchase' THEN amount WHEN transaction_type = 'payment' THEN -amount ELSE 0 END), 0)").
+			Scan(&outstandingBalance)
+
+		response := s.buildVendorResponse(vendor, totalPurchases, outstandingBalance, vendor.BankAccounts)
 		responses = append(responses, *response)
 	}
 
@@ -296,9 +295,8 @@ func (s *VendorService) UpdateVendor(ctx context.Context, id uuid.UUID, req Vend
 		return nil, fmt.Errorf("failed to update vendor: %w", err)
 	}
 
-	// Clear cache
-	cacheKey := fmt.Sprintf("vendors:tenant:%s", tenantID.String())
-	s.cache.Delete(ctx, cacheKey)
+	// Clear all vendor caches
+	s.clearVendorCache(ctx, tenantID)
 
 	// Return updated vendor
 	return s.GetVendorByID(ctx, id, tenantID)
@@ -320,9 +318,8 @@ func (s *VendorService) DeleteVendor(ctx context.Context, id, tenantID uuid.UUID
 		return fmt.Errorf("failed to delete vendor: %w", err)
 	}
 
-	// Clear cache
-	cacheKey := fmt.Sprintf("vendors:tenant:%s", tenantID.String())
-	s.cache.Delete(ctx, cacheKey)
+	// Clear all vendor caches
+	s.clearVendorCache(ctx, tenantID)
 
 	return nil
 }
@@ -369,9 +366,8 @@ func (s *VendorService) AddVendorBankAccount(ctx context.Context, vendorID uuid.
 		return nil, fmt.Errorf("failed to create bank account: %w", err)
 	}
 
-	// Clear cache
-	cacheKey := fmt.Sprintf("vendors:tenant:%s", tenantID.String())
-	s.cache.Delete(ctx, cacheKey)
+	// Clear all vendor caches (bank account added affects vendor response)
+	s.clearVendorCache(ctx, tenantID)
 
 	return &VendorBankAccountResponse{
 		ID:            bankAccount.ID,
@@ -404,8 +400,10 @@ func (s *VendorService) CreateVendorTransaction(ctx context.Context, req VendorT
 		VendorID:        req.VendorID,
 		TransactionType: req.TransactionType,
 		Amount:          req.Amount,
-		Notes:           req.Description,
-		ReferenceNumber: req.ReferenceNo,
+		Description:     req.Description,
+		ReferenceNo:     req.ReferenceNo,
+		PaymentMethod:   req.PaymentMethod,
+		CreatedBy:       userID,
 	}
 
 	if err := s.db.DB.Create(&transaction).Error; err != nil {
@@ -418,8 +416,10 @@ func (s *VendorService) CreateVendorTransaction(ctx context.Context, req VendorT
 		VendorName:      vendor.Name,
 		TransactionType: transaction.TransactionType,
 		Amount:          transaction.Amount,
-		Description:     transaction.Notes,
-		ReferenceNo:     transaction.ReferenceNumber,
+		Description:     transaction.Description,
+		ReferenceNo:     transaction.ReferenceNo,
+		PaymentMethod:   transaction.PaymentMethod,
+		CreatedBy:       transaction.CreatedBy,
 		CreatedAt:       transaction.CreatedAt,
 	}, nil
 }
@@ -458,182 +458,16 @@ func (s *VendorService) GetVendorTransactions(ctx context.Context, vendorID, ten
 			VendorName:      vendorName,
 			TransactionType: transaction.TransactionType,
 			Amount:          transaction.Amount,
-			Description:     transaction.Notes,
-			ReferenceNo:     transaction.ReferenceNumber,
+			Description:     transaction.Description,
+			ReferenceNo:     transaction.ReferenceNo,
+			PaymentMethod:   transaction.PaymentMethod,
+			CreatedBy:       transaction.CreatedBy,
 			CreatedAt:       transaction.CreatedAt,
 		}
 		responses = append(responses, response)
 	}
 
 	return responses, total, nil
-}
-
-// Vendor Ledger Types
-type VendorLedgerEntry struct {
-	ID             uuid.UUID  `json:"id"`
-	Date           time.Time  `json:"date"`
-	Type           string     `json:"type"`            // "purchase", "payment", "adjustment"
-	ReferenceNo    string     `json:"reference_no"`
-	Description    string     `json:"description"`
-	Debit          float64    `json:"debit"`           // Purchases increase balance owed
-	Credit         float64    `json:"credit"`          // Payments decrease balance owed
-	RunningBalance float64    `json:"running_balance"`
-	PurchaseID     *uuid.UUID `json:"purchase_id,omitempty"`
-	PaymentMethod  string     `json:"payment_method,omitempty"`
-}
-
-type VendorLedgerResponse struct {
-	VendorID       uuid.UUID           `json:"vendor_id"`
-	VendorName     string              `json:"vendor_name"`
-	OpeningBalance float64             `json:"opening_balance"`
-	TotalDebits    float64             `json:"total_debits"`
-	TotalCredits   float64             `json:"total_credits"`
-	ClosingBalance float64             `json:"closing_balance"`
-	Entries        []VendorLedgerEntry `json:"entries"`
-	Total          int64               `json:"total"`
-	Page           int                 `json:"page"`
-	PageSize       int                 `json:"page_size"`
-}
-
-// GetVendorLedger returns a full ledger view with running balance for a vendor
-func (s *VendorService) GetVendorLedger(ctx context.Context, vendorID, tenantID uuid.UUID, page, pageSize int, startDate, endDate *time.Time) (*VendorLedgerResponse, error) {
-	// Verify vendor exists
-	var vendor models.Vendor
-	if err := s.db.DB.Where("id = ? AND tenant_id = ?", vendorID, tenantID).First(&vendor).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, fmt.Errorf("vendor not found")
-		}
-		return nil, fmt.Errorf("failed to get vendor: %w", err)
-	}
-
-	// Fetch all vendor transactions
-	var transactions []models.VendorTransaction
-	txQuery := s.db.DB.Where("vendor_id = ? AND tenant_id = ?", vendorID, tenantID)
-	if startDate != nil {
-		txQuery = txQuery.Where("created_at >= ?", startDate)
-	}
-	if endDate != nil {
-		txQuery = txQuery.Where("created_at <= ?", endDate)
-	}
-	if err := txQuery.Order("created_at ASC").Find(&transactions).Error; err != nil {
-		return nil, fmt.Errorf("failed to get transactions: %w", err)
-	}
-
-	// Fetch all approved stock purchases for this vendor
-	var purchases []models.StockPurchase
-	purchaseQuery := s.db.DB.Where("vendor_id = ? AND tenant_id = ? AND status = ?", vendorID, tenantID, "approved")
-	if startDate != nil {
-		purchaseQuery = purchaseQuery.Where("created_at >= ?", startDate)
-	}
-	if endDate != nil {
-		purchaseQuery = purchaseQuery.Where("created_at <= ?", endDate)
-	}
-	if err := purchaseQuery.Order("created_at ASC").Find(&purchases).Error; err != nil {
-		return nil, fmt.Errorf("failed to get purchases: %w", err)
-	}
-
-	// Build ledger entries from both transactions and purchases
-	var allEntries []VendorLedgerEntry
-
-	// Add purchase entries (from stock purchases that don't already have a matching transaction)
-	purchaseRefNos := make(map[string]bool)
-	for _, tx := range transactions {
-		if tx.TransactionType == "purchase" && tx.ReferenceNumber != "" {
-			purchaseRefNos[tx.ReferenceNumber] = true
-		}
-	}
-
-	for _, p := range purchases {
-		// Skip if there's already a transaction for this purchase
-		if purchaseRefNos[p.PurchaseNumber] {
-			continue
-		}
-		purchaseID := p.ID
-		entry := VendorLedgerEntry{
-			ID:          p.ID,
-			Date:        p.CreatedAt,
-			Type:        "purchase",
-			ReferenceNo: p.PurchaseNumber,
-			Description: fmt.Sprintf("Stock Purchase %s", p.PurchaseNumber),
-			Debit:       p.TotalAmount,
-			Credit:      0,
-			PurchaseID:  &purchaseID,
-		}
-		allEntries = append(allEntries, entry)
-	}
-
-	// Add transaction entries
-	for _, tx := range transactions {
-		entry := VendorLedgerEntry{
-			ID:          tx.ID,
-			Date:        tx.CreatedAt,
-			Type:        tx.TransactionType,
-			ReferenceNo: tx.ReferenceNumber,
-			Description: tx.Notes,
-		}
-
-		if tx.TransactionType == "purchase" {
-			entry.Debit = tx.Amount
-			entry.Credit = 0
-		} else if tx.TransactionType == "payment" {
-			entry.Debit = 0
-			entry.Credit = tx.Amount
-		} else {
-			// adjustment - could be positive or negative
-			if tx.Amount > 0 {
-				entry.Debit = tx.Amount
-			} else {
-				entry.Credit = -tx.Amount
-			}
-		}
-
-		allEntries = append(allEntries, entry)
-	}
-
-	// Sort all entries by date (O(n log n) instead of O(n²))
-	sort.Slice(allEntries, func(i, j int) bool {
-		return allEntries[i].Date.Before(allEntries[j].Date)
-	})
-
-	// Calculate running balance and totals
-	var runningBalance, totalDebits, totalCredits float64
-	for i := range allEntries {
-		runningBalance += allEntries[i].Debit - allEntries[i].Credit
-		allEntries[i].RunningBalance = runningBalance
-		totalDebits += allEntries[i].Debit
-		totalCredits += allEntries[i].Credit
-	}
-
-	// Pagination
-	total := int64(len(allEntries))
-	startIdx := (page - 1) * pageSize
-	endIdx := startIdx + pageSize
-	if startIdx > len(allEntries) {
-		startIdx = len(allEntries)
-	}
-	if endIdx > len(allEntries) {
-		endIdx = len(allEntries)
-	}
-
-	paginatedEntries := allEntries
-	if startIdx < len(allEntries) {
-		paginatedEntries = allEntries[startIdx:endIdx]
-	} else {
-		paginatedEntries = []VendorLedgerEntry{}
-	}
-
-	return &VendorLedgerResponse{
-		VendorID:       vendor.ID,
-		VendorName:     vendor.Name,
-		OpeningBalance: 0,
-		TotalDebits:    totalDebits,
-		TotalCredits:   totalCredits,
-		ClosingBalance: runningBalance,
-		Entries:        paginatedEntries,
-		Total:          total,
-		Page:           page,
-		PageSize:       pageSize,
-	}, nil
 }
 
 // Helper functions

@@ -17,8 +17,9 @@ import (
 	"github.com/liquorpro/go-backend/pkg/shared/cache"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
 	"github.com/liquorpro/go-backend/pkg/shared/database"
-	"github.com/liquorpro/go-backend/pkg/shared/logger"
+	"github.com/liquorpro/go-backend/pkg/shared/firebase"
 	"github.com/liquorpro/go-backend/pkg/shared/middleware"
+	"github.com/liquorpro/go-backend/pkg/shared/sms"
 )
 
 func main() {
@@ -45,6 +46,9 @@ func main() {
 		SSLMode:  cfg.Database.SSLMode,
 		TimeZone: cfg.Database.TimeZone,
 	}
+
+	log.Printf("Database Config - Host: %s, Port: %d, User: %s, DBName: %s",
+		dbConfig.Host, dbConfig.Port, dbConfig.User, dbConfig.DBName)
 
 	db, err := database.NewDatabase(dbConfig)
 	if err != nil {
@@ -73,21 +77,36 @@ func main() {
 	}
 	defer redisCache.Close()
 
-	// Initialize services
-	rateLimitService := services.NewRateLimitService(db, redisCache)
-	authService := services.NewAuthService(db, redisCache, &cfg.JWT, rateLimitService)
-	userService := services.NewUserService(db, redisCache)
-	tenantService := services.NewTenantService(db, redisCache)
+	// Initialize SMS service
+	smsAPIKey := os.Getenv("SMS_API_KEY")
+	smsSenderID := os.Getenv("SMS_SENDER_ID")
+	smsAPIURL := os.Getenv("SMS_API_URL")
 
-	// Initialize logger for login rate limiter
-	zapLogger, err := logger.NewLogger(cfg.App.Environment)
-	if err != nil {
-		log.Printf("Warning: Failed to initialize logger for rate limiter: %v", err)
-		zapLogger = nil
+	var smsService services.SMSServiceInterface
+	if smsAPIKey != "" && smsSenderID != "" && smsAPIURL != "" {
+		smsService = sms.NewSMSService(smsAPIKey, smsSenderID, smsAPIURL)
+		log.Println("✅ SMS service initialized successfully")
+	} else {
+		log.Println("⚠️ SMS service not configured - OTPs will only be logged")
 	}
 
-	// Initialize handlers with login rate limiter
-	authHandlers := handlers.NewAuthHandlersWithRateLimiter(authService, userService, tenantService, redisCache.Client(), zapLogger)
+	// Initialize Firebase Auth Verifier (graceful failure — old OTP flow still works)
+	var firebaseVerifier *firebase.AuthVerifier
+	fbVerifier, fbErr := firebase.NewAuthVerifier()
+	if fbErr != nil {
+		log.Printf("⚠️ Firebase Auth Verifier not available: %v", fbErr)
+	} else {
+		firebaseVerifier = fbVerifier
+	}
+
+	// Initialize services
+	rateLimitService := services.NewRateLimitService(db, redisCache)
+	authService := services.NewAuthService(db, redisCache, &cfg.JWT, rateLimitService, smsService, firebaseVerifier)
+	userService := services.NewUserService(db, redisCache, smsService, firebaseVerifier)
+	tenantService := services.NewTenantService(db, redisCache)
+
+	// Initialize handlers
+	authHandlers := handlers.NewAuthHandlers(authService, userService, tenantService)
 	rateLimitHandlers := handlers.NewRateLimitHandlers(rateLimitService)
 
 	// Create router

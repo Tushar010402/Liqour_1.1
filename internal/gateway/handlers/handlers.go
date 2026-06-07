@@ -1,46 +1,98 @@
 package handlers
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/liquorpro/go-backend/pkg/messaging"
 	"github.com/liquorpro/go-backend/pkg/shared/config"
-)
-
-var (
-	standardTransport = &http.Transport{
-		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-	}
-	standardClient = &http.Client{
-		Timeout:   60 * time.Second,
-		Transport: standardTransport,
-	}
-	extendedClient = &http.Client{
-		Timeout:   300 * time.Second,
-		Transport: standardTransport,
-	}
-	healthClient = &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: standardTransport,
-	}
+	ws "github.com/liquorpro/go-backend/pkg/websocket"
+	"go.uber.org/zap"
 )
 
 // GatewayHandlers handles API gateway routing and service communication
 type GatewayHandlers struct {
 	config     *config.Config
 	httpClient *http.Client
+	wsManager  *ws.Manager
+	logger     *zap.Logger
 }
 
 // NewGatewayHandlers creates a new gateway handlers instance
-func NewGatewayHandlers(config *config.Config, httpClient *http.Client) *GatewayHandlers {
+func NewGatewayHandlers(config *config.Config, httpClient *http.Client, kafkaClient *messaging.KafkaClient, logger *zap.Logger) *GatewayHandlers {
+	// Create WebSocket manager with JWT authentication function
+	authFunc := func(tokenString string) (userID, tenantID, role string, err error) {
+		if tokenString == "" {
+			return "", "", "", fmt.Errorf("token is required")
+		}
+
+		// Parse and validate JWT token
+		token, parseErr := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			// Validate signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(config.JWT.Secret), nil
+		})
+
+		if parseErr != nil {
+			logger.Warn("JWT parse error", zap.Error(parseErr))
+			return "", "", "", fmt.Errorf("invalid token: %w", parseErr)
+		}
+
+		if !token.Valid {
+			return "", "", "", fmt.Errorf("token is not valid")
+		}
+
+		// Extract claims
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			return "", "", "", fmt.Errorf("invalid token claims")
+		}
+
+		// Extract user_id
+		userIDClaim, ok := claims["user_id"].(string)
+		if !ok {
+			return "", "", "", fmt.Errorf("user_id not found in token")
+		}
+
+		// Extract tenant_id
+		tenantIDClaim, ok := claims["tenant_id"].(string)
+		if !ok {
+			return "", "", "", fmt.Errorf("tenant_id not found in token")
+		}
+
+		// Extract role (optional, default to "user")
+		roleClaim, ok := claims["role"].(string)
+		if !ok {
+			roleClaim = "user" // Default role
+		}
+
+		logger.Info("WebSocket JWT validated",
+			zap.String("user_id", userIDClaim),
+			zap.String("tenant_id", tenantIDClaim),
+			zap.String("role", roleClaim))
+
+		return userIDClaim, tenantIDClaim, roleClaim, nil
+	}
+
+	wsManager := ws.NewManager(ws.ManagerConfig{
+		KafkaClient: kafkaClient,
+		Logger:      logger,
+		AuthFunc:    authFunc,
+	})
+
 	return &GatewayHandlers{
 		config:     config,
 		httpClient: httpClient,
+		wsManager:  wsManager,
+		logger:     logger,
 	}
 }
 
@@ -54,7 +106,7 @@ func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
 			return
 		}
 
-		// Build target URL
+		// Build target URL - strip service prefix for microservices
 		path := c.Request.URL.Path
 		targetPath := h.transformPath(path, serviceName)
 		targetURL := serviceURL + targetPath
@@ -62,36 +114,47 @@ func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
 			targetURL += "?" + c.Request.URL.RawQuery
 		}
 
-		// Select appropriate shared client based on path
-		client := standardClient
-		if strings.Contains(path, "smart-sale") || strings.Contains(path, "ocr") {
-			client = extendedClient
+		// For OCR endpoints with large payloads, use streaming to avoid memory issues
+		// Smart Sale also uses AI vision processing and needs similar handling
+		isOCREndpoint := strings.Contains(path, "/ocr/") || strings.Contains(path, "/smart-sale/") || strings.Contains(path, "/smart-purchase/") || strings.Contains(path, "/smart-setup/")
+		// For Excel template endpoints, longer timeout is needed for file generation
+		isExcelEndpoint := strings.Contains(path, "/template/download") || strings.Contains(path, "/bulk-import")
+
+		var bodyReader io.Reader
+		if c.Request.Body != nil {
+			if isOCREndpoint {
+				// For OCR endpoints, stream the body directly
+				bodyReader = c.Request.Body
+			} else {
+				// For other endpoints, read body into memory for potential retry
+				bodyBytes, err := io.ReadAll(c.Request.Body)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+					return
+				}
+				bodyReader = bytes.NewReader(bodyBytes)
+			}
 		}
 
-		// Create the proxy request with context propagation for proper cancellation
-		req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, c.Request.Body)
+		// Create new request
+		req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, bodyReader)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create proxy request"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
 			return
 		}
 
-		// Copy all headers from original request
+		// Copy headers
 		for key, values := range c.Request.Header {
 			for _, value := range values {
 				req.Header.Add(key, value)
 			}
 		}
 
-		// Set Content-Length if known
-		if c.Request.ContentLength > 0 {
-			req.ContentLength = c.Request.ContentLength
-		}
-
 		// Add gateway headers
 		req.Header.Set("X-Gateway", "liquorpro-gateway")
 		req.Header.Set("X-Service", serviceName)
 
-		// Forward user context from auth middleware
+		// Forward user context if available
 		if userID := c.GetString("user_id"); userID != "" {
 			req.Header.Set("X-User-ID", userID)
 		}
@@ -101,29 +164,65 @@ func (h *GatewayHandlers) ProxyRequest(serviceName string) gin.HandlerFunc {
 		if role := c.GetString("role"); role != "" {
 			req.Header.Set("X-User-Role", role)
 		}
+		if perms, exists := c.Get("permissions"); exists {
+			if permsList, ok := perms.([]interface{}); ok {
+				permsStr := make([]string, 0, len(permsList))
+				for _, p := range permsList {
+					if s, ok := p.(string); ok {
+						permsStr = append(permsStr, s)
+					}
+				}
+				if len(permsStr) > 0 {
+					req.Header.Set("X-User-Permissions", strings.Join(permsStr, ","))
+				}
+			}
+		}
 
-		// Execute the request
+		// For OCR, Smart Sale and Excel endpoints, set longer timeout
+		client := h.httpClient
+		if isOCREndpoint || isExcelEndpoint {
+			client = &http.Client{
+				Timeout: 180 * time.Second, // 3 minutes for AI processing (multiple images with Gemini)
+			}
+		}
+
+		// Make request to service
 		resp, err := client.Do(req)
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "Service unavailable", "details": err.Error()})
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Service unavailable"})
 			return
 		}
 		defer resp.Body.Close()
 
-		// Copy response headers
+		// Copy response headers (excluding hop-by-hop headers)
+		hopHeaders := map[string]bool{
+			"Connection":          true,
+			"Keep-Alive":          true,
+			"Transfer-Encoding":   true,
+			"TE":                  true,
+			"Trailer":             true,
+			"Upgrade":             true,
+			"Proxy-Authorization": true,
+			"Proxy-Authenticate":  true,
+		}
+
 		for key, values := range resp.Header {
-			for _, value := range values {
-				c.Writer.Header().Add(key, value)
+			if !hopHeaders[key] {
+				for _, value := range values {
+					c.Header(key, value)
+				}
 			}
 		}
 
-		// Write status code
-		c.Writer.WriteHeader(resp.StatusCode)
+		// Stream response body
+		c.Status(resp.StatusCode)
 
-		// Stream response body directly to client
-		if _, err := io.Copy(c.Writer, resp.Body); err != nil {
-			c.Abort()
-			return
+		// Use buffered copying for better performance
+		buf := make([]byte, 32*1024) // 32KB buffer
+		_, err = io.CopyBuffer(c.Writer, resp.Body, buf)
+		if err != nil && err != io.EOF {
+			// Log error but don't send response as headers are already sent
+			// The client will handle partial response
 		}
 	}
 }
@@ -151,18 +250,8 @@ func (h *GatewayHandlers) GetVersion(c *gin.Context) {
 	})
 }
 
-// ServiceDiscovery returns available services and their endpoints (cached 30s)
-var (
-	sdCache     gin.H
-	sdCacheTime time.Time
-)
-
+// ServiceDiscovery returns available services and their endpoints
 func (h *GatewayHandlers) ServiceDiscovery(c *gin.Context) {
-	if sdCache != nil && time.Since(sdCacheTime) < 30*time.Second {
-		c.JSON(http.StatusOK, sdCache)
-		return
-	}
-
 	services := gin.H{
 		"auth": gin.H{
 			"url":    h.config.Services.Auth.URL,
@@ -180,16 +269,16 @@ func (h *GatewayHandlers) ServiceDiscovery(c *gin.Context) {
 			"url":    h.config.Services.Finance.URL,
 			"status": h.checkServiceHealth(h.config.Services.Finance.URL),
 		},
+		"saas": gin.H{
+			"url":    "http://saas:8095",
+			"status": h.checkServiceHealth("http://saas:8095"),
+		},
 	}
 
-	result := gin.H{
+	c.JSON(http.StatusOK, gin.H{
 		"gateway":  h.config.Services.Gateway.URL,
 		"services": services,
-	}
-	sdCache = result
-	sdCacheTime = time.Now()
-
-	c.JSON(http.StatusOK, result)
+	})
 }
 
 // transformPath strips the service prefix from the path
@@ -200,10 +289,6 @@ func (h *GatewayHandlers) transformPath(path, serviceName string) string {
 		// Transform /api/sales/* to /* for sales service
 		if strings.HasPrefix(path, "/api/sales/") {
 			return strings.Replace(path, "/api/sales/", "/", 1)
-		}
-		// Transform /api/reports/* to /reports/* for reports service (purcha reports)
-		if strings.HasPrefix(path, "/api/reports/") {
-			return strings.Replace(path, "/api/reports/", "/reports/", 1)
 		}
 	case "inventory":
 		// Keep saas-brands paths intact
@@ -232,54 +317,9 @@ func (h *GatewayHandlers) transformPath(path, serviceName string) string {
 		if strings.HasPrefix(path, "/api/finance/") {
 			return strings.Replace(path, "/api/finance/", "/", 1)
 		}
-		// Transform /api/notifications/* to /notifications/* for finance service
-		// Notification routes are handled by finance service
-		if strings.HasPrefix(path, "/api/notifications/") {
-			return strings.Replace(path, "/api/notifications/", "/notifications/", 1)
-		}
-		if path == "/api/notifications" {
-			return "/notifications"
-		}
-		// Transform /api/alarms/* to /alarms/* for finance service
-		if strings.HasPrefix(path, "/api/alarms/") {
-			return strings.Replace(path, "/api/alarms/", "/alarms/", 1)
-		}
-		if path == "/api/alarms" {
-			return "/alarms"
-		}
-		// Transform /api/logs/* to /logs/* for finance service (app logging)
-		if strings.HasPrefix(path, "/api/logs/") {
-			return strings.Replace(path, "/api/logs/", "/logs/", 1)
-		}
-		if path == "/api/logs" {
-			return "/logs"
-		}
 	case "saas":
-		// Transform /api/inventory/brand-categories to /api/internal/brands/categories (for Flutter app)
-		if path == "/api/inventory/brand-categories" {
-			return "/api/internal/brands/categories"
-		}
-		if path == "/api/inventory/brand-subcategories" {
-			return "/api/internal/brands/subcategories"
-		}
-		// Different transformations for different super-admin endpoints
-		if strings.HasPrefix(path, "/api/super-admin/brands/onboarding-stats") ||
-			strings.HasPrefix(path, "/api/super-admin/brands/packages") ||
-			strings.HasPrefix(path, "/api/super-admin/tenants") {
-			// These endpoints exist under /api/super-admin in saas service
-			return path
-		}
-		// Transform other super-admin brand paths to internal paths
-		if strings.HasPrefix(path, "/api/super-admin/brands") {
-			return strings.Replace(path, "/api/super-admin/brands", "/api/internal/brands", 1)
-		}
-		// Transform /api/saas/brands/* to /api/internal/brands/* (for tenant access to brand catalog)
-		if strings.HasPrefix(path, "/api/saas/brands/") {
-			return strings.Replace(path, "/api/saas/brands/", "/api/internal/brands/", 1)
-		}
-		if strings.HasPrefix(path, "/api/saas/") {
-			return strings.Replace(path, "/api/saas/", "/api/", 1)
-		}
+		// SaaS service already registers routes under /api/saas/, so no transformation needed
+		return path
 	case "auth":
 		// Auth service paths don't need transformation
 		return path
@@ -317,7 +357,11 @@ func (h *GatewayHandlers) checkServiceHealth(serviceURL string) string {
 	}
 	req.Header.Set("User-Agent", "liquorpro-gateway-health-check")
 
-	resp, err := healthClient.Do(req)
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return "unhealthy"
 	}
@@ -369,4 +413,147 @@ func (h *GatewayHandlers) setServiceURL(serviceName, url string) {
 	case "finance":
 		h.config.Services.Finance.URL = url
 	}
+}
+
+// HandleWebSocket handles WebSocket upgrade requests
+func (h *GatewayHandlers) HandleWebSocket(c *gin.Context) {
+	h.wsManager.HandleWebSocket(c)
+}
+
+// GetWebSocketStats returns WebSocket connection statistics
+func (h *GatewayHandlers) GetWebSocketStats(c *gin.Context) {
+	stats := h.wsManager.GetConnectionStats()
+	c.JSON(http.StatusOK, stats)
+}
+
+// BroadcastInventoryUpdate broadcasts inventory updates via WebSocket
+func (h *GatewayHandlers) BroadcastInventoryUpdate(tenantID, productID string, updates map[string]interface{}) {
+	h.wsManager.BroadcastInventoryUpdate(tenantID, productID, updates)
+}
+
+// BroadcastSaleUpdate broadcasts sale updates via WebSocket
+func (h *GatewayHandlers) BroadcastSaleUpdate(tenantID, saleID string, saleData map[string]interface{}) {
+	h.wsManager.BroadcastSaleUpdate(tenantID, saleID, saleData)
+}
+
+// BroadcastCashFlowUpdate broadcasts cash flow updates via WebSocket
+func (h *GatewayHandlers) BroadcastCashFlowUpdate(tenantID, flowType string, amount float64, details map[string]interface{}) {
+	h.wsManager.BroadcastCashFlowUpdate(tenantID, flowType, amount, details)
+}
+
+// BroadcastNotification sends notifications via WebSocket
+func (h *GatewayHandlers) BroadcastNotification(tenantID, userID string, notification map[string]interface{}) {
+	h.wsManager.BroadcastNotification(tenantID, userID, notification)
+}
+
+// BroadcastDashboardUpdate broadcasts dashboard metric updates
+func (h *GatewayHandlers) BroadcastDashboardUpdate(tenantID string, metrics map[string]interface{}) {
+	h.wsManager.BroadcastDashboardUpdate(tenantID, metrics)
+}
+
+// BroadcastOCRProgress broadcasts OCR progress updates via WebSocket (v1.0.28)
+func (h *GatewayHandlers) BroadcastOCRProgress(tenantID, sessionID, batchID string, progressData map[string]interface{}) {
+	h.wsManager.BroadcastOCRProgress(tenantID, sessionID, batchID, progressData)
+}
+
+// HandleOCRProgressBroadcast handles HTTP requests from services to broadcast OCR progress (v1.0.28)
+func (h *GatewayHandlers) HandleOCRProgressBroadcast(c *gin.Context) {
+	var req struct {
+		TenantID     string                 `json:"tenant_id" binding:"required"`
+		SessionID    string                 `json:"session_id"`
+		BatchID      string                 `json:"batch_id"`
+		ProgressData map[string]interface{} `json:"progress_data" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.Warn("Invalid OCR broadcast request", zap.Error(err))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
+		return
+	}
+
+	h.logger.Info("📡 Received OCR broadcast request",
+		zap.String("tenant_id", req.TenantID),
+		zap.String("batch_id", req.BatchID),
+		zap.String("session_id", req.SessionID),
+		zap.Any("progress_data", req.ProgressData))
+
+	h.BroadcastOCRProgress(req.TenantID, req.SessionID, req.BatchID, req.ProgressData)
+
+	h.logger.Info("✅ OCR broadcast forwarded to WebSocket clients",
+		zap.String("tenant_id", req.TenantID),
+		zap.String("batch_id", req.BatchID))
+
+	c.JSON(http.StatusOK, gin.H{"status": "broadcast_sent"})
+}
+
+// RegisterDevice handles FCM device registration (stub - accepts and acknowledges)
+func (h *GatewayHandlers) RegisterDevice(c *gin.Context) {
+	var req struct {
+		Token    string `json:"token"`
+		Platform string `json:"platform"`
+		Device   string `json:"device"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		// Even on error, return success to prevent app errors
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "Device registration acknowledged",
+		})
+		return
+	}
+
+	h.logger.Info("Device registration received",
+		zap.String("platform", req.Platform),
+		zap.String("device", req.Device))
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Device registered successfully",
+	})
+}
+
+// BatchLogs handles client log batch uploads (stub - accepts and acknowledges)
+func (h *GatewayHandlers) BatchLogs(c *gin.Context) {
+	// Accept the logs but don't process them (stub implementation)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Logs received",
+	})
+}
+
+// GetProductSizes returns available product sizes (stub - returns empty for now)
+func (h *GatewayHandlers) GetProductSizes(c *gin.Context) {
+	// Return empty sizes array - app handles this gracefully
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"sizes":   []interface{}{},
+		"message": "Sizes endpoint not yet implemented",
+	})
+}
+
+// GetNotifications returns notifications list (stub)
+func (h *GatewayHandlers) GetNotifications(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"notifications": []interface{}{},
+		"total":         0,
+		"unread_count":  0,
+	})
+}
+
+// GetUnreadCount returns unread notification count (stub)
+func (h *GatewayHandlers) GetUnreadCount(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success":      true,
+		"unread_count": 0,
+	})
+}
+
+// Shutdown gracefully shuts down the gateway handlers including WebSocket manager
+func (h *GatewayHandlers) Shutdown() {
+	if h.wsManager != nil {
+		h.wsManager.Shutdown()
+	}
+	h.logger.Info("Gateway handlers shutdown complete")
 }

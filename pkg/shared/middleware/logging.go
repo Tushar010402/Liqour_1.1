@@ -1,9 +1,8 @@
 package middleware
 
 import (
-	"time"
-
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/liquorpro/go-backend/pkg/shared/logger"
 )
 
@@ -12,33 +11,52 @@ func LoggingMiddleware() gin.HandlerFunc {
 	return logger.LogRequest
 }
 
-// RequestIDMiddleware adds unique request IDs
-func RequestIDMiddleware() gin.HandlerFunc {
+// CorrelationIDMiddleware adds correlation IDs for distributed tracing
+// This middleware should be added first in the middleware chain
+func CorrelationIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		requestID := c.GetHeader("X-Request-ID")
-		if requestID == "" {
-			// Generate a simple request ID (you might want to use UUID here)
-			requestID = generateRequestID()
+		// Check for existing correlation ID from upstream services or clients
+		correlationID := c.GetHeader("X-Correlation-ID")
+		if correlationID == "" {
+			// Check alternative header names
+			correlationID = c.GetHeader("X-Request-ID")
 		}
 
-		c.Header("X-Request-ID", requestID)
-		c.Set("request_id", requestID)
+		// Generate new correlation ID if not present
+		if correlationID == "" {
+			correlationID = uuid.New().String()
+		}
+
+		// Set correlation ID in response headers for clients to track
+		c.Header("X-Correlation-ID", correlationID)
+		c.Header("X-Request-ID", correlationID)
+
+		// Store in context for use throughout request lifecycle
+		c.Set("correlation_id", correlationID)
+		c.Set("request_id", correlationID)
 
 		c.Next()
 	}
 }
 
-func generateRequestID() string {
-	return time.Now().Format("20060102150405") + "-" + randomString(6)
+// RequestIDMiddleware is an alias for CorrelationIDMiddleware
+// for backward compatibility
+func RequestIDMiddleware() gin.HandlerFunc {
+	return CorrelationIDMiddleware()
 }
 
-func randomString(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	result := make([]byte, n)
-	seed := uint64(time.Now().UnixNano())
-	for i := range result {
-		result[i] = letters[seed%uint64(len(letters))]
-		seed = seed*1103515245 + 12345 // LCG for fast pseudo-random
+// TraceContextMiddleware adds additional trace context for observability
+func TraceContextMiddleware(serviceName, version string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Add service metadata to context
+		c.Set("service_name", serviceName)
+		c.Set("service_version", version)
+
+		// Add trace span ID (different from correlation ID)
+		spanID := uuid.New().String()
+		c.Set("span_id", spanID)
+		c.Header("X-Span-ID", spanID)
+
+		c.Next()
 	}
-	return string(result)
 }

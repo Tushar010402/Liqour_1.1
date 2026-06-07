@@ -22,9 +22,9 @@ func AllModels() []interface{} {
 
 		// Inventory models
 		&Category{},
-		&Subcategory{},
+		// &Subcategory{}, // Temporarily disabled - schema conflict with existing table
 		&Brand{},
-		&ProductTemplate{},
+		// &ProductTemplate{}, // Temporarily disabled - schema conflict (integer vs UUID IDs)
 		&Product{},
 		&BrandPricing{},
 		&Stock{},
@@ -33,7 +33,10 @@ func AllModels() []interface{} {
 		&StockPurchase{},
 		&StockPurchaseItem{},
 		&StockPurchasePayment{},
-		&StockPurchaseDraft{},
+		&SmartPurchaseJob{},
+		&StockSetupRecord{},
+		&StockSetupItem{},
+		&SmartStockSetupJob{},
 
 		// Sales models
 		&Sale{},
@@ -43,9 +46,10 @@ func AllModels() []interface{} {
 		&SaleReturnItem{},
 		&DailySalesRecord{},
 		&DailySalesItem{},
-		&DailySalesExpense{}, // NEW: Expense breakdown for daily sales
 		&SaleFinanceLog{},
 		&DailySaleSummary{},
+		&DayClosingRecord{},
+		&SmartSaleSetupJob{},
 
 		// Finance models
 		&Vendor{},
@@ -58,6 +62,11 @@ func AllModels() []interface{} {
 		&CashDeposit{},
 		&ExecutiveFinance{},
 		&Expense{},
+		// Cash management models (CRITICAL - these were missing!)
+		&CashHolding{},
+		&CashCollection{},
+		&CashRequest{},
+		&CashTransaction{},
 
 		// Assistant Manager models
 		&MoneyCollection{},
@@ -70,23 +79,30 @@ func AllModels() []interface{} {
 		&RateLimit{},
 		&RateLimitLog{},
 
-		// Documentation models
-		&DocsAccess{},
-		&DocsComment{},
-		&DocsEdit{},
+		// OCR Learning models
+		&OCRBrandAlias{},
+
+		// AI Feedback
+		&AIFeedback{},
 	}
 }
 
 // MigrateDB runs all database migrations
 func MigrateDB(db *gorm.DB) error {
-	// First, handle User model with special NULL tenant_id handling
+	// CRITICAL: Create Tenant table FIRST before anything else
+	// Users table has foreign key to tenants(id)
+	if err := db.AutoMigrate(&Tenant{}); err != nil {
+		return fmt.Errorf("failed to migrate tenant model: %w", err)
+	}
+
+	// Second, handle User model with special NULL tenant_id handling
 	if err := migrateUserModel(db); err != nil {
 		return fmt.Errorf("failed to migrate user model: %w", err)
 	}
 
-	// Migrate all other models (excluding User since we handled it above)
+	// Migrate all other models (excluding Tenant and User since we handled them above)
 	models := []interface{}{
-		// Base models (skip Tenant for now)
+		// Base models
 		&Shop{},
 		&TenantRole{},
 		&TenantPermission{},
@@ -97,7 +113,7 @@ func MigrateDB(db *gorm.DB) error {
 		&Category{},
 		// &Subcategory{}, // Temporarily disabled - schema conflict with existing table
 		&Brand{},
-		&ProductTemplate{},
+		// &ProductTemplate{}, // Temporarily disabled - schema conflict (integer vs UUID IDs)
 		&Product{},
 		&BrandPricing{},
 		&Stock{},
@@ -106,7 +122,7 @@ func MigrateDB(db *gorm.DB) error {
 		&StockPurchase{},
 		&StockPurchaseItem{},
 		&StockPurchasePayment{},
-		&StockPurchaseDraft{},
+		&SmartPurchaseJob{},
 
 		// Sales models - THESE ARE CRITICAL FOR DASHBOARD
 		&Sale{},
@@ -116,9 +132,10 @@ func MigrateDB(db *gorm.DB) error {
 		&SaleReturnItem{},
 		&DailySalesRecord{}, // This contains total_sales_amount column
 		&DailySalesItem{},
-		&DailySalesExpense{}, // NEW: Expense breakdown for daily sales
 		&SaleFinanceLog{},
 		&DailySaleSummary{},
+		&DayClosingRecord{},
+		&SmartSaleSetupJob{},
 
 		// Finance models
 		&Vendor{},
@@ -131,6 +148,11 @@ func MigrateDB(db *gorm.DB) error {
 		&CashDeposit{},
 		&ExecutiveFinance{},
 		&Expense{},
+		// Cash management models (CRITICAL - these were missing!)
+		&CashHolding{},
+		&CashCollection{},
+		&CashRequest{},
+		&CashTransaction{},
 
 		// Assistant Manager models
 		&MoneyCollection{},
@@ -143,10 +165,8 @@ func MigrateDB(db *gorm.DB) error {
 		&RateLimit{},
 		&RateLimitLog{},
 
-		// Documentation models
-		&DocsAccess{},
-		&DocsComment{},
-		&DocsEdit{},
+		// AI Feedback
+		&AIFeedback{},
 	}
 
 	// Auto-migrate all models
@@ -384,39 +404,12 @@ func CreateIndexes(db *gorm.DB) error {
 		return err
 	}
 
-	// ====== Auth Service Performance Indexes ======
-	// Critical for CheckDeviceLimit query (user_id + is_active)
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_active ON user_sessions(user_id, is_active) WHERE deleted_at IS NULL").Error; err != nil {
-		// Log but don't fail - partial index syntax might vary
-		fmt.Printf("Warning: idx_user_sessions_user_active: %v\n", err)
+	// Day closing indexes
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_day_closing_unique ON day_closing_records(tenant_id, shop_id, user_id, date) WHERE deleted_at IS NULL").Error; err != nil {
+		return err
 	}
-
-	// Optimize phone-based user lookups (OTP verification)
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_users_tenant_phone ON users(tenant_id, phone) WHERE deleted_at IS NULL").Error; err != nil {
-		fmt.Printf("Warning: idx_users_tenant_phone: %v\n", err)
-	}
-
-	// Optimize email-based user lookups (registration uniqueness check)
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users(tenant_id, email) WHERE deleted_at IS NULL").Error; err != nil {
-		fmt.Printf("Warning: idx_users_tenant_email: %v\n", err)
-	}
-
-	// Composite index for rate limit log queries
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_rate_limit_logs_composite ON rate_limit_logs(rate_limit_id, identifier, window_start)").Error; err != nil {
-		fmt.Printf("Warning: idx_rate_limit_logs_composite: %v\n", err)
-	}
-
-	// Index for active session count queries
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_user_sessions_active_device ON user_sessions(user_id, device_id) WHERE is_active = true AND deleted_at IS NULL").Error; err != nil {
-		fmt.Printf("Warning: idx_user_sessions_active_device: %v\n", err)
-	}
-
-	// Stock Purchase Draft indexes - unique constraint for one draft per user per shop per tenant
-	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_purchase_drafts_unique ON stock_purchase_drafts(tenant_id, shop_id, user_id) WHERE deleted_at IS NULL").Error; err != nil {
-		fmt.Printf("Warning: idx_stock_purchase_drafts_unique: %v\n", err)
-	}
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_stock_purchase_drafts_lookup ON stock_purchase_drafts(tenant_id, shop_id, user_id)").Error; err != nil {
-		fmt.Printf("Warning: idx_stock_purchase_drafts_lookup: %v\n", err)
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_day_closing_date ON day_closing_records(date)").Error; err != nil {
+		return err
 	}
 
 	return nil

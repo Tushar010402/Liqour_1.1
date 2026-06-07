@@ -1,0 +1,368 @@
+package observability
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+)
+
+// TracingConfig contains configuration for distributed tracing
+type TracingConfig struct {
+	ServiceName    string
+	ServiceVersion string
+	Environment    string
+	JaegerEndpoint string
+	OTLPEndpoint   string
+	SamplingRate   float64
+	Enabled        bool
+	Logger         *zap.Logger
+}
+
+// TracingProvider manages distributed tracing
+type TracingProvider struct {
+	tracer   trace.Tracer
+	provider *sdktrace.TracerProvider
+	config   TracingConfig
+	logger   *zap.Logger
+}
+
+// NewTracingProvider creates a new tracing provider
+func NewTracingProvider(config TracingConfig) (*TracingProvider, error) {
+	if !config.Enabled {
+		return &TracingProvider{
+			tracer: otel.Tracer(config.ServiceName),
+			config: config,
+			logger: config.Logger,
+		}, nil
+	}
+
+	// Create resource
+	res, err := resource.New(
+		context.Background(),
+		resource.WithAttributes(
+			semconv.ServiceName(config.ServiceName),
+			semconv.ServiceVersion(config.ServiceVersion),
+			semconv.DeploymentEnvironment(config.Environment),
+			attribute.String("service.namespace", "liquorpro"),
+		),
+		resource.WithHost(),
+		resource.WithContainer(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resource: %w", err)
+	}
+
+	// Create exporters
+	var exporter sdktrace.SpanExporter
+
+	if config.JaegerEndpoint != "" {
+		// Use Jaeger exporter
+		exporter, err = jaeger.New(
+			jaeger.WithCollectorEndpoint(
+				jaeger.WithEndpoint(config.JaegerEndpoint),
+			),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Jaeger exporter: %w", err)
+		}
+	} else if config.OTLPEndpoint != "" {
+		// Use OTLP exporter
+		exporter, err = otlptrace.New(
+			context.Background(),
+			otlptracegrpc.NewClient(
+				otlptracegrpc.WithEndpoint(config.OTLPEndpoint),
+				otlptracegrpc.WithInsecure(),
+			),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
+		}
+	} else {
+		// Use stdout exporter for development
+		exporter, err = stdoutExporter()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stdout exporter: %w", err)
+		}
+	}
+
+	// Create trace provider
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithResource(res),
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(config.SamplingRate)),
+	)
+
+	// Set global provider
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(
+		propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		),
+	)
+
+	return &TracingProvider{
+		tracer:   provider.Tracer(config.ServiceName),
+		provider: provider,
+		config:   config,
+		logger:   config.Logger,
+	}, nil
+}
+
+// StartSpan starts a new span
+func (tp *TracingProvider) StartSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	return tp.tracer.Start(ctx, name, opts...)
+}
+
+// StartSpanWithAttributes starts a new span with attributes
+func (tp *TracingProvider) StartSpanWithAttributes(ctx context.Context, name string, attrs map[string]interface{}) (context.Context, trace.Span) {
+	otelAttrs := make([]attribute.KeyValue, 0, len(attrs))
+	for k, v := range attrs {
+		otelAttrs = append(otelAttrs, attributeFromInterface(k, v))
+	}
+
+	return tp.tracer.Start(ctx, name, trace.WithAttributes(otelAttrs...))
+}
+
+// RecordError records an error in the current span
+func (tp *TracingProvider) RecordError(ctx context.Context, err error, opts ...trace.EventOption) {
+	span := trace.SpanFromContext(ctx)
+	if span != nil && span.IsRecording() {
+		span.RecordError(err, opts...)
+	}
+}
+
+// SetAttributes sets attributes on the current span
+func (tp *TracingProvider) SetAttributes(ctx context.Context, attrs map[string]interface{}) {
+	span := trace.SpanFromContext(ctx)
+	if span != nil && span.IsRecording() {
+		otelAttrs := make([]attribute.KeyValue, 0, len(attrs))
+		for k, v := range attrs {
+			otelAttrs = append(otelAttrs, attributeFromInterface(k, v))
+		}
+		span.SetAttributes(otelAttrs...)
+	}
+}
+
+// AddEvent adds an event to the current span
+func (tp *TracingProvider) AddEvent(ctx context.Context, name string, attrs map[string]interface{}) {
+	span := trace.SpanFromContext(ctx)
+	if span != nil && span.IsRecording() {
+		otelAttrs := make([]attribute.KeyValue, 0, len(attrs))
+		for k, v := range attrs {
+			otelAttrs = append(otelAttrs, attributeFromInterface(k, v))
+		}
+		span.AddEvent(name, trace.WithAttributes(otelAttrs...))
+	}
+}
+
+// Shutdown gracefully shuts down the tracing provider
+func (tp *TracingProvider) Shutdown(ctx context.Context) error {
+	if tp.provider != nil {
+		return tp.provider.Shutdown(ctx)
+	}
+	return nil
+}
+
+// TraceOperation wraps a function with tracing
+func (tp *TracingProvider) TraceOperation(ctx context.Context, name string, fn func(context.Context) error) error {
+	ctx, span := tp.StartSpan(ctx, name)
+	defer span.End()
+
+	start := time.Now()
+	err := fn(ctx)
+	duration := time.Since(start)
+
+	// Set span attributes
+	span.SetAttributes(
+		attribute.String("operation.name", name),
+		attribute.Int64("operation.duration_ms", duration.Milliseconds()),
+	)
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(trace.Status{Code: trace.StatusCodeError, Description: err.Error()})
+	} else {
+		span.SetStatus(trace.Status{Code: trace.StatusCodeOk})
+	}
+
+	return err
+}
+
+// TraceHTTPRequest traces an HTTP request
+func (tp *TracingProvider) TraceHTTPRequest(ctx context.Context, method, path string, statusCode int) {
+	span := trace.SpanFromContext(ctx)
+	if span != nil && span.IsRecording() {
+		span.SetAttributes(
+			semconv.HTTPMethod(method),
+			semconv.HTTPRoute(path),
+			semconv.HTTPStatusCode(statusCode),
+		)
+
+		if statusCode >= 400 {
+			span.SetStatus(trace.Status{
+				Code:        trace.StatusCodeError,
+				Description: fmt.Sprintf("HTTP %d", statusCode),
+			})
+		}
+	}
+}
+
+// TraceDatabase traces a database operation
+func (tp *TracingProvider) TraceDatabase(ctx context.Context, operation, table, query string) (context.Context, trace.Span) {
+	return tp.StartSpanWithAttributes(ctx, fmt.Sprintf("db.%s", operation), map[string]interface{}{
+		"db.system":    "postgresql",
+		"db.operation": operation,
+		"db.table":     table,
+		"db.statement": query,
+	})
+}
+
+// TraceKafka traces a Kafka operation
+func (tp *TracingProvider) TraceKafka(ctx context.Context, operation, topic string, partition int32) (context.Context, trace.Span) {
+	return tp.StartSpanWithAttributes(ctx, fmt.Sprintf("kafka.%s", operation), map[string]interface{}{
+		"messaging.system":           "kafka",
+		"messaging.operation":        operation,
+		"messaging.destination.name": topic,
+		"messaging.kafka.partition":  partition,
+	})
+}
+
+// TraceRedis traces a Redis operation
+func (tp *TracingProvider) TraceRedis(ctx context.Context, command string, key string) (context.Context, trace.Span) {
+	return tp.StartSpanWithAttributes(ctx, fmt.Sprintf("redis.%s", command), map[string]interface{}{
+		"db.system":    "redis",
+		"db.operation": command,
+		"db.redis.key": key,
+	})
+}
+
+// TracegRPC traces a gRPC call
+func (tp *TracingProvider) TracegRPC(ctx context.Context, method string, service string) (context.Context, trace.Span) {
+	return tp.StartSpanWithAttributes(ctx, fmt.Sprintf("grpc.%s", method), map[string]interface{}{
+		"rpc.system":  "grpc",
+		"rpc.service": service,
+		"rpc.method":  method,
+	})
+}
+
+// ExtractContext extracts trace context from carrier
+func (tp *TracingProvider) ExtractContext(ctx context.Context, carrier propagation.TextMapCarrier) context.Context {
+	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+}
+
+// InjectContext injects trace context into carrier
+func (tp *TracingProvider) InjectContext(ctx context.Context, carrier propagation.TextMapCarrier) {
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+}
+
+// attributeFromInterface converts an interface to an OpenTelemetry attribute
+func attributeFromInterface(key string, value interface{}) attribute.KeyValue {
+	switch v := value.(type) {
+	case string:
+		return attribute.String(key, v)
+	case int:
+		return attribute.Int(key, v)
+	case int64:
+		return attribute.Int64(key, v)
+	case float64:
+		return attribute.Float64(key, v)
+	case bool:
+		return attribute.Bool(key, v)
+	case []string:
+		return attribute.StringSlice(key, v)
+	case []int:
+		return attribute.IntSlice(key, v)
+	case []int64:
+		return attribute.Int64Slice(key, v)
+	case []float64:
+		return attribute.Float64Slice(key, v)
+	case []bool:
+		return attribute.BoolSlice(key, v)
+	default:
+		return attribute.String(key, fmt.Sprintf("%v", v))
+	}
+}
+
+// stdoutExporter creates a stdout exporter for development
+func stdoutExporter() (sdktrace.SpanExporter, error) {
+	// For production, use Jaeger or OTLP exporter
+	// This is a placeholder for development
+	return jaeger.New(
+		jaeger.WithCollectorEndpoint(),
+	)
+}
+
+// SpanOptions provides convenient span option builders
+type SpanOptions struct {
+	opts []trace.SpanStartOption
+}
+
+// NewSpanOptions creates new span options
+func NewSpanOptions() *SpanOptions {
+	return &SpanOptions{
+		opts: make([]trace.SpanStartOption, 0),
+	}
+}
+
+// WithSpanKind sets the span kind
+func (so *SpanOptions) WithSpanKind(kind trace.SpanKind) *SpanOptions {
+	so.opts = append(so.opts, trace.WithSpanKind(kind))
+	return so
+}
+
+// WithAttributes adds attributes
+func (so *SpanOptions) WithAttributes(attrs map[string]interface{}) *SpanOptions {
+	otelAttrs := make([]attribute.KeyValue, 0, len(attrs))
+	for k, v := range attrs {
+		otelAttrs = append(otelAttrs, attributeFromInterface(k, v))
+	}
+	so.opts = append(so.opts, trace.WithAttributes(otelAttrs...))
+	return so
+}
+
+// Build returns the span options
+func (so *SpanOptions) Build() []trace.SpanStartOption {
+	return so.opts
+}
+
+// Baggage provides baggage management
+type Baggage struct {
+	items map[string]string
+}
+
+// NewBaggage creates new baggage
+func NewBaggage() *Baggage {
+	return &Baggage{
+		items: make(map[string]string),
+	}
+}
+
+// Set sets a baggage item
+func (b *Baggage) Set(key, value string) *Baggage {
+	b.items[key] = value
+	return b
+}
+
+// Get gets a baggage item
+func (b *Baggage) Get(key string) (string, bool) {
+	val, ok := b.items[key]
+	return val, ok
+}
+
+// Items returns all baggage items
+func (b *Baggage) Items() map[string]string {
+	return b.items
+}

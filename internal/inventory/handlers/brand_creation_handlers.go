@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/liquorpro/go-backend/internal/inventory/services"
+	"github.com/liquorpro/go-backend/pkg/shared/models"
 )
 
 // BrandCreationHandler handles brand creation operations
@@ -35,20 +38,9 @@ func (h *BrandCreationHandler) CreateBrandWithVariants(c *gin.Context) {
 		return
 	}
 
-	// Get shop ID from query param or use default
-	shopIDStr := c.Query("shop_id")
-	var shopID uuid.UUID
-	if shopIDStr != "" {
-		shopID, err = uuid.Parse(shopIDStr)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shop ID format"})
-			return
-		}
-	} else {
-		// For now, create a default shop ID if not provided
-		// In production, this should be fetched from user's context
-		shopID = uuid.New() // This should be replaced with actual shop lookup
-	}
+	// Note: shop_id parameter is deprecated - service now creates stock for ALL tenant shops
+	// Keeping for backward compatibility but the value is no longer used
+	var shopID uuid.UUID // Unused - service creates stock for all shops
 
 	var req services.CreateBrandWithVariantsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -165,10 +157,21 @@ func (h *BrandCreationHandler) UpdateProductPricing(c *gin.Context) {
 		return
 	}
 
-	// Update pricing
-	product, err := h.enhancedProductService.UpdateProductPricing(c.Request.Context(), productID, tenantID, req)
+	// v1.0.253 — role-aware. Non-admin/manager MRP changes become a pending
+	// request (server-side decision from the JWT role; never trust client).
+	actor := pricingActorFromCtx(c)
+	product, pending, err := h.enhancedProductService.SubmitOrApplyPricing(
+		c.Request.Context(), productID, tenantID, req, actor)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if pending {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "pending",
+			"message": "MRP change submitted for manager approval",
+			"product": product,
+		})
 		return
 	}
 
@@ -176,6 +179,258 @@ func (h *BrandCreationHandler) UpdateProductPricing(c *gin.Context) {
 		"message": "Product pricing updated successfully",
 		"product": product,
 	})
+}
+
+// pricingActorFromCtx pulls role/user (set by the auth middleware from the JWT)
+// for the role-aware pricing + approval flow.
+func pricingActorFromCtx(c *gin.Context) services.PricingActor {
+	a := services.PricingActor{}
+	if v, ok := c.Get("role"); ok {
+		a.Role, _ = v.(string)
+	}
+	if v, ok := c.Get("user_id"); ok {
+		if s, _ := v.(string); s != "" {
+			if id, e := uuid.Parse(s); e == nil {
+				a.UserID = id
+			}
+		}
+	}
+	if sid := c.GetHeader("X-Shop-ID"); sid != "" {
+		if id, e := uuid.Parse(sid); e == nil {
+			a.ShopID = &id
+		}
+	} else if sid := c.PostForm("shop_id"); sid != "" {
+		if id, e := uuid.Parse(sid); e == nil {
+			a.ShopID = &id
+		}
+	}
+	return a
+}
+
+// ctxTenantUserRole pulls tenant_id/user_id/role from gin context (set by the
+// auth middleware) — mirrors ApproveStockSetup.
+func ctxTenantUserRole(c *gin.Context) (tenantID, userID uuid.UUID, role string, ok bool) {
+	tv, te := c.Get("tenant_id")
+	uv, ue := c.Get("user_id")
+	if !te || !ue {
+		return uuid.Nil, uuid.Nil, "", false
+	}
+	ts, _ := tv.(string)
+	us, _ := uv.(string)
+	tid, e1 := uuid.Parse(ts)
+	uid, e2 := uuid.Parse(us)
+	if e1 != nil || e2 != nil {
+		return uuid.Nil, uuid.Nil, "", false
+	}
+	if rv, rok := c.Get("role"); rok {
+		role, _ = rv.(string)
+	}
+	return tid, uid, role, true
+}
+
+// ListProductChangeRequests GET /product-change-requests
+func (h *BrandCreationHandler) ListProductChangeRequests(c *gin.Context) {
+	tenantID, _, _, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	page, pageSize := 1, 50
+	fmt.Sscanf(c.Query("page"), "%d", &page)
+	fmt.Sscanf(c.Query("page_size"), "%d", &pageSize)
+	res, err := h.enhancedProductService.ListProductChangeRequests(
+		c.Request.Context(), tenantID, c.Query("shop_id"), c.Query("status"), page, pageSize)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+// GetProductChangePendingCount GET /product-change-requests/pending-count
+func (h *BrandCreationHandler) GetProductChangePendingCount(c *gin.Context) {
+	tenantID, _, _, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	n, err := h.enhancedProductService.GetProductChangePendingCount(
+		c.Request.Context(), tenantID, c.Query("shop_id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"count": n})
+}
+
+// GetProductChangeRequest GET /product-change-requests/:id
+func (h *BrandCreationHandler) GetProductChangeRequest(c *gin.Context) {
+	tenantID, _, _, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	res, err := h.enhancedProductService.GetProductChangeRequest(c.Request.Context(), id, tenantID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+// ApproveProductChange POST /product-change-requests/:id/approve
+func (h *BrandCreationHandler) ApproveProductChange(c *gin.Context) {
+	tenantID, userID, role, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	res, err := h.enhancedProductService.ApproveProductChange(c.Request.Context(), id, tenantID, userID, role)
+	if err != nil {
+		if strings.Contains(err.Error(), "only admin or manager") {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+// RejectProductChange POST /product-change-requests/:id/reject
+func (h *BrandCreationHandler) RejectProductChange(c *gin.Context) {
+	tenantID, userID, role, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	if role != models.RoleAdmin && role != models.RoleManager {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only admin or manager can reject product changes"})
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body struct {
+		Reason string `json:"reason" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.enhancedProductService.RejectProductChange(c.Request.Context(), id, tenantID, userID, body.Reason); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Product change request rejected"})
+}
+
+// v1.0.344 — combined photo/name/MRP requests (grouped by capture-session
+// batch_id). One batch = one reviewable request on the web admin portal.
+
+// ListPhotoChangeBatches GET /product-change-requests/batches?shop_id=&status=
+func (h *BrandCreationHandler) ListPhotoChangeBatches(c *gin.Context) {
+	tenantID, _, _, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	batches, err := h.enhancedProductService.ListPhotoChangeBatches(
+		c.Request.Context(), tenantID, c.Query("shop_id"), c.Query("status"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"batches": batches})
+}
+
+// ApproveBatch POST /product-change-requests/batches/:batchId/approve
+func (h *BrandCreationHandler) ApproveBatch(c *gin.Context) {
+	tenantID, userID, role, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	batchID, err := uuid.Parse(c.Param("batchId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid batch id"})
+		return
+	}
+	n, err := h.enhancedProductService.ApproveBatch(c.Request.Context(), batchID, tenantID, userID, role)
+	if err != nil {
+		if strings.Contains(err.Error(), "only admin or manager") {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Combined request approved", "approved": n})
+}
+
+// RejectBatch POST /product-change-requests/batches/:batchId/reject
+func (h *BrandCreationHandler) RejectBatch(c *gin.Context) {
+	tenantID, userID, role, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	batchID, err := uuid.Parse(c.Param("batchId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid batch id"})
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	n, err := h.enhancedProductService.RejectBatch(c.Request.Context(), batchID, tenantID, userID, role, body.Reason)
+	if err != nil {
+		if strings.Contains(err.Error(), "only admin or manager") {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Combined request rejected", "rejected": n})
+}
+
+// RevertProductChange POST /product-change-requests/:id/revert — undo an
+// auto-applied change (restore the snapshotted name/MRP).
+func (h *BrandCreationHandler) RevertProductChange(c *gin.Context) {
+	tenantID, userID, role, ok := ctxTenantUserRole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "auth context missing"})
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	res, err := h.enhancedProductService.RevertProductChange(c.Request.Context(), id, tenantID, userID, role)
+	if err != nil {
+		if strings.Contains(err.Error(), "only admin or manager") {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, res)
 }
 
 // GetProductsByBrand gets all products for a specific brand

@@ -169,21 +169,64 @@ type WebhookEvent struct {
 
 // AdminUser represents super admin users
 type AdminUser struct {
+	ID           uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	Email        string         `json:"email" gorm:"unique"`
+	Mobile       string         `json:"mobile" gorm:"unique;not null"`
+	FirstName    string         `json:"first_name" gorm:"not null"`
+	LastName     string         `json:"last_name" gorm:"not null"`
+	Name         string         `json:"name" gorm:"not null"`
+	Role         string         `json:"role" gorm:"not null;default:'admin'"` // admin, super_admin, saas_admin
+	Permissions  []string       `json:"permissions" gorm:"serializer:json"`
+	Department   string         `json:"department" gorm:"default:'general'"`
+	InvitedBy    *uuid.UUID     `json:"invited_by" gorm:"type:uuid"`
+	AvatarURL    string         `json:"avatar_url"`
+	PasswordHash string         `json:"-" gorm:"column:password_hash"`
+	Active       bool           `json:"active" gorm:"default:true"`
+	LastLoginAt  *time.Time     `json:"last_login_at"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `json:"deleted_at" gorm:"index"`
+
+	// Relations
+	AuditLogs    []AuditLog    `json:"audit_logs,omitempty" gorm:"foreignKey:AdminUserID"`
+	InvitedByUser *AdminUser   `json:"-" gorm:"foreignKey:InvitedBy"`
+}
+
+// AdminInvitation represents a pending invitation for a new admin user
+type AdminInvitation struct {
 	ID          uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	Email       string         `json:"email" gorm:"unique"`
-	Mobile      string         `json:"mobile" gorm:"unique;not null"`
-	FirstName   string         `json:"first_name" gorm:"not null"`
-	LastName    string         `json:"last_name" gorm:"not null"`
+	Email       string         `json:"email" gorm:"not null"`
+	Mobile      string         `json:"mobile"`
 	Name        string         `json:"name" gorm:"not null"`
-	Role        string         `json:"role" gorm:"not null;default:'admin'"` // admin, super_admin, saas_admin
-	Active      bool           `json:"active" gorm:"default:true"`
-	LastLoginAt *time.Time     `json:"last_login_at"`
+	Role        string         `json:"role" gorm:"not null;default:'admin'"`
+	Permissions []string       `json:"permissions" gorm:"serializer:json"`
+	Department  string         `json:"department" gorm:"default:'general'"`
+	InvitedByID uuid.UUID      `json:"invited_by_id" gorm:"type:uuid;not null"`
+	Token       string         `json:"-" gorm:"uniqueIndex;not null"`
+	ExpiresAt   time.Time      `json:"expires_at" gorm:"not null"`
+	AcceptedAt  *time.Time     `json:"accepted_at"`
+	Status      string         `json:"status" gorm:"not null;default:'pending'"` // pending, accepted, expired, revoked
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
 	DeletedAt   gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 
 	// Relations
-	AuditLogs []AuditLog `json:"audit_logs,omitempty" gorm:"foreignKey:AdminUserID"`
+	InvitedBy *AdminUser `json:"invited_by,omitempty" gorm:"foreignKey:InvitedByID"`
+}
+
+// AdminActivityLog tracks admin user activities (logins, actions, page views)
+type AdminActivityLog struct {
+	ID           uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	AdminUserID  uuid.UUID `json:"admin_user_id" gorm:"type:uuid;not null;index"`
+	ActivityType string    `json:"activity_type" gorm:"not null;index"` // login, logout, action, page_view
+	Description  string    `json:"description"`
+	IPAddress    string    `json:"ip_address"`
+	UserAgent    string    `json:"user_agent"`
+	Metadata     string    `json:"metadata" gorm:"type:text"` // JSON
+	CreatedAt    time.Time `json:"created_at"`
+
+	// Relations
+	AdminUser *AdminUser `json:"admin_user,omitempty" gorm:"foreignKey:AdminUserID"`
 }
 
 // AuditLog represents audit trail for admin actions
@@ -441,4 +484,124 @@ type Sale struct {
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
+}
+
+// Admin Team Management DTOs
+
+type CreateAdminUserRequest struct {
+	Email       string   `json:"email" binding:"required,email"`
+	Mobile      string   `json:"mobile" binding:"required"`
+	FirstName   string   `json:"first_name" binding:"required"`
+	LastName    string   `json:"last_name" binding:"required"`
+	Role        string   `json:"role" binding:"required,oneof=admin super_admin saas_admin"`
+	Permissions []string `json:"permissions"`
+	Department  string   `json:"department"`
+}
+
+type UpdateAdminUserRequest struct {
+	FirstName   *string  `json:"first_name"`
+	LastName    *string  `json:"last_name"`
+	Email       *string  `json:"email" binding:"omitempty,email"`
+	Role        *string  `json:"role" binding:"omitempty,oneof=admin super_admin saas_admin"`
+	Permissions []string `json:"permissions"`
+	Department  *string  `json:"department"`
+	Active      *bool    `json:"active"`
+	AvatarURL   *string  `json:"avatar_url"`
+}
+
+type InviteAdminRequest struct {
+	Email       string   `json:"email" binding:"required,email"`
+	Mobile      string   `json:"mobile"`
+	Name        string   `json:"name" binding:"required"`
+	Role        string   `json:"role" binding:"required,oneof=admin super_admin saas_admin"`
+	Permissions []string `json:"permissions"`
+	Department  string   `json:"department"`
+}
+
+type AcceptInvitationRequest struct {
+	Token  string `json:"token" binding:"required"`
+	Mobile string `json:"mobile" binding:"required"`
+}
+
+type UpdateProfileRequest struct {
+	FirstName *string `json:"first_name"`
+	LastName  *string `json:"last_name"`
+	AvatarURL *string `json:"avatar_url"`
+}
+
+type AdminUserResponse struct {
+	ID          uuid.UUID  `json:"id"`
+	Email       string     `json:"email"`
+	Mobile      string     `json:"mobile"`
+	FirstName   string     `json:"first_name"`
+	LastName    string     `json:"last_name"`
+	Name        string     `json:"name"`
+	Role        string     `json:"role"`
+	Permissions []string   `json:"permissions"`
+	Department  string     `json:"department"`
+	AvatarURL   string     `json:"avatar_url"`
+	Active      bool       `json:"active"`
+	LastLoginAt *time.Time `json:"last_login_at"`
+	InvitedBy   *uuid.UUID `json:"invited_by"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+func AdminUserToResponse(u *AdminUser) *AdminUserResponse {
+	return &AdminUserResponse{
+		ID:          u.ID,
+		Email:       u.Email,
+		Mobile:      u.Mobile,
+		FirstName:   u.FirstName,
+		LastName:    u.LastName,
+		Name:        u.Name,
+		Role:        u.Role,
+		Permissions: u.Permissions,
+		Department:  u.Department,
+		AvatarURL:   u.AvatarURL,
+		Active:      u.Active,
+		LastLoginAt: u.LastLoginAt,
+		InvitedBy:   u.InvitedBy,
+		CreatedAt:   u.CreatedAt,
+		UpdatedAt:   u.UpdatedAt,
+	}
+}
+
+// Tenant Detail Response for SaaS admin
+type TenantDetailResponse struct {
+	ID               uuid.UUID            `json:"id"`
+	Name             string               `json:"name"`
+	Email            string               `json:"email"`
+	Status           string               `json:"status"`
+	IsActive         bool                 `json:"is_active"`
+	SubscriptionPlan string               `json:"subscription_plan"`
+	Subscription     *SubscriptionResponse `json:"subscription,omitempty"`
+	Usage            *TenantUsageResponse `json:"usage,omitempty"`
+	UserCount        int                  `json:"user_count"`
+	ShopCount        int                  `json:"shop_count"`
+	ProductCount     int                  `json:"product_count"`
+	RecentPayments   []Payment            `json:"recent_payments"`
+	RecentAuditLogs  []AuditLog           `json:"recent_audit_logs"`
+	CreatedAt        time.Time            `json:"created_at"`
+	LastActive       *time.Time           `json:"last_active"`
+}
+
+type TenantUsageResponse struct {
+	Locations     int     `json:"locations"`
+	MaxLocations  int     `json:"max_locations"`
+	LocationUsage float64 `json:"location_usage_percent"`
+	Users         int     `json:"users"`
+	MaxUsers      int     `json:"max_users"`
+	UserUsage     float64 `json:"user_usage_percent"`
+	Products      int     `json:"products"`
+	MaxProducts   int     `json:"max_products"`
+	ProductUsage  float64 `json:"product_usage_percent"`
+}
+
+type TimelineEvent struct {
+	ID        uuid.UUID              `json:"id"`
+	Type      string                 `json:"type"` // created, subscription_change, payment, alert
+	Title     string                 `json:"title"`
+	Details   map[string]interface{} `json:"details"`
+	CreatedAt time.Time              `json:"created_at"`
 }

@@ -126,9 +126,9 @@ func (v *Validator) Phone(phone, field string) {
 		return // Skip validation for empty values
 	}
 
-	phoneRegex := regexp.MustCompile(`^[+]?[\d\s\-\(\)]{10,15}$`)
+	phoneRegex := regexp.MustCompile(`^[+]?[\d]{10,15}$`)
 	if !phoneRegex.MatchString(phone) {
-		v.AddError(field, "must be a valid phone number")
+		v.AddError(field, "must be a valid phone number (no spaces allowed)")
 	}
 }
 

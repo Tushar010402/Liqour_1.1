@@ -9,17 +9,17 @@ import (
 // Tenant represents a company/organization in the multi-tenant system
 type Tenant struct {
 	BaseModel
-	Name        string    `json:"name" gorm:"not null;uniqueIndex"`
-	CompanyName string    `json:"company_name" gorm:"column:company_name;not null"`
-	Logo        string    `json:"logo"`
-	Phone       string    `json:"phone"`
-	Address     string    `json:"address"`
-	City        string    `json:"city"`
-	State       string    `json:"state"`
-	Country     string    `json:"country"`
-	PostalCode  string    `json:"postal_code" gorm:"column:postal_code"`
+	Name        string    `json:"name" gorm:"type:text;not null"`
+	CompanyName string    `json:"company_name" gorm:"type:varchar(255);not null"`
+	Logo        string    `json:"logo,omitempty" gorm:"type:varchar(255)"`
+	Phone       string    `json:"phone,omitempty" gorm:"type:varchar(20)"`
+	Address     string    `json:"address,omitempty" gorm:"type:text"`
+	City        string    `json:"city,omitempty" gorm:"type:varchar(100)"`
+	State       string    `json:"state,omitempty" gorm:"type:varchar(100)"`
+	Country     string    `json:"country,omitempty" gorm:"type:varchar(100)"`
+	PostalCode  string    `json:"postal_code,omitempty" gorm:"type:varchar(20)"`
 	IsActive    bool      `json:"is_active" gorm:"default:true"`
-	OnboardedAt time.Time `json:"onboarded_at" gorm:"column:onboarded_at;default:now()"`
+	OnboardedAt time.Time `json:"onboarded_at" gorm:"default:now()"`
 
 	// Relationships
 	Shops []Shop `json:"shops,omitempty" gorm:"foreignKey:TenantID"`
@@ -52,7 +52,7 @@ type Salesman struct {
 	User             *User     `json:"user,omitempty" gorm:"foreignKey:UserID"`
 	ShopID           uuid.UUID `json:"shop_id" gorm:"type:uuid;not null"`
 	Shop             *Shop     `json:"shop,omitempty" gorm:"foreignKey:ShopID"`
-	EmployeeID       string    `json:"employee_id" gorm:"unique"`
+	EmployeeID       string    `json:"employee_id"`
 	Name             string    `json:"name" gorm:"not null"`
 	Phone            string    `json:"phone"`
 	Address          string    `json:"address"`

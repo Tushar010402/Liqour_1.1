@@ -77,16 +77,19 @@ func (c *SaaSBrandClient) doRequestWithRetry(req *http.Request) (*http.Response,
 
 // Brand template structures from SaaS service
 type SaaSBrandTemplate struct {
-	ID            uuid.UUID               `json:"id"`
-	Name          string                  `json:"name"`
-	Description   string                  `json:"description"`
-	Picture       string                  `json:"picture"`
-	IsActive      bool                    `json:"is_active"`
-	SortOrder     int                     `json:"sort_order"`
-	BrandVariants []SaaSBrandVariant      `json:"brand_variants,omitempty"`
-	IsOnboarded   bool                    `json:"is_onboarded"` // True if any variant is onboarded for tenant
-	CreatedAt     interface{}             `json:"created_at"`
-	UpdatedAt     interface{}             `json:"updated_at"`
+	ID                    uuid.UUID          `json:"id"`
+	Name                  string             `json:"name"`
+	DisplayName           string             `json:"display_name"`
+	DisplayNameBoldStart  *int               `json:"display_name_bold_start,omitempty"`
+	DisplayNameBoldLength *int               `json:"display_name_bold_length,omitempty"`
+	Description           string             `json:"description"`
+	Picture               string             `json:"picture"`
+	IsActive              bool               `json:"is_active"`
+	SortOrder             int                `json:"sort_order"`
+	BrandVariants         []SaaSBrandVariant `json:"brand_variants,omitempty"`
+	IsOnboarded           bool               `json:"is_onboarded"` // Whether this brand is already onboarded by the tenant
+	CreatedAt             interface{}        `json:"created_at"`
+	UpdatedAt             interface{}        `json:"updated_at"`
 }
 
 type SaaSBrandVariant struct {
@@ -106,7 +109,7 @@ type SaaSBrandVariant struct {
 	HSNCode        string           `json:"hsn_code"`
 	IsActive       bool             `json:"is_active"`
 	SortOrder      int              `json:"sort_order"`
-	IsOnboarded    bool             `json:"is_onboarded"` // True if this variant exists in tenant's products
+	IsOnboarded    bool             `json:"is_onboarded"` // Whether this variant is already onboarded by the tenant
 	Category       *SaaSCategory    `json:"category,omitempty"`
 	Subcategory    *SaaSSubcategory `json:"subcategory,omitempty"`
 	CreatedAt      interface{}      `json:"created_at"`
@@ -128,6 +131,17 @@ type SaaSSubcategory struct {
 	CategoryID  uuid.UUID   `json:"category_id"`
 	Name        string      `json:"name"`
 	Description string      `json:"description"`
+	IsActive    bool        `json:"is_active"`
+	SortOrder   int         `json:"sort_order"`
+	CreatedAt   interface{} `json:"created_at"`
+	UpdatedAt   interface{} `json:"updated_at"`
+}
+
+type SaaSCategorySize struct {
+	ID          uuid.UUID   `json:"id"`
+	CategoryID  uuid.UUID   `json:"category_id"`
+	SizeName    string      `json:"size_name"`
+	DisplayName string      `json:"display_name"`
 	IsActive    bool        `json:"is_active"`
 	SortOrder   int         `json:"sort_order"`
 	CreatedAt   interface{} `json:"created_at"`
@@ -168,7 +182,7 @@ func (c *SaaSBrandClient) GetAllBrandTemplates(includeVariants bool) ([]SaaSBran
 
 // GetBrandTemplate fetches a specific brand template by ID
 func (c *SaaSBrandClient) GetBrandTemplate(brandID uuid.UUID) (*SaaSBrandTemplate, error) {
-	url := fmt.Sprintf("%s/api/internal/brands/%s", c.baseURL, brandID.String())
+	url := fmt.Sprintf("%s/api/internal/brands/%s?include_variants=true", c.baseURL, brandID.String())
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -251,6 +265,42 @@ func (c *SaaSBrandClient) GetSubcategories() ([]SaaSSubcategory, error) {
 
 	var response struct {
 		Data []SaaSSubcategory `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return response.Data, nil
+}
+
+// GetCategorySizes fetches all category sizes from SaaS service
+func (c *SaaSBrandClient) GetCategorySizes(categoryID *uuid.UUID) ([]SaaSCategorySize, error) {
+	url := fmt.Sprintf("%s/api/internal/brands/category-sizes", c.baseURL)
+
+	// Add category filter if provided
+	if categoryID != nil {
+		url = fmt.Sprintf("%s?category_id=%s", url, categoryID.String())
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch category sizes: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("SaaS service returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response struct {
+		Data []SaaSCategorySize `json:"data"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {

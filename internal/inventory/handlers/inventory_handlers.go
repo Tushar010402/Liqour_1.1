@@ -2,11 +2,7 @@ package handlers
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/liquorpro/go-backend/internal/inventory/services"
-	"github.com/liquorpro/go-backend/pkg/shared/utils"
+	"github.com/liquorpro/go-backend/pkg/shared/models"
 )
 
 type InventoryHandlers struct {
@@ -25,6 +21,10 @@ type InventoryHandlers struct {
 	tenantBrandService     *services.TenantBrandService
 	brandOnboardingHandler *BrandOnboardingHandler
 	brandCreationHandler   *BrandCreationHandler
+	bulkImportHandler      *BulkImportHandler
+	smartPurchaseService   *services.SmartPurchaseService
+	smartStockSetupService *services.SmartStockSetupService
+	smartStockJobService   *services.SmartStockJobService
 }
 
 func NewInventoryHandlers(
@@ -35,6 +35,10 @@ func NewInventoryHandlers(
 	tenantBrandService *services.TenantBrandService,
 	brandOnboardingHandler *BrandOnboardingHandler,
 	brandCreationHandler *BrandCreationHandler,
+	bulkImportHandler *BulkImportHandler,
+	smartPurchaseService *services.SmartPurchaseService,
+	smartStockSetupService *services.SmartStockSetupService,
+	smartStockJobService *services.SmartStockJobService,
 ) *InventoryHandlers {
 	return &InventoryHandlers{
 		productService:         productService,
@@ -44,6 +48,10 @@ func NewInventoryHandlers(
 		tenantBrandService:     tenantBrandService,
 		brandOnboardingHandler: brandOnboardingHandler,
 		brandCreationHandler:   brandCreationHandler,
+		bulkImportHandler:      bulkImportHandler,
+		smartPurchaseService:   smartPurchaseService,
+		smartStockSetupService: smartStockSetupService,
+		smartStockJobService:   smartStockJobService,
 	}
 }
 
@@ -96,6 +104,56 @@ func (h *InventoryHandlers) CreateProduct(c *gin.Context) {
 	c.JSON(http.StatusCreated, product)
 }
 
+// GetProductSizes returns distinct product sizes with counts
+// Supports both single category_id and multiple category_ids (comma-separated)
+func (h *InventoryHandlers) GetProductSizes(c *gin.Context) {
+	tenantID, exists := c.Get("tenant_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
+		return
+	}
+
+	tenantUUID, err := uuid.Parse(tenantID.(string))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
+		return
+	}
+
+	// Parse category_ids (comma-separated, takes priority) or single category_id
+	var categoryIDs []uuid.UUID
+	if idsStr := c.Query("category_ids"); idsStr != "" {
+		for _, idStr := range strings.Split(idsStr, ",") {
+			idStr = strings.TrimSpace(idStr)
+			if parsed, err := uuid.Parse(idStr); err == nil {
+				categoryIDs = append(categoryIDs, parsed)
+			}
+		}
+	} else if catStr := c.Query("category_id"); catStr != "" {
+		if parsed, err := uuid.Parse(catStr); err == nil {
+			categoryIDs = append(categoryIDs, parsed)
+		}
+	}
+
+	// Parse shop_id for shop-scoped size counts
+	var shopIDArg []uuid.UUID
+	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
+		if parsed, err := uuid.Parse(shopIDStr); err == nil {
+			shopIDArg = append(shopIDArg, parsed)
+		}
+	}
+
+	sizes, err := h.productService.GetProductSizes(c.Request.Context(), tenantUUID, categoryIDs, shopIDArg...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch product sizes"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"sizes":   sizes,
+	})
+}
+
 func (h *InventoryHandlers) GetProducts(c *gin.Context) {
 	tenantID, exists := c.Get("tenant_id")
 	if !exists {
@@ -111,83 +169,75 @@ func (h *InventoryHandlers) GetProducts(c *gin.Context) {
 
 	// Parse query parameters
 	categoryIDStr := c.Query("category_id")
-	categoryIDsStr := c.Query("category_ids") // NEW: comma-separated list
+	categoryIDsStr := c.Query("category_ids")
 	brandIDStr := c.Query("brand_id")
-	shopIDStr := c.Query("shop_id")
-	sizeFilter := c.Query("size")
 	search := c.Query("search")
+	sizeFilter := c.Query("size")
 	includeInactive := c.Query("include_inactive") == "true"
 
-	// Parse pagination - support both page-based and offset-based for compatibility
 	limitStr := c.DefaultQuery("limit", "50")
-	pageStr := c.Query("page")
 	offsetStr := c.DefaultQuery("offset", "0")
 
 	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit <= 0 {
+	if err != nil || limit <= 0 || limit > 500 {
 		limit = 50
-	} else if limit > 500 {
-		limit = 500 // Allow higher limit for bulk loading (e.g., DailySalesEntry)
 	}
 
-	var offset int
-	if pageStr != "" {
-		// If page is provided, calculate offset from page (Flutter sends page parameter)
-		page, pageErr := strconv.Atoi(pageStr)
-		if pageErr != nil || page < 1 {
-			page = 1
-		}
-		offset = (page - 1) * limit
-	} else {
-		// Otherwise use offset directly (for backwards compatibility)
-		offset, err = strconv.Atoi(offsetStr)
-		if err != nil || offset < 0 {
-			offset = 0
-		}
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		offset = 0
 	}
 
-	var categoryID, brandID, shopID *uuid.UUID
+	var categoryID, brandID *uuid.UUID
 	var categoryIDs []uuid.UUID
 
-	// Parse multiple category_ids first (takes precedence)
+	// Parse category_ids (comma-separated, takes priority over single category_id)
 	if categoryIDsStr != "" {
-		for _, catIDStr := range strings.Split(categoryIDsStr, ",") {
-			catIDStr = strings.TrimSpace(catIDStr)
-			if catUUID, err := uuid.Parse(catIDStr); err == nil {
-				categoryIDs = append(categoryIDs, catUUID)
+		for _, idStr := range strings.Split(categoryIDsStr, ",") {
+			idStr = strings.TrimSpace(idStr)
+			if parsed, err := uuid.Parse(idStr); err == nil {
+				categoryIDs = append(categoryIDs, parsed)
 			}
 		}
-	} else if categoryIDStr != "" {
-		// Fallback to single category_id
+	}
+
+	if categoryIDStr != "" {
 		if parsed, err := uuid.Parse(categoryIDStr); err == nil {
 			categoryID = &parsed
 		}
 	}
-
 	if brandIDStr != "" {
 		if parsed, err := uuid.Parse(brandIDStr); err == nil {
 			brandID = &parsed
 		}
 	}
+
+	// Parse shop_id for shop-scoped product filtering
+	shopIDStr := c.Query("shop_id")
+	var shopID *uuid.UUID
 	if shopIDStr != "" {
 		if parsed, err := uuid.Parse(shopIDStr); err == nil {
 			shopID = &parsed
 		}
 	}
 
-	// Enforce shop restriction for salesmen
-	shopID, err = h.enforceShopFilter(c, shopID, tenantUUID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
+	// Parse owner_shop_id — ownership-scoped picker (products this shop owns,
+	// regardless of stock). Used by the Stock Setup Swap dialog so managers
+	// can only pick the record-shop's own SKUs (prevents cross-shop links).
+	ownerShopIDStr := c.Query("owner_shop_id")
+	var ownerShopID *uuid.UUID
+	if ownerShopIDStr != "" {
+		if parsed, err := uuid.Parse(ownerShopIDStr); err == nil {
+			ownerShopID = &parsed
+		}
 	}
 
 	filters := services.ProductFilters{
 		Search:      search,
 		Size:        sizeFilter,
+		CategoryIDs: categoryIDs,
 		Page:        offset/limit + 1,
 		PageSize:    limit,
-		CategoryIDs: categoryIDs,
 	}
 	if categoryID != nil {
 		filters.CategoryID = *categoryID
@@ -198,9 +248,22 @@ func (h *InventoryHandlers) GetProducts(c *gin.Context) {
 	if shopID != nil {
 		filters.ShopID = *shopID
 	}
+	if ownerShopID != nil {
+		filters.OwnerShopID = *ownerShopID
+	}
 	if !includeInactive {
 		active := true
 		filters.IsActive = &active
+	}
+	// Admin escape hatch to see zero-stock duplicates (off by default — see
+	// ProductFilters.IncludeZeroStock comment for rationale).
+	if v := strings.ToLower(c.Query("include_zero_stock")); v == "true" || v == "1" || v == "yes" {
+		filters.IncludeZeroStock = true
+	}
+	// Smart-picker mode: rank products by recent-purchase / in-stock tiers
+	// instead of hiding the catalog. Only meaningful with shop_id.
+	if v := strings.ToLower(c.Query("purchase_priority")); v == "true" || v == "1" || v == "yes" {
+		filters.PurchasePriority = true
 	}
 
 	response, err := h.productService.GetProducts(c.Request.Context(), tenantUUID, filters)
@@ -214,6 +277,12 @@ func (h *InventoryHandlers) GetProducts(c *gin.Context) {
 		"total":    response.TotalCount,
 		"limit":    limit,
 		"offset":   offset,
+		// v1.0.299 — SUM(stocks.quantity) over the full filtered set at this
+		// shop, independent of pagination. Flutter Inventory header reads
+		// this so the visible "X pcs" matches the approved record total
+		// regardless of which page is loaded. Service computes it in a
+		// single SQL aggregate (see product_service.go).
+		"total_stock": response.TotalStock,
 	})
 }
 
@@ -254,82 +323,47 @@ func (h *InventoryHandlers) UpdateProduct(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid product ID",
-			"code":  "INVALID_PRODUCT_ID",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product ID"})
 		return
 	}
 
 	var req services.ProductRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "Invalid request data",
-			"code":    "INVALID_REQUEST",
-			"details": err.Error(),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	tenantID, exists := c.Get("tenant_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "Tenant ID not found",
-			"code":  "MISSING_TENANT_ID",
-		})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
 		return
 	}
 
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "User ID not found",
-			"code":  "MISSING_USER_ID",
-		})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
 		return
 	}
 
 	tenantUUID, err := uuid.Parse(tenantID.(string))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid tenant ID",
-			"code":  "INVALID_TENANT_ID",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
 	}
 
 	_, err = uuid.Parse(userID.(string))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid user ID",
-			"code":  "INVALID_USER_ID",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
 
 	product, err := h.productService.UpdateProduct(c.Request.Context(), id, tenantUUID, req)
 	if err != nil {
-		statusCode := http.StatusInternalServerError
-		errorCode := "UPDATE_FAILED"
-
-		if strings.Contains(err.Error(), "not found") {
-			statusCode = http.StatusNotFound
-			errorCode = "PRODUCT_NOT_FOUND"
-		} else if strings.Contains(err.Error(), "deleted") {
-			statusCode = http.StatusGone
-			errorCode = "PRODUCT_DELETED"
-		} else if strings.Contains(err.Error(), "SKU already exists") {
-			statusCode = http.StatusConflict
-			errorCode = "DUPLICATE_SKU"
+		if err.Error() == "product not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
 		}
-
-		c.JSON(statusCode, gin.H{
-			"error":      "Failed to update product",
-			"code":       errorCode,
-			"details":    err.Error(),
-			"tenant_id":  tenantUUID.String(),
-			"product_id": id.String(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -394,25 +428,19 @@ func (h *InventoryHandlers) GetStocks(c *gin.Context) {
 		}
 	}
 
-	// Enforce shop restriction for salesmen
-	shopID, err = h.enforceShopFilter(c, shopID, tenantUUID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-
 	lowStock := c.Query("low_stock") == "true"
 
 	var stocks []*services.StockResponse
 
 	if lowStock {
+		// Get low stock items, optionally filtered by shop
 		stocks, err = h.stockService.GetLowStockItems(c.Request.Context(), tenantUUID, shopID)
-	} else if shopID != nil {
-		filters := services.StockFilters{}
-		stocks, err = h.stockService.GetStockByShop(c.Request.Context(), *shopID, tenantUUID, filters)
 	} else {
-		stocks, err = h.stockService.GetLowStockItems(c.Request.Context(), tenantUUID, nil)
+		// Get all stocks, optionally filtered by shop
+		filters := services.StockFilters{}
+		stocks, err = h.stockService.GetAllStocks(c.Request.Context(), tenantUUID, shopID, filters)
 	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -431,7 +459,7 @@ func (h *InventoryHandlers) GetStockMovements(c *gin.Context) {
 		return
 	}
 
-	tenantUUID, err := uuid.Parse(tenantID.(string))
+	_, err := uuid.Parse(tenantID.(string))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
@@ -441,7 +469,7 @@ func (h *InventoryHandlers) GetStockMovements(c *gin.Context) {
 	offsetStr := c.DefaultQuery("offset", "0")
 
 	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit <= 0 || limit > 100 {
+	if err != nil || limit <= 0 || limit > 500 {
 		limit = 50
 	}
 
@@ -450,45 +478,9 @@ func (h *InventoryHandlers) GetStockMovements(c *gin.Context) {
 		offset = 0
 	}
 
-	// Parse optional filters
-	var shopID *uuid.UUID
-	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
-		if parsed, err := uuid.Parse(shopIDStr); err == nil {
-			shopID = &parsed
-		}
-	}
-
-	// Enforce shop restriction for salesmen
-	shopID, err = h.enforceShopFilter(c, shopID, tenantUUID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-
-	var productID *uuid.UUID
-	if productIDStr := c.Query("product_id"); productIDStr != "" {
-		if parsed, err := uuid.Parse(productIDStr); err == nil {
-			productID = &parsed
-		}
-	}
-
-	movementType := c.Query("movement_type") // purchase, sale, adjustment, transfer
-
-	// Get stock movements from service
-	movements, total, err := h.stockService.GetStockMovements(
-		c.Request.Context(),
-		tenantUUID,
-		shopID,
-		productID,
-		movementType,
-		limit,
-		offset,
-	)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get stock movements"})
-		return
-	}
+	// For simplicity, return empty movements as this requires complex query implementation
+	movements := []*services.StockHistoryResponse{}
+	total := int64(0)
 
 	c.JSON(http.StatusOK, gin.H{
 		"movements": movements,
@@ -499,16 +491,6 @@ func (h *InventoryHandlers) GetStockMovements(c *gin.Context) {
 }
 
 func (h *InventoryHandlers) AdjustStock(c *gin.Context) {
-	// Role validation - backup security check
-	role := strings.ToLower(c.GetString("role"))
-	if role != "admin" && role != "manager" {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": "Access denied: Only managers and admins can adjust stock",
-			"code":  "FORBIDDEN_ROLE",
-		})
-		return
-	}
-
 	var req services.StockAdjustmentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -541,6 +523,15 @@ func (h *InventoryHandlers) AdjustStock(c *gin.Context) {
 
 	stock, err := h.stockService.AdjustStock(c.Request.Context(), req, tenantUUID, userUUID)
 	if err != nil {
+		errMsg := err.Error()
+		// Check if it's a SHOP_NOT_FOUND error
+		if len(errMsg) >= 14 && errMsg[:14] == "SHOP_NOT_FOUND" {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": errMsg[16:], // Skip "SHOP_NOT_FOUND: " prefix
+				"code":  "SHOP_NOT_FOUND",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -551,17 +542,63 @@ func (h *InventoryHandlers) AdjustStock(c *gin.Context) {
 	})
 }
 
-func (h *InventoryHandlers) TransferStock(c *gin.Context) {
-	// Role validation - backup security check
-	role := strings.ToLower(c.GetString("role"))
-	if role != "admin" && role != "manager" {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": "Access denied: Only managers and admins can transfer stock",
-			"code":  "FORBIDDEN_ROLE",
-		})
+// UpdateStockByBrand updates stock for an existing brand identified by brand name and size
+// This endpoint is specifically for OCR flows where we need to update stock for existing brands
+func (h *InventoryHandlers) UpdateStockByBrand(c *gin.Context) {
+	var req services.BrandStockUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	// Get tenant ID from header
+	tenantIDStr := c.GetHeader("X-Tenant-ID")
+	if tenantIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "X-Tenant-ID header is required"})
+		return
+	}
+
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID format"})
+		return
+	}
+
+	// Get user ID from header
+	userIDStr := c.GetHeader("X-User-ID")
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "X-User-ID header is required"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+
+	stock, err := h.stockService.UpdateStockByBrandAndSize(c.Request.Context(), req, tenantID, userID)
+	if err != nil {
+		// Check if product was not found
+		errMsg := err.Error()
+		if len(errMsg) >= len("product not found") && errMsg[:len("product not found")] == "product not found" {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": errMsg,
+				"code":  "PRODUCT_NOT_FOUND",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("Stock updated successfully for %s %s", req.BrandName, req.Size),
+		"stock":   stock,
+	})
+}
+
+func (h *InventoryHandlers) TransferStock(c *gin.Context) {
 	var req services.StockTransferRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -621,13 +658,6 @@ func (h *InventoryHandlers) CreatePurchase(c *gin.Context) {
 		return
 	}
 
-	// Get user role for auto-approval logic
-	userRole, _ := c.Get("role")
-	roleStr := ""
-	if userRole != nil {
-		roleStr = userRole.(string)
-	}
-
 	tenantUUID, err := uuid.Parse(tenantID.(string))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
@@ -640,18 +670,19 @@ func (h *InventoryHandlers) CreatePurchase(c *gin.Context) {
 		return
 	}
 
-	// Enforce shop restriction for salesmen - they can only create purchases for their shop
-	shopID, err := h.enforceShopFilter(c, &req.ShopID, tenantUUID)
+	purchase, err := h.purchaseService.CreatePurchase(c.Request.Context(), req, tenantUUID, userUUID)
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	if shopID != nil {
-		req.ShopID = *shopID
-	}
-
-	purchase, err := h.purchaseService.CreatePurchase(c.Request.Context(), req, tenantUUID, userUUID, roleStr)
-	if err != nil {
+		// Purchase name gate: products with unverified raw names must be
+		// photo-verified first. 409 + structured list so the app can route
+		// the operator straight to the inventory photo-verify step.
+		if unvErr, ok := err.(*services.PurchaseNameUnverifiedError); ok {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":               unvErr.Error(),
+				"code":                "name_unverified",
+				"unverified_products": unvErr.Products,
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -672,28 +703,39 @@ func (h *InventoryHandlers) GetPurchases(c *gin.Context) {
 		return
 	}
 
-	shopIDStr := c.Query("shop_id")
 	status := c.Query("status")
 
-	var shopID *uuid.UUID
-	if shopIDStr != "" {
-		if parsed, err := uuid.Parse(shopIDStr); err == nil {
-			shopID = &parsed
+	filter := services.PurchaseListFilter{
+		Status:      status,
+		HasShortage: c.Query("has_shortage") == "1" || c.Query("has_shortage") == "true",
+	}
+	if v := c.Query("shop_id"); v != "" {
+		if parsed, err := uuid.Parse(v); err == nil {
+			filter.ShopID = &parsed
 		}
 	}
-
-	// Enforce shop restriction for salesmen
-	shopID, err = h.enforceShopFilter(c, shopID, tenantUUID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
+	if v := c.Query("vendor_id"); v != "" {
+		if parsed, err := uuid.Parse(v); err == nil {
+			filter.VendorID = &parsed
+		}
+	}
+	// from/to accept YYYY-MM-DD (date) — the service makes `to` inclusive.
+	if v := c.Query("from"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			filter.From = &t
+		}
+	}
+	if v := c.Query("to"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			filter.To = &t
+		}
 	}
 
 	limitStr := c.DefaultQuery("limit", "50")
 	offsetStr := c.DefaultQuery("offset", "0")
 
 	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit <= 0 || limit > 100 {
+	if err != nil || limit <= 0 || limit > 1000 {
 		limit = 50
 	}
 
@@ -702,10 +744,17 @@ func (h *InventoryHandlers) GetPurchases(c *gin.Context) {
 		offset = 0
 	}
 
-	purchases, total, err := h.purchaseService.GetPurchases(c.Request.Context(), tenantUUID, shopID, status, limit, offset)
+	purchases, total, err := h.purchaseService.GetPurchases(c.Request.Context(), tenantUUID, filter, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Aggregate over the FULL filtered set so the list header is accurate even
+	// when the current page is a slice of many purchases. Non-fatal on error.
+	summary, sErr := h.purchaseService.GetPurchasesSummaryData(c.Request.Context(), tenantUUID, filter)
+	if sErr != nil {
+		summary = services.PurchasesSummary{Count: total}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -713,6 +762,39 @@ func (h *InventoryHandlers) GetPurchases(c *gin.Context) {
 		"total":     total,
 		"limit":     limit,
 		"offset":    offset,
+		"summary":   summary,
+	})
+}
+
+func (h *InventoryHandlers) GetPurchasesSummary(c *gin.Context) {
+	tenantID, exists := c.Get("tenant_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
+		return
+	}
+
+	tenantUUID, err := uuid.Parse(tenantID.(string))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
+		return
+	}
+
+	// Get today's purchases summary
+	today := time.Now().Truncate(24 * time.Hour)
+
+	var result struct {
+		TotalAmount float64 `json:"total_amount"`
+		Count       int64   `json:"count"`
+	}
+
+	h.purchaseService.DB().Model(&models.StockPurchase{}).
+		Where("tenant_id = ? AND created_at >= ?", tenantUUID, today).
+		Select("COALESCE(SUM(total_amount), 0) as total_amount, COUNT(*) as count").
+		Scan(&result)
+
+	c.JSON(http.StatusOK, gin.H{
+		"total_amount": result.TotalAmount,
+		"count":        result.Count,
 	})
 }
 
@@ -790,147 +872,6 @@ func (h *InventoryHandlers) ReceivePurchase(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Purchase received successfully"})
 }
 
-// GetPendingApprovals returns purchases pending approval
-func (h *InventoryHandlers) GetPendingApprovals(c *gin.Context) {
-	tenantID, exists := c.Get("tenant_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
-		return
-	}
-
-	tenantUUID, err := uuid.Parse(tenantID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
-		return
-	}
-
-	// Parse optional shop_id filter
-	var shopID *uuid.UUID
-	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
-		parsed, err := uuid.Parse(shopIDStr)
-		if err == nil {
-			shopID = &parsed
-		}
-	}
-
-	// Parse pagination
-	limit := 50
-	offset := 0
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if parsed, err := strconv.Atoi(offsetStr); err == nil && parsed >= 0 {
-			offset = parsed
-		}
-	}
-
-	purchases, total, err := h.purchaseService.GetPendingApprovals(c.Request.Context(), tenantUUID, shopID, limit, offset)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"purchases": purchases,
-		"total":     total,
-		"limit":     limit,
-		"offset":    offset,
-	})
-}
-
-// ApprovePurchase approves a pending purchase and adds stock
-func (h *InventoryHandlers) ApprovePurchase(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid purchase ID"})
-		return
-	}
-
-	tenantID, exists := c.Get("tenant_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
-		return
-	}
-
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
-		return
-	}
-
-	tenantUUID, err := uuid.Parse(tenantID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
-		return
-	}
-
-	userUUID, err := uuid.Parse(userID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	purchase, err := h.purchaseService.ApprovePurchase(c.Request.Context(), id, tenantUUID, userUUID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, purchase)
-}
-
-// RejectPurchase rejects a pending purchase with a reason
-func (h *InventoryHandlers) RejectPurchase(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid purchase ID"})
-		return
-	}
-
-	var req services.RejectRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Reason is required"})
-		return
-	}
-
-	tenantID, exists := c.Get("tenant_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
-		return
-	}
-
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
-		return
-	}
-
-	tenantUUID, err := uuid.Parse(tenantID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
-		return
-	}
-
-	userUUID, err := uuid.Parse(userID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	purchase, err := h.purchaseService.RejectPurchase(c.Request.Context(), id, tenantUUID, userUUID, req.Reason)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, purchase)
-}
-
 // Category handlers
 func (h *InventoryHandlers) CreateCategory(c *gin.Context) {
 	var req services.CategoryRequest
@@ -987,22 +928,7 @@ func (h *InventoryHandlers) GetCategories(c *gin.Context) {
 
 	includeInactive := c.Query("include_inactive") == "true"
 
-	// Parse optional shop_id filter
-	var shopID *uuid.UUID
-	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
-		if parsed, err := uuid.Parse(shopIDStr); err == nil {
-			shopID = &parsed
-		}
-	}
-
-	// Enforce shop restriction for salesmen
-	shopID, err = h.enforceShopFilter(c, shopID, tenantUUID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-
-	categories, err := h.categoryService.GetCategoriesWithShopFilter(c.Request.Context(), tenantUUID, includeInactive, shopID)
+	categories, err := h.categoryService.GetCategories(c.Request.Context(), tenantUUID, includeInactive)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1836,12 +1762,32 @@ func (h *InventoryHandlers) GetCustomBrands(c *gin.Context) {
 	h.brandOnboardingHandler.GetCustomBrands(c)
 }
 
+func (h *InventoryHandlers) GetBrandCategories(c *gin.Context) {
+	h.brandOnboardingHandler.GetBrandCategories(c)
+}
+
+func (h *InventoryHandlers) GetBrandsByCategory(c *gin.Context) {
+	h.brandOnboardingHandler.GetBrandsByCategory(c)
+}
+
 func (h *InventoryHandlers) GetBrandMetadata(c *gin.Context) {
 	h.brandOnboardingHandler.GetBrandMetadata(c)
 }
 
-func (h *InventoryHandlers) RefreshBrandCache(c *gin.Context) {
-	h.brandOnboardingHandler.RefreshBrandCache(c)
+func (h *InventoryHandlers) GetSubcategoriesByCategory(c *gin.Context) {
+	h.brandOnboardingHandler.GetSubcategoriesByCategory(c)
+}
+
+func (h *InventoryHandlers) GetSaaSBrandCategories(c *gin.Context) {
+	h.brandOnboardingHandler.GetSaaSBrandCategories(c)
+}
+
+func (h *InventoryHandlers) GetSaaSBrandSubcategories(c *gin.Context) {
+	h.brandOnboardingHandler.GetSaaSBrandSubcategories(c)
+}
+
+func (h *InventoryHandlers) GetSaaSCategorySizes(c *gin.Context) {
+	h.brandOnboardingHandler.GetSaaSCategorySizes(c)
 }
 
 // Brand Creation delegation methods (delegate to brandCreationHandler)
@@ -1858,6 +1804,45 @@ func (h *InventoryHandlers) UpdateProductPricing(c *gin.Context) {
 	h.brandCreationHandler.UpdateProductPricing(c)
 }
 
+// v1.0.253 — Product photo+MRP change-request approval (delegated, mirrors
+// the Stock Setup approve/reject pattern).
+func (h *InventoryHandlers) ListProductChangeRequests(c *gin.Context) {
+	h.brandCreationHandler.ListProductChangeRequests(c)
+}
+
+func (h *InventoryHandlers) GetProductChangePendingCount(c *gin.Context) {
+	h.brandCreationHandler.GetProductChangePendingCount(c)
+}
+
+func (h *InventoryHandlers) GetProductChangeRequest(c *gin.Context) {
+	h.brandCreationHandler.GetProductChangeRequest(c)
+}
+
+func (h *InventoryHandlers) ApproveProductChange(c *gin.Context) {
+	h.brandCreationHandler.ApproveProductChange(c)
+}
+
+func (h *InventoryHandlers) RejectProductChange(c *gin.Context) {
+	h.brandCreationHandler.RejectProductChange(c)
+}
+
+// v1.0.344 — combined photo/name/MRP requests (grouped by batch_id).
+func (h *InventoryHandlers) ListPhotoChangeBatches(c *gin.Context) {
+	h.brandCreationHandler.ListPhotoChangeBatches(c)
+}
+
+func (h *InventoryHandlers) ApproveBatch(c *gin.Context) {
+	h.brandCreationHandler.ApproveBatch(c)
+}
+
+func (h *InventoryHandlers) RejectBatch(c *gin.Context) {
+	h.brandCreationHandler.RejectBatch(c)
+}
+
+func (h *InventoryHandlers) RevertProductChange(c *gin.Context) {
+	h.brandCreationHandler.RevertProductChange(c)
+}
+
 func (h *InventoryHandlers) GetProductsByBrand(c *gin.Context) {
 	h.brandCreationHandler.GetProductsByBrand(c)
 }
@@ -1870,15 +1855,58 @@ func (h *InventoryHandlers) CalculateUPDuty(c *gin.Context) {
 	h.brandCreationHandler.CalculateUPDuty(c)
 }
 
-// BatchValidateProducts validates multiple products and their stock levels in a single API call
-// This reduces N API calls (one per product) to just 1 batch call
-func (h *InventoryHandlers) BatchValidateProducts(c *gin.Context) {
-	var req services.BatchValidateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// Bulk Import delegation methods (delegate to bulkImportHandler)
 
+func (h *InventoryHandlers) DownloadImportTemplate(c *gin.Context) {
+	h.bulkImportHandler.DownloadTemplate(c)
+}
+
+func (h *InventoryHandlers) UploadAndValidateImport(c *gin.Context) {
+	h.bulkImportHandler.UploadAndValidate(c)
+}
+
+func (h *InventoryHandlers) ConfirmImport(c *gin.Context) {
+	h.bulkImportHandler.ConfirmImport(c)
+}
+
+func (h *InventoryHandlers) GetImportHistory(c *gin.Context) {
+	h.bulkImportHandler.GetImportHistory(c)
+}
+
+func (h *InventoryHandlers) GetImportStatus(c *gin.Context) {
+	h.bulkImportHandler.GetImportStatus(c)
+}
+
+func (h *InventoryHandlers) CancelImport(c *gin.Context) {
+	h.bulkImportHandler.CancelImport(c)
+}
+
+// OCR Auto-onboarding delegation methods (would delegate to autoOnboardHandler if we had it)
+// For now, these return not implemented
+
+func (h *InventoryHandlers) AutoOnboardFromOCR(c *gin.Context) {
+	// This would delegate to autoOnboardHandler once we integrate it
+	c.JSON(http.StatusNotImplemented, gin.H{
+		"error": "OCR auto-onboarding endpoint not yet integrated",
+		"message": "Please use manual brand onboarding for now",
+	})
+}
+
+func (h *InventoryHandlers) GetOCROnboardingSummary(c *gin.Context) {
+	// This would delegate to autoOnboardHandler once we integrate it
+	c.JSON(http.StatusNotImplemented, gin.H{
+		"error": "OCR onboarding summary endpoint not yet integrated",
+		"message": "Please use manual brand onboarding for now",
+	})
+}
+
+// Custom brand creation delegation method
+func (h *InventoryHandlers) CreateCustomBrand(c *gin.Context) {
+	h.brandOnboardingHandler.CreateCustomBrand(c)
+}
+
+// GetPurchaReportPreview returns a purchase report preview for a shop on a given date
+func (h *InventoryHandlers) GetPurchaReportPreview(c *gin.Context) {
 	tenantID, exists := c.Get("tenant_id")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
@@ -1891,289 +1919,35 @@ func (h *InventoryHandlers) BatchValidateProducts(c *gin.Context) {
 		return
 	}
 
-	result, err := h.productService.BatchValidateProducts(c.Request.Context(), tenantUUID, req)
+	shopIDStr := c.Query("shop_id")
+	if shopIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "shop_id is required"})
+		return
+	}
+
+	shopUUID, err := uuid.Parse(shopIDStr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate products"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shop ID"})
 		return
 	}
 
-	c.JSON(http.StatusOK, result)
-}
-
-// Helper methods for shop restriction
-
-// getSalesmanShopRestriction returns the shop_id that a user is restricted to.
-// Uses centralized shop access control from utils.IsShopRestricted
-// Returns nil for roles with full access (they can access all shops in their tenant).
-// Returns error if restricted user has no shop assigned.
-func (h *InventoryHandlers) getSalesmanShopRestriction(c *gin.Context, tenantID uuid.UUID) (*uuid.UUID, error) {
-	userRole := c.GetString("role")
-
-	// Use centralized shop access control
-	if !utils.IsShopRestricted(userRole) {
-		return nil, nil // No restriction for this role
-	}
-
-	userIDStr := c.GetString("user_id")
-	if userIDStr == "" {
-		return nil, fmt.Errorf("user ID not found in context")
-	}
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid user ID")
-	}
-
-	// Lookup salesman's assigned shop
-	shopID, err := h.stockService.GetSalesmanShopID(c.Request.Context(), userID, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get salesman shop: %w", err)
-	}
-
-	if shopID == nil {
-		return nil, fmt.Errorf("user has no shop assigned")
-	}
-
-	return shopID, nil
-}
-
-// enforceShopFilter applies shop restriction for salesmen.
-// For salesmen: overrides/enforces their assigned shop_id
-// For others: uses the provided filter shop_id (optional)
-func (h *InventoryHandlers) enforceShopFilter(c *gin.Context, filterShopID *uuid.UUID, tenantID uuid.UUID) (*uuid.UUID, error) {
-	restrictedShopID, err := h.getSalesmanShopRestriction(c, tenantID)
-	if err != nil {
-		return nil, err
-	}
-
-	if restrictedShopID != nil {
-		// Salesman - enforce their shop
-		// If they requested a different shop, reject
-		if filterShopID != nil && *filterShopID != *restrictedShopID {
-			return nil, fmt.Errorf("access denied: you can only access your assigned shop")
-		}
-		return restrictedShopID, nil
-	}
-
-	// Non-salesman - use provided filter (can be nil for all shops)
-	return filterShopID, nil
-}
-
-// GetProductsByIDs fetches multiple products by their IDs in a single request
-// POST /products/by-ids - fetches products by IDs with optional stock data
-// This is more efficient than N individual requests for N products
-func (h *InventoryHandlers) GetProductsByIDs(c *gin.Context) {
-	var req services.GetProductsByIDsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
+	dateStr := c.Query("date")
+	if dateStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date is required"})
 		return
 	}
 
-	// Validate IDs array
-	if len(req.IDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one product ID is required"})
-		return
-	}
+	viewMode := c.DefaultQuery("view_mode", "flat")
+	categoryFilter := c.DefaultQuery("category_filter", "all")
+	showOpening := c.DefaultQuery("show_opening", "false") == "true"
 
-	// Limit to prevent abuse
-	if len(req.IDs) > 500 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Maximum 500 product IDs allowed per request"})
-		return
-	}
-
-	tenantID, exists := c.Get("tenant_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
-		return
-	}
-
-	tenantUUID, err := uuid.Parse(tenantID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
-		return
-	}
-
-	// Enforce shop restriction for salesmen if shop_id is provided
-	var shopID *uuid.UUID
-	if req.ShopID != nil {
-		shopID = req.ShopID
-	}
-	shopID, err = h.enforceShopFilter(c, shopID, tenantUUID)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-
-	products, err := h.productService.GetProductsByIDs(c.Request.Context(), tenantUUID, req.IDs, shopID)
+	report, err := h.purchaseService.GetPurchaReportPreview(
+		c.Request.Context(), tenantUUID, shopUUID, dateStr, viewMode, categoryFilter, showOpening,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"products": products,
-		"total":    len(products),
-	})
-}
-
-// GetDistinctSizes returns all distinct sizes for a tenant, filtered by category and optionally shop
-// GET /sizes or /products/sizes - returns normalized sizes with product counts
-// Query params: category_id (optional - single category), category_ids (optional - comma-separated list), shop_id (optional - filters by shop stock)
-func (h *InventoryHandlers) GetDistinctSizes(c *gin.Context) {
-	tenantID, exists := c.Get("tenant_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
-		return
-	}
-
-	tenantUUID, err := uuid.Parse(tenantID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
-		return
-	}
-
-	// Parse category filters - supports both single category_id and multiple category_ids
-	var categoryIDs []uuid.UUID
-
-	// Check for comma-separated category_ids first
-	if catIDsStr := c.Query("category_ids"); catIDsStr != "" {
-		for _, catIDStr := range strings.Split(catIDsStr, ",") {
-			catIDStr = strings.TrimSpace(catIDStr)
-			if catUUID, err := uuid.Parse(catIDStr); err == nil {
-				categoryIDs = append(categoryIDs, catUUID)
-			}
-		}
-	} else if catIDStr := c.Query("category_id"); catIDStr != "" {
-		// Fallback to single category_id
-		if catUUID, err := uuid.Parse(catIDStr); err == nil {
-			categoryIDs = append(categoryIDs, catUUID)
-		}
-	}
-
-	// Parse optional shop filter - to show only sizes with stock in that shop
-	var shopID *uuid.UUID
-	if shopIDStr := c.Query("shop_id"); shopIDStr != "" {
-		if shopUUID, err := uuid.Parse(shopIDStr); err == nil {
-			shopID = &shopUUID
-		}
-	}
-
-	sizes, err := h.productService.GetDistinctSizesMultiCategory(c.Request.Context(), tenantUUID, categoryIDs, shopID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"sizes": sizes,
-		"total": len(sizes),
-	})
-}
-
-// UploadPurchaseReceipt handles receipt image uploads for stock purchases
-// POST /purchases/upload-receipt - multipart form with "receipt" file field
-func (h *InventoryHandlers) UploadPurchaseReceipt(c *gin.Context) {
-	tenantID, exists := c.Get("tenant_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
-		return
-	}
-
-	tenantUUID, err := uuid.Parse(tenantID.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
-		return
-	}
-
-	// Parse multipart form (max 10MB)
-	if err := c.Request.ParseMultipartForm(10 << 20); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "File too large or invalid form data. Max size: 10MB"})
-		return
-	}
-
-	// Get the file
-	file, header, err := c.Request.FormFile("receipt")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No receipt file provided. Use 'receipt' field name."})
-		return
-	}
-	defer file.Close()
-
-	// Validate file extension
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	allowedExts := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".pdf": true}
-	if !allowedExts[ext] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Allowed: jpg, jpeg, png, pdf"})
-		return
-	}
-
-	// Validate content type
-	contentType := header.Header.Get("Content-Type")
-	allowedTypes := map[string]bool{
-		"image/jpeg":      true,
-		"image/png":       true,
-		"application/pdf": true,
-	}
-	if !allowedTypes[contentType] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid content type. Allowed: image/jpeg, image/png, application/pdf"})
-		return
-	}
-
-	// Generate unique filename
-	fileUUID := uuid.New().String()
-	yearMonth := time.Now().Format("2006-01")
-	filename := fileUUID + ext
-
-	// Create directory path: /var/www/liquorpro/uploads/purchase-receipts/{tenant_id}/{YYYY-MM}/
-	uploadDir := filepath.Join("/var/www/liquorpro/uploads/purchase-receipts", tenantUUID.String(), yearMonth)
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		log.Printf("[UploadPurchaseReceipt] Failed to create directory %s: %v", uploadDir, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create upload directory"})
-		return
-	}
-
-	// Save file
-	destPath := filepath.Join(uploadDir, filename)
-	destFile, err := os.Create(destPath)
-	if err != nil {
-		log.Printf("[UploadPurchaseReceipt] Failed to create file %s: %v", destPath, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file"})
-		return
-	}
-	defer destFile.Close()
-
-	if _, err := io.Copy(destFile, file); err != nil {
-		log.Printf("[UploadPurchaseReceipt] Failed to copy file to %s: %v", destPath, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write file"})
-		return
-	}
-
-	// Generate URL - full URL for Flutter app to display
-	scheme := "https"
-	if c.Request.TLS == nil {
-		if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
-			scheme = proto
-		}
-	}
-	host := c.GetHeader("X-Forwarded-Host")
-	if host == "" {
-		host = c.Request.Host
-	}
-	// Default to production domain if host is internal
-	if host == "" || strings.Contains(host, "inventory") || strings.Contains(host, "localhost") || strings.Contains(host, "127.0.0.1") {
-		host = "new.v2.floelife.in"
-	}
-
-	relativePath := fmt.Sprintf("/uploads/purchase-receipts/%s/%s/%s", tenantUUID.String(), yearMonth, filename)
-	receiptURL := fmt.Sprintf("%s://%s%s", scheme, host, relativePath)
-
-	log.Printf("[UploadPurchaseReceipt] Successfully uploaded receipt: %s (size: %d bytes)", receiptURL, header.Size)
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":      true,
-		"receipt_url":  receiptURL,
-		"filename":     filename,
-		"content_type": contentType,
-		"size":         header.Size,
-	})
+	c.JSON(http.StatusOK, report)
 }
